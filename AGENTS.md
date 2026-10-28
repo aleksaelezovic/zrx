@@ -128,8 +128,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   comparisons. Keep nonmatching cases explicitly behavior/cross-only in the
   catalog; do not weaken checks to force equality or claim a general proof of
   semantic equivalence or performance.
-- Keep local validation independent of a CI provider. CI integration remains a
-  separate follow-up; no foreign runtime or emulator is required for cross checks.
+- Keep local validation independent of a CI provider. GitHub Actions is a thin
+  Linux wrapper around the documented checks; no foreign runtime or emulator is
+  required for cross checks. Do not duplicate the target catalog in CI.
 - Keep implemented API examples executable and tested. Clearly label design-only
   snippets as illustrative until implementation exists.
 - Format Zig code with the pinned compiler's `zig fmt` and run the documented

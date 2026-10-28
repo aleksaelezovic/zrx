@@ -1,0 +1,49 @@
+name: Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validation:
+    name: Linux validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # Keep toolchain selection tied to the repository's single version pin.
+      - name: Read pinned Zig version
+        id: zig_version
+        run: |
+          set -euo pipefail
+          version="$(cat .zigversion)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.zig_version.outputs.version }}
+          use-cache: false
+
+      - name: Verify Zig version
+        run: test "$(zig version)" = "$(cat .zigversion)"
+
+      # The build owns the cross-target catalog and scoped codegen comparisons.
+      # Only native tests execute here; cross builds do not run foreign binaries.
+      - name: Run full validation
+        run: zig build check
+
+      - name: Run ReleaseFast native tests
+        run: zig build test -Doptimize=ReleaseFast
