@@ -28,6 +28,16 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run unit tests, compile-fail checks, and the example");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    const try_pipe_tests = b.addTest(.{
+        .name = "try-pipe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/try_pipe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(try_pipe_tests).step);
     const sequence_tests = b.addTest(.{
         .name = "sequences",
         .root_module = b.createModule(.{
@@ -49,9 +59,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_example = b.addRunArtifact(example);
-    const example_step = b.step("example", "Run the value and sequence examples");
+    const example_step = b.step("example", "Run executable examples");
     example_step.dependOn(&run_example.step);
     test_step.dependOn(&run_example.step);
+    const try_pipe_example = b.addExecutable(.{
+        .name = "try-pipe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/try_pipe.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_try_pipe = b.addRunArtifact(try_pipe_example);
+    example_step.dependOn(&run_try_pipe.step);
+    test_step.dependOn(&run_try_pipe.step);
     const sequence_example = b.addExecutable(.{
         .name = "sequences",
         .root_module = b.createModule(.{
@@ -93,6 +115,12 @@ pub fn build(b: *std.Build) void {
         .{ "collect_wrong_element", "expected type 'u32', found 'bool'" },
         .{ "keep_if_implicit_unwrap", "expected type 'u32', found '?u32'" },
         .{ "invalid_operator_output", "expected type 'bool', found 'u32'" },
+        .{ "try_pipe_empty", "tryPipe: operator tuple must not be empty" },
+        .{ "try_pipe_nested", "tryPipe: stage 1 is a nested tuple; use a flat tuple or a named helper operator" },
+        .{ "try_pipe_invalid_stage", "tryPipe: stage 1 must provide Output(comptime Input: type) type and apply(self, value)" },
+        .{ "try_pipe_input_type", "expected type 'bool', found 'u32'" },
+        .{ "try_pipe_null_unwrap", "expected type 'u32', found '?u32'" },
+        .{ "try_pipe_bare_error_result", "tryPipe: bare error-set stage results are not supported; wrap error data in a struct" },
     };
     inline for (failures) |failure| {
         const check = b.addTest(.{

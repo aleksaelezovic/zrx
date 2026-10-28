@@ -33,4 +33,5 @@ pub const behavior_only_cases = [_][]const u8{"keep_if"};
 // identical LLVM bodies for imperative loops and lazy adapters.
 pub const cross_only = .{
     .{ .name = "sequences", .path = "tests/cross/sequences.zig" },
+    .{ .name = "try-pipe", .path = "tests/cross/try_pipe.zig" },
 };

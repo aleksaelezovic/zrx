@@ -26,6 +26,8 @@ with the same allocator. Views themselves do not allocate.
 See the [value example](examples/pipeline.zig), [sequence example](examples/sequences.zig),
 and [ownership and operator contracts](docs/sequences.md). Operators can receive
 runtime capabilities directly; errors remain explicit values.
+Use `tryPipe` to opt into [fail-fast composition](docs/try_pipe.md); see its
+[executable example](examples/try_pipe.zig).
 
 ## Toolchain and checks
 

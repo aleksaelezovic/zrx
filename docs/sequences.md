@@ -2,6 +2,7 @@
 
 All stages run synchronously. `pipe` passes one value between stages, including
 optional values and error unions; it never implicitly unwraps them or skips stages.
+For explicit error short-circuiting, see [fail-fast composition](try_pipe.md).
 
 | Operator | Input → output |
 |---|---|

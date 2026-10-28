@@ -14,6 +14,13 @@ pub fn pipe(value: anytype, operators: anytype) composition.PipelineOutput(@Type
     return composition.compose(value, operators, 0);
 }
 
+/// Explicit fail-fast composition. Always returns E!T, merging initial/stage
+/// error sets. Unwraps outer error unions, never optional or sequence elements.
+/// No rollback, resource cleanup, or scheduling is performed.
+pub fn tryPipe(value: anytype, operators: anytype) composition.TryPipelineOutput(@TypeOf(value), @TypeOf(operators)) {
+    return composition.tryCompose(value, operators, 0);
+}
+
 /// Construct an operator from one typed unary function or a nonempty, flat tuple
 /// of such functions. Tuple transforms compose left to right, not in parallel.
 pub fn map(comptime transforms: anytype) Map(transforms) {
@@ -24,6 +31,9 @@ pub fn map(comptime transforms: anytype) Map(transforms) {
 fn Map(comptime transforms: anytype) type {
     const functions = composition.functions(transforms, "map");
     return struct {
+        pub const map_group = composition.MapGroup;
+        pub const map_transforms = functions;
+
         pub fn Output(comptime Input: type) type {
             return composition.ComposedOutput(Input, @TypeOf(functions), 0);
         }

@@ -18,7 +18,8 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   into requirements or preserve the conversation as a transcript.
 - Current scope includes synchronous value composition, scalar `keepIf`, borrowed
   lazy slice sequences with `filter`/`each`, and explicit collection into caller
-  storage or through an allocator. Stop for review before adding reactive behavior.
+  storage or through an allocator, plus explicit fail-fast `tryPipe`. Stop for
+  review before adding reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
 
 ## Long-term direction
@@ -56,10 +57,10 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 - Zig has no ordinary user-defined variadic functions or declaration overloading.
   Express these forms through comptime/type-directed dispatch as appropriate.
 - Specify accepted inputs, output types, ordering, and edge cases before
-  implementing an operator. Reject empty operator tuples in `pipe` and empty
-  transformer tuples in `map` at comptime; an empty composition must not silently
-  mean identity. A named identity operator may be considered separately, but its
-  API is not yet decided.
+  implementing an operator. Reject empty operator tuples in `pipe`/`tryPipe`
+  and empty transformer tuples in `map` at comptime; an empty composition must
+  not silently mean identity. A named identity operator may be considered
+  separately, but its API is not yet decided.
 - Always reject nested operator and transformer tuples. Keep compositions flat;
   express reusable groups through named helper operator functions instead.
 - Transformers and predicates are comptime-known functions with one
@@ -67,7 +68,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   callbacks, function pointers, and callback closures are out of scope. Operator
   instances may carry explicit runtime capabilities or caller-owned state.
 - Follow Zig's normal function argument coercions. Preserve error unions as
-  values; do not implicitly unwrap them or propagate errors.
+  values in `pipe`; only explicit `tryPipe` checks outer error-union boundaries
+  and skips later stages on failure. Grouped/separate whole-value maps must stay
+  equivalent under either executor. Null and sequence-element errors remain data.
 - Validate statically knowable structural and type contracts at comptime.
   Diagnostics should identify the failing stage and expected contract where
   practical. Do not imply arbitrary runtime behavior can be proven at comptime.
@@ -85,6 +88,8 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   the returned slice. Keep storage choices explicit rather than using mode flags.
 - Effectful operators must receive runtime capabilities such as allocator or Io
   explicitly. The pure core requires neither Io nor implicit error propagation.
+- `tryPipe` provides no rollback or automatic cleanup of owned intermediates;
+  keep resource ownership in explicit caller/helper scopes.
 
 ## Implementation and performance
 
