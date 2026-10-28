@@ -28,6 +28,16 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run unit tests, compile-fail checks, and the example");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    const sequence_tests = b.addTest(.{
+        .name = "sequences",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/sequences.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(sequence_tests).step);
 
     const example = b.addExecutable(.{
         .name = "pipeline",
@@ -39,15 +49,28 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_example = b.addRunArtifact(example);
-    b.step("example", "Run the synchronous pipeline example").dependOn(&run_example.step);
+    const example_step = b.step("example", "Run the value and sequence examples");
+    example_step.dependOn(&run_example.step);
     test_step.dependOn(&run_example.step);
+    const sequence_example = b.addExecutable(.{
+        .name = "sequences",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/sequences.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_sequences = b.addRunArtifact(sequence_example);
+    example_step.dependOn(&run_sequences.step);
+    test_step.dependOn(&run_sequences.step);
 
     const failures = .{
         .{ "empty_pipe", "pipe: operator tuple must not be empty" },
         .{ "empty_map", "map: transformer tuple must not be empty" },
         .{ "nested_pipe", "pipe: stage 2 is a nested tuple; use a flat tuple or a named helper operator" },
         .{ "nested_map", "map: transformer 2 is a nested tuple; use a flat tuple or a named helper operator" },
-        .{ "invalid_stage", "pipe: stage 1 must be an operator returned by map or a named helper" },
+        .{ "invalid_stage", "pipe: stage 1 must provide Output(comptime Input: type) type and apply(self, value)" },
         .{ "invalid_transformer", "map: transformer 2 must be a function" },
         .{ "wrong_arity", "map: transformer 1 must have one explicitly typed runtime parameter and an explicit return type" },
         .{ "zero_arity", "map: transformer 1 must have one explicitly typed runtime parameter and an explicit return type" },
@@ -59,6 +82,17 @@ pub fn build(b: *std.Build) void {
         .{ "incompatible_stages", "expected type 'bool', found 'u32'" },
         .{ "implicit_error_unwrap", "expected type 'u32', found 'error{Zero}!u32'" },
         .{ "non_tuple_pipe", "pipe: expected an operator tuple" },
+        .{ "keep_if_non_bool", "keepIf: predicate must return bool" },
+        .{ "filter_non_bool", "filter: predicate must return bool" },
+        .{ "filter_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+        .{ "filter_incompatible_input", "expected type 'bool', found 'u32'" },
+        .{ "each_empty", "each: transformer tuple must not be empty" },
+        .{ "each_nested", "each: transformer 1 is a nested tuple; use a flat tuple or a named helper operator" },
+        .{ "each_incompatible_input", "expected type 'bool', found 'u32'" },
+        .{ "collect_const_buffer", "collectInto: expected a mutable slice or pointer-to-array" },
+        .{ "collect_wrong_element", "expected type 'u32', found 'bool'" },
+        .{ "keep_if_implicit_unwrap", "expected type 'u32', found '?u32'" },
+        .{ "invalid_operator_output", "expected type 'bool', found 'u32'" },
     };
     inline for (failures) |failure| {
         const check = b.addTest(.{
@@ -109,7 +143,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(fixture_tests).step);
 
     const cross_step = b.step("cross", "Compile real pipeline objects for every catalog target");
-    const codegen_step = b.step("codegen", "Compare direct and pipeline LLVM IR for every catalog target");
+    const codegen_step = b.step("codegen", "Compare selected direct and pipeline IR/assembly across the target matrix");
     for (codegen.targets) |triple| {
         const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable;
         const cross_target = b.resolveTargetQuery(query);
@@ -118,23 +152,28 @@ pub fn build(b: *std.Build) void {
             .target = cross_target,
             .optimize = .ReleaseFast,
         });
-        const object = b.addObject(.{
-            .name = b.fmt("pipelines-{s}", .{triple}),
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/codegen/cases.zig"),
-                .target = cross_target,
-                .optimize = .ReleaseFast,
-                .strip = true,
-                .imports = &.{.{ .name = "zrx", .module = cross_zrx }},
-            }),
-            .use_llvm = true,
-        });
-        // Emitting IR alone does not exercise the target object writer.
-        _ = object.getEmittedBin();
+        const object = addCrossObject(
+            b,
+            cross_zrx,
+            cross_target,
+            b.fmt("pipelines-{s}", .{triple}),
+            b.path("tests/codegen/cases.zig"),
+        );
         cross_step.dependOn(&object.step);
+        inline for (codegen.cross_only) |fixture| {
+            const coverage = addCrossObject(
+                b,
+                cross_zrx,
+                cross_target,
+                b.fmt("{s}-{s}", .{ fixture.name, triple }),
+                b.path(fixture.path),
+            );
+            cross_step.dependOn(&coverage.step);
+        }
         const comparison = b.addRunArtifact(checker);
         comparison.addArg(triple);
         comparison.addFileArg(object.getEmittedLlvmIr());
+        comparison.addFileArg(object.getEmittedAsm());
         comparison.step.name = b.fmt("compare pipeline codegen {s}", .{triple});
         codegen_step.dependOn(&comparison.step);
     }
@@ -145,4 +184,27 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(cross_step);
     check_step.dependOn(codegen_step);
     b.default_step.dependOn(test_step);
+}
+
+fn addCrossObject(
+    b: *std.Build,
+    zrx: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    name: []const u8,
+    source: std.Build.LazyPath,
+) *std.Build.Step.Compile {
+    const object = b.addObject(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = source,
+            .target = target,
+            .optimize = .ReleaseFast,
+            .strip = true,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+        .use_llvm = true,
+    });
+    // Emitting IR alone does not exercise the target object writer.
+    _ = object.getEmittedBin();
+    return object;
 }

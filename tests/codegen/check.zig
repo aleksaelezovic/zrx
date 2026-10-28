@@ -1,11 +1,12 @@
 const std = @import("std");
 const catalog = @import("catalog.zig");
+const assembly = @import("assembly.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 3) return error.ExpectedTargetAndLlvmIrPath;
+    if (args.len != 4) return error.ExpectedTargetAndLlvmIrAndAssemblyPaths;
     const target = args[1];
     const ir = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], arena, .limited(4 * 1024 * 1024));
 
@@ -29,6 +30,39 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("codegen {s}/{s}: direct = grouped = separate\n", .{ target, case });
     }
+
+    const assembly_text = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], arena, .limited(4 * 1024 * 1024));
+    inline for (catalog.assembly_cases) |case| {
+        if (!std.mem.startsWith(u8, target, case.arch ++ "-")) {
+            std.debug.print("codegen {s}/{s}: behavior/cross coverage; assembly comparison scoped to {s}\n", .{ target, case.name, case.arch });
+        } else {
+            const prefix: []const u8 = if (std.mem.indexOf(u8, target, "-macos") != null) "_" else "";
+            const direct_name = try std.fmt.allocPrint(arena, "{s}{s}_direct", .{ prefix, case.name });
+            const direct = assembly.normalizedFunction(arena, assembly_text, direct_name) catch |err| {
+                std.debug.print("assembly codegen {s}/{s}/direct: {s}\nAssembly: {s}\n", .{ target, case.name, @errorName(err), args[3] });
+                return err;
+            };
+            inline for (.{ "grouped", "separate" }) |form| {
+                const name = try std.fmt.allocPrint(arena, "{s}{s}_{s}", .{ prefix, case.name, form });
+                const actual = assembly.normalizedFunction(arena, assembly_text, name) catch |err| {
+                    std.debug.print("assembly codegen {s}/{s}/{s}: {s}\nAssembly: {s}\n", .{ target, case.name, form, @errorName(err), args[3] });
+                    return err;
+                };
+                if (!std.mem.eql(u8, direct, actual)) {
+                    std.debug.print(
+                        "assembly codegen {s}/{s}: {s} differs from direct\nAssembly: {s}\nDirect:\n{s}\n{s}:\n{s}\n",
+                        .{ target, case.name, form, args[3], direct, form, actual },
+                    );
+                    return error.AssemblyCodegenMismatch;
+                }
+            }
+            std.debug.print("assembly codegen {s}/{s}: direct = grouped = separate\n", .{ target, case.name });
+        }
+    }
+}
+
+test "assembly checker coverage" {
+    _ = assembly;
 }
 
 const Function = struct {

@@ -16,10 +16,26 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   README when discussion reveals lasting goals, decisions, or workflow changes.
   Distinguish accepted decisions from proposals; do not turn tentative ideas
   into requirements or preserve the conversation as a transcript.
-- Current scope is synchronous value composition with `pipe` and both `map`
-  forms, with executable examples, unit tests, and compile-fail tests. Filtering
-  and reactive semantics need their own design review.
+- Current scope includes synchronous value composition, scalar `keepIf`, borrowed
+  lazy slice sequences with `filter`/`each`, and explicit collection into caller
+  storage or through an allocator. Stop for review before adding reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
+
+## Long-term direction
+
+- Aim to describe whole systems declaratively: externally pushed inputs,
+  transformations, decisions, and explicit effects should be visible in named,
+  searchable pipeline stages rather than hidden in unrelated control flow.
+- Observables, reducers, subscriptions, and idempotency are future design topics,
+  not implemented contracts. A check-then-skip operator alone does not establish
+  durable execution; persistence, atomicity, retries, and crash recovery need
+  separate designs. Do not promise exactly-once effects.
+- Reuse Zig standard-library capabilities and conventions before inventing
+  equivalents. In particular use `std.mem.Allocator`, `std.ArrayList`, and
+  `std.Io` where appropriate; do not add a universal service context or scheduler.
+- Prefer standard readers/writers and existing iterator APIs where they fit.
+  Add only the small composition adapters needed by zrx, not parallel stream,
+  iterator, or I/O frameworks.
 
 ## Public API and contracts
 
@@ -28,6 +44,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   over implicit behavior or merely minimizing characters.
 - Favor standalone functional calls over method chaining. Normal Zig namespace
   access, field access, and tuple syntax are not prohibited.
+- In examples and user-facing pipeline code, alias zrx functions at the top of
+  the file (for example `const filter = zrx.filter;`) and use those aliases
+  consistently instead of namespace-qualified calls inside pipeline expressions.
 - Reuse existing operators before adding helpers or abstractions.
 - Support both `map(transform)` and `map(.{ first, second })`. The tuple composes
   left to right and must mean the same thing as consecutive `map` stages.
@@ -43,9 +62,10 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   API is not yet decided.
 - Always reject nested operator and transformer tuples. Keep compositions flat;
   express reusable groups through named helper operator functions instead.
-- For this milestone, transformers are comptime-known functions with one
+- Transformers and predicates are comptime-known functions with one
   explicitly typed runtime parameter and an explicit return type. Generic
-  transformers, function pointers, and captured runtime state are out of scope.
+  callbacks, function pointers, and callback closures are out of scope. Operator
+  instances may carry explicit runtime capabilities or caller-owned state.
 - Follow Zig's normal function argument coercions. Preserve error unions as
   values; do not implicitly unwrap them or propagate errors.
 - Validate statically knowable structural and type contracts at comptime.
@@ -53,6 +73,18 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   practical. Do not imply arbitrary runtime behavior can be proven at comptime.
 - Make allocation, ownership, lifetimes, side effects, and error propagation
   explicit. Do not add hidden allocation or implicit scheduling.
+- Keep `map` a whole-value operation even for arrays and slices. `keepIf` returns
+  an optional value; it does not silently skip subsequent pipeline stages.
+  `filter` and `each` are explicitly elementwise, borrowed, and lazy. `each`
+  transforms elements; it is not an eager effect-only iteration operator.
+- Sequence sources are slices, pointers to arrays, or zrx views; reject arrays by
+  value to avoid returning a view into copied temporary storage. Iteration is
+  repeatable, re-reads source storage, and re-executes callbacks.
+- Allocation-free views and `collectInto` do not require an allocator. Only
+  `collectAlloc(allocator)` allocates output storage; the caller owns and frees
+  the returned slice. Keep storage choices explicit rather than using mode flags.
+- Effectful operators must receive runtime capabilities such as allocator or Io
+  explicitly. The pure core requires neither Io nor implicit error propagation.
 
 ## Implementation and performance
 
@@ -80,9 +112,12 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   unused generic declarations. Object-only cross builds do not prove foreign
   runtime behavior or support for all Zig targets.
 - Codegen checks use the pinned compiler's LLVM backend in ReleaseFast, comparing
-  direct calls against both map forms within each target. Resolve aliases and
-  compare narrowly normalized function bodies; do not compare whole binaries or
-  treat a match as a general proof of semantic equivalence or performance.
+  direct code against grouped/separate stages within each applicable target.
+  Resolve aliases and compare narrowly normalized IR or scoped AArch64 assembly.
+  Preserve instructions, register choices, operands, and order in assembly
+  comparisons. Keep nonmatching cases explicitly behavior/cross-only in the
+  catalog; do not weaken checks to force equality or claim a general proof of
+  semantic equivalence or performance.
 - Keep local validation independent of a CI provider. CI integration remains a
   separate follow-up; no foreign runtime or emulator is required for cross checks.
 - Keep implemented API examples executable and tested. Clearly label design-only

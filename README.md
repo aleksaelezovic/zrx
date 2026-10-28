@@ -6,8 +6,8 @@ Write readable transformations with standalone functions rather than method
 chaining. zrx aims to make intent explicit and catch invalid compositions at
 compile time wherever possible.
 
-**Status:** Experimental synchronous `pipe` and `map`. Observables and
-subscriptions are planned for later.
+**Status:** Experimental synchronous value pipelines and borrowed lazy sequences.
+Observables and subscriptions are planned for later.
 
 ## Usage
 
@@ -18,9 +18,14 @@ parameter and an explicit return type. Both forms support type transitions.
 Operator and transformer tuples must be nonempty and flat; use named helper
 functions to create reusable operators.
 
-See the [executable pipeline example](examples/pipeline.zig). Calls are synchronous,
-with no allocation by zrx or implicit error handling. Transformers may allocate
-or have side effects themselves.
+`keepIf(predicate)` keeps one value as an optional. `filter(predicate)` and
+`each(transform)` create borrowed lazy sequence views. Materialize explicitly
+with `collectInto(buffer)` or `collectAlloc(allocator)`; free allocated results
+with the same allocator. Views themselves do not allocate.
+
+See the [value example](examples/pipeline.zig), [sequence example](examples/sequences.zig),
+and [ownership and operator contracts](docs/sequences.md). Operators can receive
+runtime capabilities directly; errors remain explicit values.
 
 ## Toolchain and checks
 
@@ -38,9 +43,10 @@ zig build check              # formatting, native tests, cross builds, codegen
 For focused checks, use `zig build fmt`, `zig build cross`, or `zig build codegen`.
 The [target matrix](tests/codegen/catalog.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly.
-Cross checks compile objects; they do not execute foreign binaries.
-Codegen checks compare selected stripped LLVM function bodies/aliases in
-ReleaseFast, not whole binaries or arbitrary semantic equivalence.
+Cross checks compile value and sequence/collection fixtures, not foreign binaries
+for execution. Codegen checks compare selected LLVM bodies/aliases and scoped
+AArch64 loop assembly in ReleaseFast, not all operators or whole binaries.
+See the catalog for exact coverage; matches are not general equivalence proofs.
 
 The build exports a `zrx` module for use through Zig's package manager.
 
