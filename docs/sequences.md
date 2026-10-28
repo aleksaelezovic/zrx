@@ -77,6 +77,7 @@ There is no implicit service context, allocation, I/O, error propagation, or
 scheduling. Custom operators can use standard-library capabilities directly;
 zrx does not wrap or replace `std.Io`. Observables, reducers, cancellation, and
 durable/idempotent workflow policies require separate review.
+The [synchronous effect operators](effects.md) use these capabilities directly.
 
 ## Optimization and SIMD
 

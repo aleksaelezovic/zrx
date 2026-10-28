@@ -48,6 +48,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(sequence_tests).step);
+    const effect_tests = b.addTest(.{
+        .name = "effects",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/effects.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(effect_tests).step);
 
     const example = b.addExecutable(.{
         .name = "pipeline",
@@ -86,6 +96,18 @@ pub fn build(b: *std.Build) void {
     const run_sequences = b.addRunArtifact(sequence_example);
     example_step.dependOn(&run_sequences.step);
     test_step.dependOn(&run_sequences.step);
+    const effect_example = b.addExecutable(.{
+        .name = "effects",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/effects.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_effects = b.addRunArtifact(effect_example);
+    example_step.dependOn(&run_effects.step);
+    test_step.dependOn(&run_effects.step);
 
     const failures = .{
         .{ "empty_pipe", "pipe: operator tuple must not be empty" },
@@ -115,12 +137,22 @@ pub fn build(b: *std.Build) void {
         .{ "collect_wrong_element", "expected type 'u32', found 'bool'" },
         .{ "keep_if_implicit_unwrap", "expected type 'u32', found '?u32'" },
         .{ "invalid_operator_output", "expected type 'bool', found 'u32'" },
+        .{ "tap_wrong_return", "tap: effect must return void or an error union with void payload" },
+        .{ "tap_wrong_arity", "tap: effect must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "tap_generic", "tap: effect must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "tap_function_pointer", "tap: effect must be a function" },
+        .{ "tap_with_wrong_arity", "tapWith: effect must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "tap_with_wrong_payload", "tapWith: effect must return void or an error union with void payload" },
+        .{ "tap_wrong_capability", "expected type 'u32', found 'bool'" },
+        .{ "tap_error_plain_next", "expected type 'u32', found 'error{Failed}!u32'" },
+        .{ "tap_tuple", "tap: effect must be a function" },
         .{ "try_pipe_empty", "tryPipe: operator tuple must not be empty" },
         .{ "try_pipe_nested", "tryPipe: stage 1 is a nested tuple; use a flat tuple or a named helper operator" },
         .{ "try_pipe_invalid_stage", "tryPipe: stage 1 must provide Output(comptime Input: type) type and apply(self, value)" },
         .{ "try_pipe_input_type", "expected type 'bool', found 'u32'" },
         .{ "try_pipe_null_unwrap", "expected type 'u32', found '?u32'" },
         .{ "try_pipe_bare_error_result", "tryPipe: bare error-set stage results are not supported; wrap error data in a struct" },
+        .{ "tap_bare_error_payload", "tap: fallible effects cannot forward bare error-set inputs; wrap error data in a struct" },
     };
     inline for (failures) |failure| {
         const check = b.addTest(.{

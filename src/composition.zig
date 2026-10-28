@@ -8,16 +8,23 @@ pub fn isTuple(comptime T: type) bool {
 }
 
 pub fn UnaryInput(comptime callback: anytype, comptime prefix: []const u8) type {
+    return callbackInfo(callback, prefix, 1).param_types[0].?;
+}
+
+pub fn callbackInfo(comptime callback: anytype, comptime prefix: []const u8, comptime arity: usize) std.lang.Type.Fn {
     const info = switch (@typeInfo(@TypeOf(callback))) {
         .@"fn" => |info| info,
         else => @compileError(prefix ++ " must be a function"),
     };
-    if (info.is_generic or info.attrs.varargs or info.param_types.len != 1 or
-        info.param_types[0] == null or info.return_type == null)
-    {
-        @compileError(prefix ++ " must have one explicitly typed runtime parameter and an explicit return type");
+    const contract = prefix ++ (if (arity == 1)
+        " must have one explicitly typed runtime parameter and an explicit return type"
+    else
+        " must have two explicitly typed runtime parameters and an explicit return type");
+    if (info.is_generic or info.attrs.varargs or info.param_types.len != arity or info.return_type == null) {
+        @compileError(contract);
     }
-    return info.param_types[0].?;
+    for (info.param_types) |parameter| if (parameter == null) @compileError(contract);
+    return info;
 }
 
 pub fn PredicateInput(comptime predicate: anytype, comptime name: []const u8) type {

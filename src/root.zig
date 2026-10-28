@@ -1,10 +1,13 @@
 const composition = @import("composition.zig");
 const sequences = @import("sequences.zig");
+const effects = @import("effects.zig");
 
 pub const filter = sequences.filter;
 pub const each = sequences.each;
 pub const collectInto = sequences.collectInto;
 pub const collectAlloc = sequences.collectAlloc;
+pub const tap = effects.tap;
+pub const tapWith = effects.tapWith;
 
 /// Apply a nonempty, flat tuple of operators from left to right.
 /// Types and callbacks specialize at comptime; operator instances may carry

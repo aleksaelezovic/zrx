@@ -18,8 +18,8 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   into requirements or preserve the conversation as a transcript.
 - Current scope includes synchronous value composition, scalar `keepIf`, borrowed
   lazy slice sequences with `filter`/`each`, and explicit collection into caller
-  storage or through an allocator, plus explicit fail-fast `tryPipe`. Stop for
-  review before adding reactive behavior.
+  storage or through an allocator, plus synchronous `tap`/`tapWith` effects and
+  explicit fail-fast `tryPipe`. Stop for review before adding reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
 
 ## Long-term direction
@@ -67,6 +67,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   explicitly typed runtime parameter and an explicit return type. Generic
   callbacks, function pointers, and callback closures are out of scope. Operator
   instances may carry explicit runtime capabilities or caller-owned state.
+- Effect callbacks return `void` or `E!void`: `tap` takes one typed runtime
+  parameter, and `tapWith` takes a capability followed by the value. Both forward
+  the coerced callback input. Reject other result payloads rather than discard them.
 - Follow Zig's normal function argument coercions. Preserve error unions as
   values in `pipe`; only explicit `tryPipe` checks outer error-union boundaries
   and skips later stages on failure. Grouped/separate whole-value maps must stay
@@ -87,7 +90,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   `collectAlloc(allocator)` allocates output storage; the caller owns and frees
   the returned slice. Keep storage choices explicit rather than using mode flags.
 - Effectful operators must receive runtime capabilities such as allocator or Io
-  explicitly. The pure core requires neither Io nor implicit error propagation.
+  explicitly when needed, rather than inventing implicit global services. Unary
+  `tap` can act on state in its input. The pure core requires neither Io nor
+  implicit error propagation.
 - `tryPipe` provides no rollback or automatic cleanup of owned intermediates;
   keep resource ownership in explicit caller/helper scopes.
 

@@ -5,6 +5,9 @@ const pipe = zrx.pipe;
 const map = zrx.map;
 const keepIf = zrx.keepIf;
 const each = zrx.each;
+const tap = zrx.tap;
+const tapWith = zrx.tapWith;
+const tryPipe = zrx.tryPipe;
 
 fn double(value: u32) u32 {
     return value *% 2;
@@ -176,6 +179,137 @@ fn vector_map_test() !void {
         for (source, expected) |value, actual| try std.testing.expectEqual(increment(double(value)), actual);
         try std.testing.expectEqualSlices(u32, &expected, &grouped);
         try std.testing.expectEqualSlices(u32, &expected, &separate);
+    }
+}
+
+fn record(destination: *u32, value: u32) void {
+    destination.* = value;
+}
+
+export fn tap_record_direct(value: u32, destination: *u32) u32 {
+    record(destination, value);
+    return increment(double(value));
+}
+
+export fn tap_record_grouped(value: u32, destination: *u32) u32 {
+    return pipe(value, .{
+        tapWith(destination, record),
+        map(.{ double, increment }),
+    });
+}
+
+export fn tap_record_separate(value: u32, destination: *u32) u32 {
+    return pipe(value, .{
+        tapWith(destination, record),
+        map(double),
+        map(increment),
+    });
+}
+
+fn checked(value: u32) error{Zero}!u32 {
+    return if (value == 0) error.Zero else value;
+}
+
+fn reject(rejected: bool, _: u32) error{Rejected}!void {
+    if (rejected) return error.Rejected;
+}
+
+export fn try_flow_direct(value: u32, destination: *u32, rejected: bool) u32 {
+    const accepted = double(checked(value) catch return 0);
+    record(destination, accepted);
+    reject(rejected, accepted) catch return 0;
+    return increment(accepted);
+}
+
+export fn try_flow_grouped(value: u32, destination: *u32, rejected: bool) u32 {
+    return tryPipe(value, .{
+        map(.{ checked, double }),
+        tapWith(destination, record),
+        tapWith(rejected, reject),
+        map(increment),
+    }) catch 0;
+}
+
+export fn try_flow_separate(value: u32, destination: *u32, rejected: bool) u32 {
+    return tryPipe(value, .{
+        map(checked),
+        map(double),
+        tapWith(destination, record),
+        tapWith(rejected, reject),
+        map(increment),
+    }) catch 0;
+}
+
+fn tap_record_test() !void {
+    for ([_]u32{ 0, 1, 42, std.math.maxInt(u32) }) |value| {
+        var direct: u32 = 0;
+        var grouped: u32 = 0;
+        var separate: u32 = 0;
+        const expected = tap_record_direct(value, &direct);
+        try std.testing.expectEqual(expected, tap_record_grouped(value, &grouped));
+        try std.testing.expectEqual(expected, tap_record_separate(value, &separate));
+        try std.testing.expectEqual(value, direct);
+        try std.testing.expectEqual(direct, grouped);
+        try std.testing.expectEqual(direct, separate);
+    }
+}
+
+fn visit(value: *u32) void {
+    value.* +%= 1;
+}
+
+fn read(value: *u32) u32 {
+    return value.*;
+}
+
+export fn tap_visit_direct(value: *u32) u32 {
+    visit(value);
+    return increment(double(read(value)));
+}
+
+export fn tap_visit_grouped(value: *u32) u32 {
+    return pipe(value, .{
+        tap(visit),
+        map(.{ read, double, increment }),
+    });
+}
+
+export fn tap_visit_separate(value: *u32) u32 {
+    return pipe(value, .{
+        tap(visit),
+        map(read),
+        map(double),
+        map(increment),
+    });
+}
+
+fn tap_visit_test() !void {
+    for ([_]u32{ 0, 1, 42, std.math.maxInt(u32) }) |value| {
+        var direct = value;
+        var grouped = value;
+        var separate = value;
+        const expected = tap_visit_direct(&direct);
+        try std.testing.expectEqual(expected, tap_visit_grouped(&grouped));
+        try std.testing.expectEqual(expected, tap_visit_separate(&separate));
+        try std.testing.expectEqual(increment(value), direct);
+        try std.testing.expectEqual(direct, grouped);
+        try std.testing.expectEqual(direct, separate);
+    }
+}
+
+fn try_flow_test() !void {
+    for ([_]u32{ 0, 1, 42, std.math.maxInt(u32) }) |value| {
+        for ([_]bool{ false, true }) |rejected| {
+            var direct: u32 = 99;
+            var grouped: u32 = 99;
+            var separate: u32 = 99;
+            const expected = try_flow_direct(value, &direct, rejected);
+            try std.testing.expectEqual(expected, try_flow_grouped(value, &grouped, rejected));
+            try std.testing.expectEqual(expected, try_flow_separate(value, &separate, rejected));
+            try std.testing.expectEqual(if (value == 0) @as(u32, 99) else double(value), direct);
+            try std.testing.expectEqual(direct, grouped);
+            try std.testing.expectEqual(direct, separate);
+        }
     }
 }
 

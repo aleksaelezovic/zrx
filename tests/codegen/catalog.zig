@@ -15,6 +15,8 @@ pub const cases = [_][]const u8{
     "arithmetic",
     "type_transition",
     "vector_map",
+    "tap_record",
+    "tap_visit",
 };
 
 // Loop SSA names/order can differ even when final instructions match. Restrict
@@ -24,14 +26,15 @@ pub const assembly_cases = .{
     .{ .name = "each_sum", .arch = "aarch64" },
 };
 
-// Optional construction does not currently match the hand-written scalar branch
-// in the pinned compiler's optimized IR. Keep native behavior and cross builds
-// covered without claiming identical code or weakening the strict comparator.
-pub const behavior_only_cases = [_][]const u8{"keep_if"};
+// Optional construction and fail-fast error flow do not currently match their
+// imperative baselines in the pinned compiler's optimized IR. Keep behavior and
+// cross builds covered without claiming equality or weakening the comparator.
+pub const behavior_only_cases = [_][]const u8{ "keep_if", "try_flow" };
 
 // These exercise additional API contracts on every target without asserting
 // identical LLVM bodies for imperative loops and lazy adapters.
 pub const cross_only = .{
     .{ .name = "sequences", .path = "tests/cross/sequences.zig" },
     .{ .name = "try-pipe", .path = "tests/cross/try_pipe.zig" },
+    .{ .name = "effects", .path = "tests/cross/effects.zig" },
 };

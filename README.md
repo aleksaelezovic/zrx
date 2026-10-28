@@ -28,6 +28,8 @@ and [ownership and operator contracts](docs/sequences.md). Operators can receive
 runtime capabilities directly; errors remain explicit values.
 Use `tryPipe` to opt into [fail-fast composition](docs/try_pipe.md); see its
 [executable example](examples/try_pipe.zig).
+Use `tap(effect)` or `tapWith(capability, effect)` for [synchronous effects](docs/effects.md);
+see the [effects example](examples/effects.zig).
 
 ## Toolchain and checks
 
