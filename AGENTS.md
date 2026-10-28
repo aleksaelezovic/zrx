@@ -9,14 +9,23 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   observables and subscriptions.
 - Develop in small, reviewable increments. Finish the agreed milestone and stop
   for review; do not implement later milestones speculatively.
-- Current scope is repository setup and API design only. No library code, build
-  scaffolding, or tooling is required for this milestone.
-- Next comes synchronous value composition with `pipe` and `map`. Filtering and
-  reactive semantics need their own design review.
+- After completing a task or review step, always recommend a concrete next step
+  or ask a focused question that helps decide how to proceed. Separate suggested
+  follow-up work from work already authorized.
+- During reviews, suggest concise additions or corrections to `AGENTS.md` or the
+  README when discussion reveals lasting goals, decisions, or workflow changes.
+  Distinguish accepted decisions from proposals; do not turn tentative ideas
+  into requirements or preserve the conversation as a transcript.
+- Current scope is synchronous value composition with `pipe` and both `map`
+  forms, with executable examples, unit tests, and compile-fail tests. Filtering
+  and reactive semantics need their own design review.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
 
 ## Public API and contracts
 
+- Aim for declarative code that is pleasant to read and expresses a clear
+  sequence of intentions, like natural-language steps. Prefer explicit intent
+  over implicit behavior or merely minimizing characters.
 - Favor standalone functional calls over method chaining. Normal Zig namespace
   access, field access, and tuple syntax are not prohibited.
 - Reuse existing operators before adding helpers or abstractions.
@@ -28,7 +37,17 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 - Zig has no ordinary user-defined variadic functions or declaration overloading.
   Express these forms through comptime/type-directed dispatch as appropriate.
 - Specify accepted inputs, output types, ordering, and edge cases before
-  implementing an operator. Decide empty and nested tuple behavior explicitly.
+  implementing an operator. Reject empty operator tuples in `pipe` and empty
+  transformer tuples in `map` at comptime; an empty composition must not silently
+  mean identity. A named identity operator may be considered separately, but its
+  API is not yet decided.
+- Always reject nested operator and transformer tuples. Keep compositions flat;
+  express reusable groups through named helper operator functions instead.
+- For this milestone, transformers are comptime-known functions with one
+  explicitly typed runtime parameter and an explicit return type. Generic
+  transformers, function pointers, and captured runtime state are out of scope.
+- Follow Zig's normal function argument coercions. Preserve error unions as
+  values; do not implicitly unwrap them or propagate errors.
 - Validate statically knowable structural and type contracts at comptime.
   Diagnostics should identify the failing stage and expected contract where
   practical. Do not imply arbitrary runtime behavior can be proven at comptime.
@@ -46,10 +65,26 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 
 ## Validation and documentation
 
+- Keep the README minimal, concise, and human-facing: purpose, status, usage,
+  toolchain, validation commands, and license as applicable. Keep agent workflow
+  and durable agent-facing design guidance in `AGENTS.md`, not the README.
 - With the first implementation, add a reproducible build/test entry point and
   document its exact commands in the README.
 - Add tests for valid compositions, type transitions, ordering, and equivalent
   single-item/tuple forms. Add compile-fail tests for invalid contracts.
+- Keep the quick native loop in `zig build test`; run `zig build check` before
+  considering validation complete. It includes formatting, native tests,
+  cross-compilation, and scoped code-generation comparisons.
+- Maintain one target/case catalog for cross builds and codegen checks. Compile
+  exported runtime-input fixtures that actually instantiate pipelines, not just
+  unused generic declarations. Object-only cross builds do not prove foreign
+  runtime behavior or support for all Zig targets.
+- Codegen checks use the pinned compiler's LLVM backend in ReleaseFast, comparing
+  direct calls against both map forms within each target. Resolve aliases and
+  compare narrowly normalized function bodies; do not compare whole binaries or
+  treat a match as a general proof of semantic equivalence or performance.
+- Keep local validation independent of a CI provider. CI integration remains a
+  separate follow-up; no foreign runtime or emulator is required for cross checks.
 - Keep implemented API examples executable and tested. Clearly label design-only
   snippets as illustrative until implementation exists.
 - Format Zig code with the pinned compiler's `zig fmt` and run the documented

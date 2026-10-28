@@ -2,61 +2,48 @@
 
 A functional reactive library for Zig, with declarative pipelines and comptime-checked composition.
 
-zrx aims to make data transformations and reactive flows explicit and composable,
-using standalone functions and operators rather than method chaining. Clear
-contracts and compiler diagnostics should guide both humans and AI agents toward
-correct usage.
+Write readable transformations with standalone functions rather than method
+chaining. zrx aims to make intent explicit and catch invalid compositions at
+compile time wherever possible.
 
-**Status:** Repository setup and API design only. No library implementation yet.
+**Status:** Experimental synchronous `pipe` and `map`. Observables and
+subscriptions are planned for later.
 
-## Design principles
+## Usage
 
-- Small, orthogonal primitives; reuse operators before introducing new ones.
-- Validate types and structural contracts at comptime wherever possible. Runtime
-  conditions still require runtime handling.
-- Support readable single-item and tuple forms where they have unambiguous,
-  equivalent semantics, backed by one internal composition rule.
-- Make allocation, ownership, lifetimes, and error propagation explicit.
-- Specialize with comptime where useful and let Zig optimize ordinary calls.
-  Forced inlining and performance claims require evidence.
+Import `pipe` and `map` from the `zrx` module. Use `map(transform)` for a single
+typed unary function or `map(.{ first, second })` for left-to-right composition.
+Transformers must be comptime-known functions with one explicitly typed runtime
+parameter and an explicit return type. Both forms support type transitions.
+Operator and transformer tuples must be nonempty and flat; use named helper
+functions to create reusable operators.
 
-## Intended API
+See the [executable pipeline example](examples/pipeline.zig). Calls are synchronous,
+with no allocation by zrx or implicit error handling. Transformers may allocate
+or have side effects themselves.
 
-Illustrative syntax, not executable examples or a finalized operator contract:
-
-```zig
-pipe(value, .{
-    map(double),
-})
-
-pipe(value, .{
-    map(.{ double, increment }),
-})
-```
-
-`map(transform)` accepts one transformer. `map(.{ first, second })` composes
-transformers sequentially, left to right: `second(first(value))`. It is shorthand
-for consecutive `map` stages, not fan-out. Each output must satisfy the next
-transformer's input contract.
-
-## Development sequence
-
-Work proceeds in small steps, with review between milestones:
-
-1. Define and implement synchronous value pipelines with `pipe` and both `map`
-   forms, including tests for valid usage and compile-time rejection.
-2. Decide filtering and sequence semantics before introducing `filter`.
-3. Introduce observables and subscriptions, starting with synchronous behavior
-   and explicit cancellation and lifetime contracts.
-
-A formatter, linter, or canonicalizing optimizer is a separate future scope.
-Equivalent public forms should normalize internally; no source-rewriting tool is
-part of the initial library.
-
-## Toolchain and license
+## Toolchain and checks
 
 Target Zig **0.17.0**, recorded in [`.zigversion`](.zigversion).
-Build configuration, executable examples, and test commands will arrive with the
-first implementation milestone.
+With that compiler on your `PATH`, run:
+
+```sh
+zig version                  # must report 0.17.0
+zig fmt --check build.zig build.zig.zon src tests examples
+zig build test               # unit tests, compile-fail checks, and the example
+zig build example            # run the example separately
+zig build check              # formatting, native tests, cross builds, codegen
+```
+
+For focused checks, use `zig build fmt`, `zig build cross`, or `zig build codegen`.
+The [target matrix](tests/codegen/catalog.zig) covers Linux x86-64/ARM64,
+macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly.
+Cross checks compile objects; they do not execute foreign binaries.
+Codegen checks compare selected stripped LLVM function bodies/aliases in
+ReleaseFast, not whole binaries or arbitrary semantic equivalence.
+
+The build exports a `zrx` module for use through Zig's package manager.
+
+## License
 
 Licensed under the [MIT License](LICENSE).
