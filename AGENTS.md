@@ -17,9 +17,10 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   Distinguish accepted decisions from proposals; do not turn tentative ideas
   into requirements or preserve the conversation as a transcript.
 - Current scope includes synchronous value composition, scalar `keepIf`, borrowed
-  lazy slice sequences with `filter`/`each`, and explicit collection into caller
-  storage or through an allocator, plus synchronous `tap`/`tapWith` effects and
-  explicit fail-fast `tryPipe`. Stop for review before adding reactive behavior.
+  lazy slice sequences with `filter`/`each`, finite `fold`/`tryFold` reduction,
+  explicit collection into caller storage or through an allocator, synchronous
+  `tap`/`tapWith` effects, and fail-fast `tryPipe`. Stop for review before adding
+  reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
 
 ## Long-term direction
@@ -27,7 +28,7 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 - Aim to describe whole systems declaratively: externally pushed inputs,
   transformations, decisions, and explicit effects should be visible in named,
   searchable pipeline stages rather than hidden in unrelated control flow.
-- Observables, reducers, subscriptions, and idempotency are future design topics,
+- Observables, reactive reducers, subscriptions, and idempotency are future design topics,
   not implemented contracts. A check-then-skip operator alone does not establish
   durable execution; persistence, atomicity, retries, and crash recovery need
   separate designs. Do not promise exactly-once effects.
@@ -70,8 +71,15 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 - Effect callbacks return `void` or `E!void`: `tap` takes one typed runtime
   parameter, and `tapWith` takes a capability followed by the value. Both forward
   the coerced callback input. Reject other result payloads rather than discard them.
+- Reduction callbacks take typed state and element parameters. `fold` requires
+  `fn (A, T) A`; `tryFold` requires `fn (A, T) E!A`. Require an exact state result
+  type and reject outer error-union accumulator types. Both are eager left folds
+  starting from a shallow copy of the stored seed on each application.
+- `tryFold` stops at the first reducer error under either executor, without an
+  extra cursor probe, cleanup, or rollback. `tryPipe` only checks the completed
+  reduction's outer result; it does not supply per-item short-circuiting.
 - Follow Zig's normal function argument coercions. Preserve error unions as
-  values in `pipe`; only explicit `tryPipe` checks outer error-union boundaries
+  values in `pipe`; explicit `tryPipe` checks pipeline-stage error-union boundaries
   and skips later stages on failure. Grouped/separate whole-value maps must stay
   equivalent under either executor. Null and sequence-element errors remain data.
 - Validate statically knowable structural and type contracts at comptime.

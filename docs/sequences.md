@@ -10,12 +10,14 @@ For explicit error short-circuiting, see [fail-fast composition](try_pipe.md).
 | `keepIf(predicate)` | Predicate input type `T` → `?T` |
 | `filter(predicate)` | Borrowed sequence → lazy view of matching elements |
 | `each(transform)` / `each(.{ first, second })` | Borrowed sequence → lazy view of transformed elements |
+| `fold(initialState, reducer)` | Sequence → accumulated `A` |
+| `tryFold(initialState, reducer)` | Sequence → `E!A`, stopping at the first reducer error |
 | `collectInto(buffer)` | Sequence → `error{NoSpaceLeft}![]T` borrowing the buffer |
 | `collectAlloc(allocator)` | Sequence → `error{OutOfMemory}![]T` owned by the caller |
 
-Callbacks are comptime-known functions with one explicitly typed runtime
-parameter and an explicit return type. Predicates must return `bool`. Tuple
-transforms compose left to right; empty and nested tuples are rejected.
+Transformers and predicates are comptime-known functions with one explicitly
+typed runtime parameter and an explicit return type. Predicates must return
+`bool`. Tuple transforms compose left to right; empty and nested tuples are rejected.
 Zig's normal argument coercions apply.
 
 `keepIf` calls its predicate once and returns the coerced input on a match, or
@@ -60,6 +62,14 @@ The input view itself remains reusable after collection.
 
 See the executable [sequence example](../examples/sequences.zig).
 
+## Reduction
+
+Use `fold(initialState, reducer)` for eager, ordered accumulation without
+materialization. Use `tryFold(initialState, reducer)` for per-item fail-fast
+reduction, independently of the executor. Empty input returns the seed.
+See [reduction contracts and ownership](reduction.md) and the executable
+[reduction example](../examples/reduction.zig).
+
 ## Runtime capabilities and custom operators
 
 An operator is a struct value exposing:
@@ -75,8 +85,8 @@ Named factory functions keep these details outside the pipeline expression.
 
 There is no implicit service context, allocation, I/O, error propagation, or
 scheduling. Custom operators can use standard-library capabilities directly;
-zrx does not wrap or replace `std.Io`. Observables, reducers, cancellation, and
-durable/idempotent workflow policies require separate review.
+zrx does not wrap or replace `std.Io`. Observables, reactive reducers,
+cancellation, and durable/idempotent workflow policies require separate review.
 The [synchronous effect operators](effects.md) use these capabilities directly.
 
 ## Optimization and SIMD
@@ -92,8 +102,8 @@ whole-value `map`; no vector-specific operator is needed. Actual instruction
 selection and vector width remain target/compiler decisions.
 
 The [codegen catalog](../tests/codegen/catalog.zig) distinguishes strict LLVM
-comparisons, AArch64-only assembly comparisons for an `each` sum loop, and
-behavior/cross-only cases. In the pinned compiler, `keepIf` plus optional
+comparisons, AArch64-only assembly comparisons for `each` and `fold` sum loops,
+and behavior/cross-only cases. In the pinned compiler, `keepIf` plus optional
 recovery still differs from a hand-written branch, so it is not an equality
 claim. Native fixture tests also compare outputs, including short inputs,
 tails, and wrapping arithmetic.

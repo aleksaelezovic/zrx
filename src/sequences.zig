@@ -126,6 +126,59 @@ fn Mapped(comptime Source: type, comptime functions: anytype) type {
     };
 }
 
+/// Eager left fold. The reducer returns exactly its accumulator type, never an
+/// outer error union. Each application starts from a shallow copy of the seed.
+pub fn fold(initial: anytype, comptime reducer: anytype) Fold(reducer, false) {
+    return .{ .initial = initial };
+}
+
+/// Eager left fold with an explicit per-item try. Stops at the first reducer
+/// error under either executor; no rollback or accumulator cleanup is performed.
+pub fn tryFold(initial: anytype, comptime reducer: anytype) Fold(reducer, true) {
+    return .{ .initial = initial };
+}
+
+fn Fold(comptime reducer: anytype, comptime fallible: bool) type {
+    const name = if (fallible) "tryFold" else "fold";
+    const info = composition.callbackInfo(reducer, name ++ ": reducer", 2);
+    const State = info.param_types[0].?;
+    const Result = info.return_type.?;
+    if (!fallible and @typeInfo(Result) == .error_union) {
+        @compileError("fold: reducer must not return an outer error union; use tryFold");
+    }
+    if (@typeInfo(State) == .error_union) {
+        @compileError(name ++ ": accumulator must not be an outer error union; wrap error data in a struct");
+    }
+    if (fallible) {
+        if (@typeInfo(Result) != .error_union) {
+            @compileError("tryFold: reducer must return an error union with the accumulator type as payload");
+        }
+        if (@typeInfo(Result).error_union.payload != State) {
+            @compileError("tryFold: reducer success payload must exactly match the accumulator type");
+        }
+    } else if (Result != State) {
+        @compileError("fold: reducer result must exactly match the accumulator type");
+    }
+    return struct {
+        initial: State,
+
+        pub fn Output(comptime Input: type) type {
+            // Check even empty sources, without running callbacks.
+            _ = @TypeOf(reducer(@as(State, undefined), @as(Item(Input), undefined)));
+            return Result;
+        }
+
+        pub fn apply(self: @This(), source: anytype) Output(@TypeOf(source)) {
+            var state = self.initial;
+            var input = cursor(source);
+            while (input.next()) |value| {
+                state = if (comptime fallible) try reducer(state, value) else reducer(state, value);
+            }
+            return state;
+        }
+    };
+}
+
 /// Collect into borrowed mutable storage, without allocation. On overflow the
 /// written prefix remains modified and one additional element has been evaluated.
 pub fn collectInto(buffer: anytype) CollectInto(BufferItem(@TypeOf(buffer))) {

@@ -4,6 +4,8 @@ const effects = @import("effects.zig");
 
 pub const filter = sequences.filter;
 pub const each = sequences.each;
+pub const fold = sequences.fold;
+pub const tryFold = sequences.tryFold;
 pub const collectInto = sequences.collectInto;
 pub const collectAlloc = sequences.collectAlloc;
 pub const tap = effects.tap;

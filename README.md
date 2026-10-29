@@ -30,6 +30,8 @@ Use `tryPipe` to opt into [fail-fast composition](docs/try_pipe.md); see its
 [executable example](examples/try_pipe.zig).
 Use `tap(effect)` or `tapWith(capability, effect)` for [synchronous effects](docs/effects.md);
 see the [effects example](examples/effects.zig).
+Use `fold(initialState, reducer)` or internally fail-fast `tryFold(initialState, reducer)`
+for [finite reduction](docs/reduction.md); see the [reduction example](examples/reduction.zig).
 
 ## Toolchain and checks
 

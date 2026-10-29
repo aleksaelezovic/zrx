@@ -24,12 +24,13 @@ pub const cases = [_][]const u8{
 // and scheduling. Those variants retain native behavior/cross-build coverage.
 pub const assembly_cases = .{
     .{ .name = "each_sum", .arch = "aarch64" },
+    .{ .name = "fold_sum", .arch = "aarch64" },
 };
 
-// Optional construction and fail-fast error flow do not currently match their
+// Optional construction and fail-fast executor/reduction flow do not match their
 // imperative baselines in the pinned compiler's optimized IR. Keep behavior and
 // cross builds covered without claiming equality or weakening the comparator.
-pub const behavior_only_cases = [_][]const u8{ "keep_if", "try_flow" };
+pub const behavior_only_cases = [_][]const u8{ "keep_if", "try_flow", "try_fold" };
 
 // These exercise additional API contracts on every target without asserting
 // identical LLVM bodies for imperative loops and lazy adapters.

@@ -76,5 +76,6 @@ cases for both tap forms. The fallible `tryPipe` fixture is behavior/cross-only:
 its current optimized output differs from the imperative baseline. No general
 zero-overhead guarantee is implied.
 
-Retries, idempotency, observables, reducers, and cancellation remain separate
-design topics.
+Retries, idempotency, observables, reactive reducers, and cancellation remain
+separate design topics. Finite synchronous reduction is covered by
+[`fold` and `tryFold`](reduction.md).

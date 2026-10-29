@@ -5,6 +5,8 @@ const pipe = zrx.pipe;
 const map = zrx.map;
 const keepIf = zrx.keepIf;
 const each = zrx.each;
+const fold = zrx.fold;
+const tryFold = zrx.tryFold;
 const tap = zrx.tap;
 const tapWith = zrx.tapWith;
 const tryPipe = zrx.tryPipe;
@@ -161,6 +163,86 @@ fn each_sum_test() !void {
     for (0..source.len + 1) |len| {
         try std.testing.expectEqual(each_sum_direct(&source, len), each_sum_grouped(&source, len));
         try std.testing.expectEqual(each_sum_direct(&source, len), each_sum_separate(&source, len));
+    }
+}
+
+fn sum(total: u32, value: u32) u32 {
+    return total +% value;
+}
+
+export fn fold_sum_direct(source: [*]const u32, len: usize, initial: u32) u32 {
+    var total = initial;
+    for (source[0..len]) |value| total = sum(total, increment(double(value)));
+    return total;
+}
+
+export fn fold_sum_grouped(source: [*]const u32, len: usize, initial: u32) u32 {
+    return pipe(source[0..len], .{ each(.{ double, increment }), fold(initial, sum) });
+}
+
+export fn fold_sum_separate(source: [*]const u32, len: usize, initial: u32) u32 {
+    return pipe(source[0..len], .{ each(double), each(increment), fold(initial, sum) });
+}
+
+fn checkedSum(total: u32, value: u32) error{Rejected}!u32 {
+    if (value > 100) return error.Rejected;
+    return sum(total, value);
+}
+
+export fn try_fold_direct(source: [*]const u32, len: usize, initial: u32, output: *u32) bool {
+    var total = initial;
+    for (source[0..len]) |value| {
+        total = checkedSum(total, increment(double(value))) catch return false;
+    }
+    output.* = total;
+    return true;
+}
+
+export fn try_fold_grouped(source: [*]const u32, len: usize, initial: u32, output: *u32) bool {
+    const total = pipe(source[0..len], .{
+        each(.{ double, increment }),
+        tryFold(initial, checkedSum),
+    }) catch return false;
+    output.* = total;
+    return true;
+}
+
+export fn try_fold_separate(source: [*]const u32, len: usize, initial: u32, output: *u32) bool {
+    const total = pipe(source[0..len], .{
+        each(double),
+        each(increment),
+        tryFold(initial, checkedSum),
+    }) catch return false;
+    output.* = total;
+    return true;
+}
+
+fn fold_sum_test() !void {
+    var source: [257]u32 = undefined;
+    for (&source, 0..) |*value, index| value.* = @as(u32, @intCast(index)) *% 123456789;
+    for ([_]u32{ 0, 7, std.math.maxInt(u32) }) |initial| {
+        for (0..source.len + 1) |len| {
+            const expected = fold_sum_direct(&source, len, initial);
+            try std.testing.expectEqual(expected, fold_sum_grouped(&source, len, initial));
+            try std.testing.expectEqual(expected, fold_sum_separate(&source, len, initial));
+        }
+    }
+}
+
+fn try_fold_test() !void {
+    var source: [257]u32 = undefined;
+    for (&source, 0..) |*value, index| value.* = @intCast(index);
+    for ([_]u32{ 0, 7, std.math.maxInt(u32) }) |initial| {
+        for (0..source.len + 1) |len| {
+            var expected: u32 = 99;
+            var grouped: u32 = 99;
+            var separate: u32 = 99;
+            const accepted = try_fold_direct(&source, len, initial, &expected);
+            try std.testing.expectEqual(accepted, try_fold_grouped(&source, len, initial, &grouped));
+            try std.testing.expectEqual(accepted, try_fold_separate(&source, len, initial, &separate));
+            try std.testing.expectEqual(expected, grouped);
+            try std.testing.expectEqual(expected, separate);
+        }
     }
 }
 

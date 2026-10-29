@@ -21,6 +21,10 @@ an error union nested inside its success payload remains data for the next
 callback. Optionals, bare error-set inputs, and errors stored inside sequence
 elements are not automatically inspected, unwrapped, or skipped.
 
+[`tryFold`](reduction.md#loop-errors-and-pipeline-errors) explicitly checks reducer
+results inside its loop under either executor. `tryPipe` only checks that
+operator's returned result; it does not supply per-item failure behavior.
+
 Zig does not permit an error union whose payload is a bare error set. `tryPipe`
 therefore rejects bare error-set stage results, including intermediates inside
 grouped maps. Wrap error data in a struct when it must travel through these
