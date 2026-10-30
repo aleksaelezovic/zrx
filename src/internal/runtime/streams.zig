@@ -1,8 +1,10 @@
 const std = @import("std");
-const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
+const composition = @import("../composition.zig");
+const sequences = @import("../../data/sequences.zig");
 const broadcast = @import("broadcast.zig");
+const queueNext = @import("../queue.zig").next;
 
+// Live transport is private; the public producer description is data/streams.zig.
 /// Own a bounded queue, captured capabilities, and an optional lazy producer.
 /// Not copyable. Finish borrowed consumer uses before deinit.
 pub fn Stream(comptime T: type) type {
@@ -447,52 +449,4 @@ fn Owner(comptime Pointer: type) type {
 pub fn stopProducer(source: anytype) void {
     source.close();
     if (source.state.task) |*task| task.cancel(source.state.io) catch {};
-}
-
-/// Borrow a standard queue together with explicit waiting capability.
-/// Copies of the view compete for the same input; they do not broadcast or rewind.
-pub fn readFrom(io: std.Io, source: anytype) sequences.PullView(QueueCursor(QueueItem(@TypeOf(source)))) {
-    return .{ .input = .{ .io = io, .queue = source } };
-}
-
-fn QueueItem(comptime Pointer: type) type {
-    const contract = "readFrom: expected a mutable pointer to std.Io.Queue(T); declare stream flows directly";
-    if (@typeInfo(Pointer) != .pointer or @typeInfo(Pointer).pointer.size != .one or
-        @typeInfo(Pointer).pointer.attrs.@"const")
-        @compileError(contract);
-    const Source = @typeInfo(Pointer).pointer.child;
-    if (@typeInfo(Source) != .@"struct") @compileError(contract);
-    if (!@hasDecl(Source, "putOne")) @compileError(contract);
-    const info = switch (@typeInfo(@TypeOf(Source.putOne))) {
-        .@"fn" => |info| info,
-        else => @compileError(contract),
-    };
-    if (info.param_types.len != 3 or info.param_types[2] == null) @compileError(contract);
-    const T = info.param_types[2].?;
-    if (Source != std.Io.Queue(T)) @compileError(contract);
-    if (@sizeOf(T) == 0) @compileError("readFrom: zero-sized queue elements are not supported");
-    return T;
-}
-
-// Use the buffer form rather than getOne's E!T: T may itself be a bare error set,
-// which is valid item data but cannot be an error union's direct payload.
-fn queueNext(comptime T: type, io: std.Io, queue: *std.Io.Queue(T)) std.Io.Cancelable!?T {
-    var value: [1]T = undefined;
-    const count = queue.get(io, &value, 1) catch |err| switch (err) {
-        error.Closed => return null,
-        error.Canceled => return error.Canceled,
-    };
-    std.debug.assert(count == 1);
-    return @as(?T, value[0]);
-}
-
-fn QueueCursor(comptime T: type) type {
-    return struct {
-        io: std.Io,
-        queue: *std.Io.Queue(T),
-
-        pub fn next(self: *@This()) std.Io.Cancelable!?T {
-            return queueNext(T, self.io, self.queue);
-        }
-    };
 }

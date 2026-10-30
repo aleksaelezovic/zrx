@@ -1,10 +1,20 @@
 const std = @import("std");
-const composition = @import("composition.zig");
+const composition = @import("../internal/composition.zig");
 const sequences = @import("sequences.zig");
-const runtime = @import("streams.zig");
+const runtime = @import("../internal/runtime/streams.zig");
 
 /// A non-owning description. Only run creates storage or starts the producer.
 /// Refer to the same stable declaration by pointer to share an execution node.
+/// Capacity is runtime configuration; run rejects zero with UnsupportedCapacity
+/// before activation. Zero-sized items are rejected at comptime. Copying a
+/// declaration is independent execution, not shared identity or replay.
+///
+/// Producers must be comptime-known functions with typed runtime parameters and
+/// explicit void/E!void returns; generic functions, closures, caller-supplied
+/// function pointers, and other payloads are unsupported. Return closes output;
+/// accepted items drain before its outcome is observed. Producer errors (even
+/// Closed) are failures, unlike standard queue closure normalized by readFrom.
+/// No public init/push/close/reader/tee/share ownership API is exposed.
 pub fn Stream(comptime T: type) type {
     if (@sizeOf(T) == 0) @compileError("Stream: zero-sized elements are not supported");
     return struct {
@@ -16,6 +26,7 @@ pub fn Stream(comptime T: type) type {
         produce: *const fn (?*const anyopaque, *Emitter(T)) anyerror!void,
         capability: ?*const anyopaque = null,
 
+        /// Describe fn (*Emitter(T)) void or E!void; no work starts here.
         pub fn fromProducer(capacity: usize, comptime producer: anytype) Self {
             return describe(capacity, producer, {}, false);
         }
@@ -81,6 +92,13 @@ pub fn instantiate(definition: anytype, allocator: std.mem.Allocator, io: std.Io
 
 /// Borrowed only for the producer call. Cannot be saved or used after return.
 /// Return closes output automatically; this handle has no close/deinit methods.
+/// io/allocator are run-supplied capabilities; explicit producer-local resources
+/// still need producer-owned defer cleanup. Join work using the emitter before
+/// returning. push waits for bounded capacity and can return Closed/Canceled.
+///
+/// Admission is not acknowledgement that every effect finished or signal state
+/// committed. Items are shallow: referents must outlive all downstream use,
+/// including delayed collection, and run does not deep-copy/infer destructors.
 pub fn Emitter(comptime T: type) type {
     return struct {
         io: std.Io,

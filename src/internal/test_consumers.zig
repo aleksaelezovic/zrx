@@ -1,7 +1,7 @@
 // Test-only eager traversal for inspecting the private cursor/transport backend.
-// Application terminal effects use consumers.zig and run.
+// Application terminal effects use ops/ and the run executor.
 const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
+const sequences = @import("../data/sequences.zig");
 const std = @import("std");
 
 // Private fixture helpers for checking cursor output and transport lifetimes.

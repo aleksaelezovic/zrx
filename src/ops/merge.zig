@@ -1,10 +1,33 @@
 const std = @import("std");
-const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
+const composition = @import("../internal/composition.zig");
+const sequences = @import("../data/sequences.zig");
 const Tag = opaque {};
 
 /// Describe concurrent fan-in. Run supplies all transport, Io, and allocation.
 /// Preserve each input's order; cross-input interleaving is unspecified.
+/// Accept a nonempty flat tuple of supported sequence inputs (one is allowed),
+/// all with exactly the same item type. No widening, tagging, or unwrapping:
+/// use each to convert domain inputs explicitly, e.g. into a tagged event union.
+///
+/// Each tuple entry is a delivery edge. Repeating &source duplicates delivery,
+/// not producer activation. Referencing one stable merge shares its chosen
+/// interleaving across consumers; by-value copies are independent descriptions.
+/// Unused declarations claim no readers. Inputs/referents must outlive run.
+///
+/// Run supplies capacity-one output and one independently progressing sequential
+/// forwarder per input. Each can hold one in-flight item besides input/output
+/// buffers. Admission order is not tuple, timestamp, wall-clock, round-robin,
+/// fairness, or deterministic order. An idle input does not block ready peers.
+/// Full output backpressures workers. Local startup is gated; failure can return
+/// ConcurrencyUnavailable rather than falling back to an inline blocking loop.
+///
+/// End only after all inputs end normally and accepted output drains. Input
+/// failure records the first observed error and cancels/joins forwarders, with
+/// no input-index priority or cleanup-error replacement. Other active flows may
+/// already have effects; no rollback. Errors/optionals inside items remain data.
+/// collectThen after merge waits for all inputs; takeLast/batches follow the
+/// chosen interleaving (apply retention before merge for per-input suffixes).
+/// See examples/merge.zig; no dynamic inputs, zip, or combine-latest is implied.
 pub fn merge(inputs: anytype) Merged(@TypeOf(inputs)) {
     var result: Merged(@TypeOf(inputs)) = undefined;
     inline for (0..inputs.len) |i| result.inputs[i] = inputs[i];

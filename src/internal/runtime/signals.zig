@@ -1,6 +1,8 @@
 const std = @import("std");
 const streams = @import("streams.zig");
-const sequences = @import("sequences.zig");
+const sequences = @import("../../data/sequences.zig");
+
+// Cache synchronization belongs to one execution, not to declarations.
 
 pub const Reporter = struct {
     context: *anyopaque,

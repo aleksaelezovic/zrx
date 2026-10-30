@@ -1,96 +1,32 @@
-const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
-const effects = @import("effects.zig");
-const consumers = @import("consumers.zig");
-const streams = @import("streams.zig");
-const declarations = @import("declarations.zig");
-const sources = @import("sources.zig");
-const merging = @import("merging.zig");
-const signals = @import("signals.zig");
-const signal_kind = @import("signal_kind.zig");
+//! Public zrx API. Implementations and contracts live beside their named entry points.
+//! See docs/README.md for guides and executable examples.
 
-pub const filter = sequences.filter;
-pub const each = sequences.each;
-pub const fold = sequences.fold;
-pub const tryFold = sequences.tryFold;
-pub const maxItems = sequences.maxItems;
-pub const takeLast = sequences.takeLast;
-pub const merge = merging.merge;
-pub const hold = signals.hold;
-pub const values = signals.values;
-pub const withLatestFrom = signals.withLatestFrom;
-pub const tap = effects.tap;
-pub const tapWith = effects.tapWith;
-pub const fromIterator = sequences.fromIterator;
-pub const forEach = consumers.forEach;
-pub const forEachWith = consumers.forEachWith;
-pub const collectThen = consumers.collectThen;
-pub const collectThenWith = consumers.collectThenWith;
-pub const batchThen = consumers.batchThen;
-pub const batchThenWith = consumers.batchThenWith;
-pub const Stream = sources.Stream;
-pub const Emitter = sources.Emitter;
-pub const readFrom = streams.readFrom;
-pub const run = declarations.run;
+pub const pipe = @import("pipe.zig").pipe;
+pub const tryPipe = @import("tryPipe.zig").tryPipe;
+pub const run = @import("run.zig").run;
 
-/// Apply a nonempty, flat tuple of operators from left to right.
-/// Types and callbacks specialize at comptime; operator instances may carry
-/// runtime capabilities. Errors/optionals are values, not implicit control flow.
-/// Borrowed results retain their source's lifetime requirements.
-pub fn pipe(value: anytype, operators: anytype) composition.PipelineOutput(@TypeOf(value), @TypeOf(operators)) {
-    return composition.compose(value, operators, 0);
-}
+pub const Stream = @import("data/streams.zig").Stream;
+pub const Emitter = @import("data/streams.zig").Emitter;
+pub const fromIterator = @import("data/iterators.zig").fromIterator;
+pub const readFrom = @import("io/readFrom.zig").readFrom;
 
-/// Explicit fail-fast composition. Always returns E!T, merging initial/stage
-/// error sets. Unwraps outer error unions, never optional or sequence elements.
-/// No rollback, resource cleanup, or scheduling is performed.
-pub fn tryPipe(value: anytype, operators: anytype) composition.TryPipelineOutput(@TypeOf(value), @TypeOf(operators)) {
-    return composition.tryCompose(value, operators, 0);
-}
-
-/// Construct an operator from one typed unary function or a nonempty, flat tuple
-/// of such functions. Tuple transforms compose left to right, not in parallel.
-pub fn map(comptime transforms: anytype) Map(transforms) {
-    // Functions live in the specialized type; the operator needs no fields.
-    return .{};
-}
-
-fn Map(comptime transforms: anytype) type {
-    const functions = composition.functions(transforms, "map");
-    return struct {
-        pub const map_group = composition.MapGroup;
-        pub const map_transforms = functions;
-
-        pub fn Output(comptime Input: type) type {
-            if (signal_kind.isSignal(Input)) return signals.Mapped(Input, functions);
-            return composition.ComposedOutput(Input, @TypeOf(functions), 0);
-        }
-
-        pub fn apply(_: @This(), value: anytype) Output(@TypeOf(value)) {
-            if (comptime signal_kind.isSignal(@TypeOf(value))) return .{ .source = value };
-            return composition.compose(value, functions, 0);
-        }
-    };
-}
-
-/// Keep one value as ?T when its typed predicate matches; otherwise return null.
-/// This does not skip subsequent stages or unwrap an existing optional.
-pub fn keepIf(comptime predicate: anytype) KeepIf(predicate) {
-    return .{};
-}
-
-fn KeepIf(comptime predicate: anytype) type {
-    const Input = composition.PredicateInput(predicate, "keepIf");
-    return struct {
-        pub fn Output(comptime _: type) type {
-            return ?Input;
-        }
-
-        pub fn apply(_: @This(), value: Input) ?Input {
-            // Explicit returns avoid an optional-expression temporary observed
-            // in the pinned LLVM output; no forced inlining is needed.
-            if (predicate(value)) return value;
-            return null;
-        }
-    };
-}
+pub const map = @import("ops/map.zig").map;
+pub const keepIf = @import("ops/keepIf.zig").keepIf;
+pub const each = @import("ops/each.zig").each;
+pub const filter = @import("ops/filter.zig").filter;
+pub const fold = @import("ops/fold.zig").fold;
+pub const tryFold = @import("ops/tryFold.zig").tryFold;
+pub const tap = @import("ops/tap.zig").tap;
+pub const tapWith = @import("ops/tapWith.zig").tapWith;
+pub const maxItems = @import("ops/maxItems.zig").maxItems;
+pub const takeLast = @import("ops/takeLast.zig").takeLast;
+pub const merge = @import("ops/merge.zig").merge;
+pub const hold = @import("ops/hold.zig").hold;
+pub const values = @import("ops/values.zig").values;
+pub const withLatestFrom = @import("ops/withLatestFrom.zig").withLatestFrom;
+pub const forEach = @import("ops/forEach.zig").forEach;
+pub const forEachWith = @import("ops/forEachWith.zig").forEachWith;
+pub const collectThen = @import("ops/collectThen.zig").collectThen;
+pub const collectThenWith = @import("ops/collectThenWith.zig").collectThenWith;
+pub const batchThen = @import("ops/batchThen.zig").batchThen;
+pub const batchThenWith = @import("ops/batchThenWith.zig").batchThenWith;

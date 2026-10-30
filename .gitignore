@@ -1,3 +1,4 @@
 .zig-cache/
 zig-out/
+# Finder metadata, at any depth.
 .DS_Store

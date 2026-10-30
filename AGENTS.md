@@ -179,6 +179,12 @@ edit `AGENTS.md` rather than maintaining copies.
 
 ## Implementation and performance
 
+- Keep `src/root.zig` a thin public export list. Put named executors at the
+  source root, operator implementations in `src/ops/`, declaration/cursor types
+  in `src/data/`, standard I/O glue in `src/io/`, and shared/private machinery
+  in `src/internal/`, grouping live execution machinery in
+  `src/internal/runtime/`. Do not create operator-named wrappers around an
+  unrelated monolith; related forms should share one implementation.
 - Target exactly Zig 0.17.0, as recorded in `.zigversion`; do not silently upgrade
   the compiler or assume a local version manager reads this file.
 - Keep the implementation idiomatic and minimal. Use comptime specialization
@@ -214,8 +220,11 @@ edit `AGENTS.md` rather than maintaining copies.
   required for cross checks. Do not duplicate the target catalog in CI.
 - Keep implemented API examples executable and tested. Clearly label design-only
   snippets as illustrative until implementation exists.
-- Keep current contracts in the topic docs; remove superseded proposals after
-  preserving accepted decisions there. Private cursor/transport fixtures are not
+- Keep API contracts in source doc comments beside their declarations and
+  usage in tested examples. `docs/README.md` indexes them; retain Markdown guides
+  for cross-cutting lifecycle/design context, not duplicated API prose or partial
+  example copies. Merge/remove nearly empty topic files and superseded proposals
+  after preserving accepted decisions. Private cursor/transport fixtures are not
   public API examples: retain their lifecycle coverage when cleaning up retired
   ownership APIs.
 - Format Zig code with the pinned compiler's `zig fmt` and run the documented

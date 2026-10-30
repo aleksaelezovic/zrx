@@ -1,39 +1,11 @@
 const std = @import("std");
 const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
-const streams = @import("streams.zig");
-const declarations = @import("declarations.zig");
+const sequences = @import("../data/sequences.zig");
+const streams = @import("runtime/streams.zig");
+const declarations = @import("../run.zig");
 
-/// Declare per-item effects. Only run traverses input and invokes callbacks.
-pub fn forEach(comptime effect: anytype) Terminal(effect, false, .each) {
-    return .{ .capability = {} };
-}
-
-pub fn forEachWith(capability: anytype, comptime effect: anytype) Terminal(effect, true, .each) {
-    return .{ .capability = capability };
-}
-
-/// Borrow the complete collection during one callback after successful end.
-/// Run frees the shallow backing storage after the callback, even on failure.
-pub fn collectThen(comptime effect: anytype) Terminal(effect, false, .collection) {
-    return .{ .capability = {} };
-}
-
-pub fn collectThenWith(capability: anytype, comptime effect: anytype) Terminal(effect, true, .collection) {
-    return .{ .capability = capability };
-}
-
-/// Borrow successive batches during callbacks. Only successful end flushes a
-/// nonempty partial batch; failure/cancellation discards pending items.
-pub fn batchThen(size: usize, comptime effect: anytype) Terminal(effect, false, .batch) {
-    return .{ .capability = {}, .batch_size = size };
-}
-
-pub fn batchThenWith(size: usize, capability: anytype, comptime effect: anytype) Terminal(effect, true, .batch) {
-    return .{ .capability = capability, .batch_size = size };
-}
-
-fn Terminal(comptime effect: anytype, comptime with_capability: bool, comptime mode: enum { each, collection, batch }) type {
+// One validation/consumption rule for all public terminal variants in ops/.
+pub fn Terminal(comptime effect: anytype, comptime with_capability: bool, comptime mode: enum { each, collection, batch }) type {
     const name = switch (mode) {
         .each => if (with_capability) "forEachWith" else "forEach",
         .collection => if (with_capability) "collectThenWith" else "collectThen",

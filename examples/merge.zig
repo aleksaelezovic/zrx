@@ -1,3 +1,6 @@
+//! Convert distinct inputs into an explicit event union, then apply named
+//! decisions and service effects. Each input stays ordered; their interleaving
+//! is deliberately unspecified. No implicit source tagging or deduplication.
 const std = @import("std");
 const zrx = @import("zrx");
 const Stream = zrx.Stream;

@@ -1,3 +1,4 @@
+//! Shared comptime validation and value composition for both executors.
 const std = @import("std");
 const signal_kind = @import("signal_kind.zig");
 

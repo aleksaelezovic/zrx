@@ -1,3 +1,6 @@
+//! Replacement state starts at 20, then receives 23 and 18; the pure derived
+//! signal produces comfortable, warm, cool. Only run activates these declarations.
+//! Separate fixed writers avoid shared mutable effects between concurrent flows.
 const std = @import("std");
 const zrx = @import("zrx");
 const Stream = zrx.Stream;

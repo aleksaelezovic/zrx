@@ -1,12 +1,15 @@
 // Scoped execution of terminal effect declarations over streams and finite inputs.
 const std = @import("std");
-const composition = @import("composition.zig");
-const sequences = @import("sequences.zig");
-const streams = @import("streams.zig");
-const sources = @import("sources.zig");
-const merging = @import("merging.zig");
-const signal_kind = @import("signal_kind.zig");
-const state = @import("signal_runtime.zig");
+const composition = @import("internal/composition.zig");
+const sequences = @import("data/sequences.zig");
+const streams = @import("internal/runtime/streams.zig");
+const sources = @import("data/streams.zig");
+const merging = @import("ops/merge.zig");
+const each = @import("ops/each.zig").each;
+const filter = @import("ops/filter.zig").filter;
+const maxItems = @import("ops/maxItems.zig").maxItems;
+const signal_kind = @import("internal/signal_kind.zig");
+const state = @import("internal/runtime/signals.zig");
 const FlowTag = opaque {};
 
 fn isSource(comptime T: type) bool {
@@ -40,6 +43,29 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 
 /// Register every selected reader before activating any terminal effect flow.
 /// Collected storage is scoped to callbacks, not returned as an owned result.
+/// Accept a nonempty flat tuple of terminal flow declarations. This is the
+/// allocation, activation, cancellation, and cleanup boundary for both finite
+/// and stream-backed inputs. It supplies allocator/Io, not domain services.
+///
+/// Stable pointer references share address-and-type identity within one run;
+/// by-value descriptions are independent. Only reachable nodes activate. Each
+/// selected edge gets its own reader; unselected declarations pin no buffer.
+/// Preserve input order; independent nodes/effects can execute concurrently.
+/// Descriptions must stay valid/unmodified, capability referents alive and safe
+/// for concurrent use. Each new run creates fresh state and calls producers again.
+///
+/// Run owns queues/readers/workers, terminal buffers, and signal caches. It joins
+/// consumers before freeing buffers, stops state updaters before transport,
+/// stops derived workers before producers, and frees caches after samplers join.
+/// Preparation/consumer/state-worker startup failure activates no producer or
+/// initial maps. Merge's local startup happens after activation: peers may have
+/// worked. First observed failure cancels peers without rollback; cleanup
+/// cancellation cannot replace the chosen result.
+///
+/// Cancellation is cooperative: blocking/long callbacks must cooperate, and
+/// non-returning non-cancelable code cannot be forcibly stopped. Shallow item
+/// referents and application resources are not owned or cleaned up by run.
+/// See docs/execution.md and examples/pipes.zig for the cross-operator lifecycle.
 pub fn run(allocator: std.mem.Allocator, io: std.Io, flows: anytype) anyerror!void {
     const Flows = @TypeOf(flows);
     if (comptime !composition.isTuple(Flows))
@@ -354,11 +380,11 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
             try streams.takeLast(scope.allocator, scope.io, upstream.capacity, reader, reference.limit)
         else block: {
             const view = if (Definition.declaration_kind == .mapped)
-                sequences.each(Definition.declaration_functions).apply(reader)
+                each(Definition.declaration_functions).apply(reader)
             else if (Definition.declaration_kind == .filtered)
-                sequences.filter(Definition.declaration_predicate).apply(reader)
+                filter(Definition.declaration_predicate).apply(reader)
             else if (Definition.declaration_kind == .bounded)
-                sequences.maxItems(reference.limit).apply(reader)
+                maxItems(reference.limit).apply(reader)
             else
                 @compileError("run: unsupported declaration kind");
             break :block try streams.share(scope.allocator, scope.io, upstream.capacity, view);

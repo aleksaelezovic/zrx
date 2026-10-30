@@ -1,18 +1,21 @@
-const composition = @import("composition.zig");
+const composition = @import("../internal/composition.zig");
 
 /// Invoke a typed unary effect once and forward its input. A void callback
 /// yields T; an E!void callback yields E!T. No implicit scheduling or cleanup.
+/// Normal coercions determine the forwarded T; constructing the operator does
+/// not call it. Effects act on a whole value, never consume a view implicitly.
+/// Use a transformation for non-void payloads, forEach for per-element effects.
+///
+/// pipe keeps E!T as data; tryPipe checks it. Optional/element errors remain data.
+/// Bare error-set input cannot be forwarded by a fallible effect (wrap it in a
+/// struct). No retry, rollback, flush, durability, or exactly-once guarantee:
+/// each pipeline call invokes reached effects again. See examples/effects.zig.
 pub fn tap(comptime effect: anytype) Effect(effect, false) {
     return .{ .capability = {} };
 }
 
-/// As tap, with an explicit runtime capability passed before the value.
-/// The capability is copied; referenced resources remain caller-owned.
-pub fn tapWith(capability: anytype, comptime effect: anytype) Effect(effect, true) {
-    return .{ .capability = capability };
-}
-
-fn Effect(comptime effect: anytype, comptime with_capability: bool) type {
+// Shared specialization for the unary/capability forms.
+pub fn Effect(comptime effect: anytype, comptime with_capability: bool) type {
     const name = if (with_capability) "tapWith" else "tap";
     const info = composition.callbackInfo(effect, name ++ ": effect", if (with_capability) 2 else 1);
     const Capability = if (with_capability) info.param_types[0].? else void;

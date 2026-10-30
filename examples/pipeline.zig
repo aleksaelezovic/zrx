@@ -1,3 +1,5 @@
+//! Whole-value composition: grouped map transforms run left to right.
+//! The first callback's typed argument coerces the literal; the result is 7.
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const map = zrx.map;
