@@ -34,8 +34,13 @@ pub const behavior_only_cases = [_][]const u8{ "keep_if", "try_flow", "try_fold"
 
 // These exercise additional API contracts on every target without asserting
 // identical LLVM bodies for imperative loops and lazy adapters.
+// Graph/retention fixtures instantiate run here; strict comparisons above do not.
 pub const cross_only = .{
     .{ .name = "sequences", .path = "tests/cross/sequences.zig" },
     .{ .name = "try-pipe", .path = "tests/cross/try_pipe.zig" },
     .{ .name = "effects", .path = "tests/cross/effects.zig" },
+    .{ .name = "streams", .path = "tests/cross/streams.zig" },
+    .{ .name = "merge", .path = "tests/cross/merge.zig" },
+    .{ .name = "batching", .path = "tests/cross/batching.zig" },
+    .{ .name = "signals", .path = "tests/cross/signals.zig" },
 };

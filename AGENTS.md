@@ -1,12 +1,13 @@
 # Agent instructions
 
 This is the canonical agent instruction file for zrx. Agent-specific instruction
-files are symlinks to this file; edit this file rather than maintaining copies.
+files, including `.github/copilot-instructions.md`, are symlinks to this file;
+edit `AGENTS.md` rather than maintaining copies.
 
 ## Scope and review loop
 
-- zrx is a Zig library for declarative functional pipelines and, later,
-  observables and subscriptions.
+- zrx is a Zig library for declarative functional pipelines, event-stream graphs,
+  and run-owned replacement/derived signal state.
 - Develop in small, reviewable increments. Finish the agreed milestone and stop
   for review; do not implement later milestones speculatively.
 - After completing a task or review step, always recommend a concrete next step
@@ -18,9 +19,15 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   into requirements or preserve the conversation as a transcript.
 - Current scope includes synchronous value composition, scalar `keepIf`, borrowed
   lazy slice sequences with `filter`/`each`, finite `fold`/`tryFold` reduction,
-  explicit collection into caller storage or through an allocator, synchronous
-  `tap`/`tapWith` effects, and fail-fast `tryPipe`. Stop for review before adding
-  reactive behavior.
+  synchronous `tap`/`tapWith` effects and
+  explicit fail-fast `tryPipe`, plus declarative producer-backed streams and
+  grouped `run` execution with automatic reader/result sharing, deferred terminal
+  effects and scoped collection callbacks, optional `maxItems` guards,
+  run-owned `takeLast` suffix retention, declarative fan-in with `merge`,
+  callback-scoped count batching with `batchThen`/`batchThenWith`, and replacement
+  signals with `hold`, `values`, `withLatestFrom`, and single-parent signal `map`.
+  Stop for review before adding writable refs, multi-parent state, time windows,
+  or further reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
 
 ## Long-term direction
@@ -28,8 +35,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
 - Aim to describe whole systems declaratively: externally pushed inputs,
   transformations, decisions, and explicit effects should be visible in named,
   searchable pipeline stages rather than hidden in unrelated control flow.
-- Observables, reactive reducers, subscriptions, and idempotency are future design topics,
-  not implemented contracts. A check-then-skip operator alone does not establish
+- Writable refs, reactive reducers, dynamic subscriptions, and idempotency are
+  future design topics, not implemented contracts. A check-then-skip operator
+  alone does not establish
   durable execution; persistence, atomicity, retries, and crash recovery need
   separate designs. Do not promise exactly-once effects.
 - Reuse Zig standard-library capabilities and conventions before inventing
@@ -75,6 +83,9 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   `fn (A, T) A`; `tryFold` requires `fn (A, T) E!A`. Require an exact state result
   type and reject outer error-union accumulator types. Both are eager left folds
   starting from a shallow copy of the stored seed on each application.
+- Eager folds consume finite infallible cursors, not run-backed graphs or
+  fallible source cursors. A borrowed standard iterator resumes its shared
+  position; do not promise slice-style replay for consuming adapters.
 - `tryFold` stops at the first reducer error under either executor, without an
   extra cursor probe, cleanup, or rollback. `tryPipe` only checks the completed
   reduction's outer result; it does not supply per-item short-circuiting.
@@ -86,20 +97,82 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   Diagnostics should identify the failing stage and expected contract where
   practical. Do not imply arbitrary runtime behavior can be proven at comptime.
 - Make allocation, ownership, lifetimes, side effects, and error propagation
-  explicit. Do not add hidden allocation or implicit scheduling.
+  explicit. Source/graph declarations must not require allocator or Io by
+  default, allocate, start work, or own cleanup. `run(allocator, io, flows)` is
+  the explicit allocation, activation, cancellation, and cleanup boundary.
+- Public `Stream(T)` is a producer declaration, not a live queue owner.
+  Producers receive a call-scoped `Emitter(T)` with push and execution-time
+  allocator/Io; return closes output. `fromProducerWith` borrows a typed
+  single-item capability pointer. Keep capability referents alive through run.
+  Queue/reader/tee/share ownership mechanisms remain internal and tested.
+- Reference the same stable source/derived declaration by pointer to share its
+  execution node within one run. By-value copies are independent descriptions.
+  Each run instantiates fresh transport and calls producers again; it does not
+  replay history or reset borrowed application state.
+- `merge(inputs)` is a resource-free declaration over a nonempty flat tuple of
+  same-item-type inputs; use `each` for explicit conversions. Run owns its input
+  readers, capacity-one output, and forwarding group. Preserve each input edge's
+  order with unspecified interleaving; end only after all inputs end normally.
+  Fail fast on input error and preserve the first observed failure. Repeated
+  references are distinct delivery edges, not duplicate producer activations.
 - Keep `map` a whole-value operation even for arrays and slices. `keepIf` returns
   an optional value; it does not silently skip subsequent pipeline stages.
   `filter` and `each` are explicitly elementwise, borrowed, and lazy. `each`
   transforms elements; it is not an eager effect-only iteration operator.
-- Sequence sources are slices, pointers to arrays, or zrx views; reject arrays by
-  value to avoid returning a view into copied temporary storage. Iteration is
-  repeatable, re-reads source storage, and re-executes callbacks.
-- Allocation-free views and `collectInto` do not require an allocator. Only
-  `collectAlloc(allocator)` allocates output storage; the caller owns and frees
-  the returned slice. Keep storage choices explicit rather than using mode flags.
-- Effectful operators must receive runtime capabilities such as allocator or Io
-  explicitly when needed, rather than inventing implicit global services. Unary
-  `tap` can act on state in its input. The pure core requires neither Io nor
+- Borrowed slice-sequence sources are slices, pointers to arrays, or zrx views;
+  reject arrays by value to avoid returning a view into copied temporary storage.
+  Iteration is repeatable, re-reads source storage, and re-executes callbacks.
+- Stream-backed `each`/`filter`/`maxItems` describe work for `run`. All public
+  terminal `forEach`/`collectThen`/`batchThen` operators and their `With` variants
+  are deferred, for finite inputs and streams alike. Pure whole-value composition
+  and borrowed cursor mechanics remain separate; direct stream iteration is unsupported.
+- `collectThen` callbacks borrow `[]const T` after successful end; run-supplied
+  storage is freed after the callback, including on callback failure. Do not call
+  them for source error, cancellation, or accumulation failure. Capability-backed
+  retention must make an explicitly application-owned copy. The old public
+  `collectInto`/`collectAlloc` APIs are retired; eager helpers are test-only.
+- `maxItems(n)` validates output count at its position: consume but never forward
+  the first excess item, then fail with `TooManyItems`. Exactly n items still
+  requires end/excess observation. It is not prefix-taking, retention, batching,
+  or a lossy queue policy.
+- `takeLast(n)` preallocates a run-owned n-item ring, consumes the full input,
+  and publishes the retained suffix in source order only after successful end.
+  Zero still consumes and observes errors; failure/cancellation discards pending
+  retention. Items are shallow and overwriting does not infer destructors. The
+  ring and `collectThen` storage are separate. Lossy live delivery remains
+  future work.
+- `batchThen(size, effect)` and `batchThenWith(size, capability, effect)` preallocate
+  a positive-size run-owned buffer before activation. Invoke callbacks serially
+  for full batches while input is open; flush a nonempty partial batch only on
+  successful end. Empty input invokes none. Errors/cancellation discard pending
+  items without rolling back earlier effects. Zero returns `InvalidBatchSize`
+  before activation. Callbacks borrow read-only slices only during their calls;
+  reuse storage afterward and free prepared buffers after consumer tasks join,
+  including on preparation/startup failure. Batch-producing streams and timed
+  flushing remain separate work.
+- `hold(initial)` creates a signal declaration from replacement inputs. Signal
+  `map` is deferred and whole-current-value; ordinary maps stay whole-value and
+  stream `each` stays elementwise. Use `values(signal)` for terminal observation,
+  including initial state and every replacement/equal derived result. No implicit
+  equality or coalescing is applied. `withLatestFrom` emits normal typed tuples
+  .{ event, currentValue }, with no flattening and no state consumption.
+- Run initializes state before activation, computes pure single-parent derived
+  candidates outside locks, and commits one root family together. Do not hold
+  cache locks during effects or publication. Source errors fail active runs even
+  when sampled event inputs are idle; error/optional state remains data under
+  `pipe` and `tryPipe`. Completion has a first-result boundary so shutdown
+  cancellation cannot turn successful terminal completion into failure.
+- Signal dependencies are run-scoped, not per-branch retired. Final caches remain
+  sampleable after normal update end until run cleanup. Stop/join updaters and
+  all stream/sampling work before freeing caches. Snapshots copy shallow T, not
+  pointers to live cache slots; referents must remain stable for older queued
+  snapshots too. No setters/getters, feedback safety, global transactions, or
+  multi-root atomic sampling are implied.
+- Effectful operators must receive runtime capabilities explicitly when needed,
+  rather than inventing implicit global services. Producer callbacks may use
+  their emitter's run-supplied allocator/Io; domain services remain explicit
+  capabilities, not a universal execution context. Unary `tap` can act on state
+  in its input. The pure core requires neither Io nor
   implicit error propagation.
 - `tryPipe` provides no rollback or automatic cleanup of owned intermediates;
   keep resource ownership in explicit caller/helper scopes.
@@ -141,6 +214,10 @@ files are symlinks to this file; edit this file rather than maintaining copies.
   required for cross checks. Do not duplicate the target catalog in CI.
 - Keep implemented API examples executable and tested. Clearly label design-only
   snippets as illustrative until implementation exists.
+- Keep current contracts in the topic docs; remove superseded proposals after
+  preserving accepted decisions there. Private cursor/transport fixtures are not
+  public API examples: retain their lifecycle coverage when cleaning up retired
+  ownership APIs.
 - Format Zig code with the pinned compiler's `zig fmt` and run the documented
   checks. Report the compiler version, checks actually run, and any limitations.
 - For documentation-only changes, check links, symlink targets, and whitespace;

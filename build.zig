@@ -17,6 +17,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const runtime_api = b.createModule(.{
+        .root_source_file = b.path("src/runtime_test_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -26,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zrx", .module = zrx }},
         }),
     });
-    const test_step = b.step("test", "Run unit tests, compile-fail checks, and the example");
+    const test_step = b.step("test", "Run unit tests, compile-fail checks, and all examples");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     const try_pipe_tests = b.addTest(.{
         .name = "try-pipe",
@@ -39,12 +44,12 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(try_pipe_tests).step);
     const sequence_tests = b.addTest(.{
-        .name = "sequences",
+        .name = "runtime-sequences",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/sequences.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zrx", .module = zrx }},
+            .imports = &.{.{ .name = "zrx", .module = runtime_api }},
         }),
     });
     test_step.dependOn(&b.addRunArtifact(sequence_tests).step);
@@ -68,6 +73,78 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(effect_tests).step);
+    inline for (.{ "streams", "branching", "sharing" }) |name| {
+        const runtime_tests = b.addTest(.{
+            .name = "runtime-" ++ name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/" ++ name ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zrx", .module = runtime_api }},
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(runtime_tests).step);
+    }
+    const declaration_tests = b.addTest(.{
+        .name = "declarations",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/declarations.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(declaration_tests).step);
+    const terminal_tests = b.addTest(.{
+        .name = "terminals",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/terminals.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(terminal_tests).step);
+    const retention_tests = b.addTest(.{
+        .name = "take-last",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/take_last.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(retention_tests).step);
+    const merge_tests = b.addTest(.{
+        .name = "merge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/merge.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(merge_tests).step);
+    const batch_tests = b.addTest(.{
+        .name = "batching",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/batching.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(batch_tests).step);
+    const signal_tests = b.addTest(.{
+        .name = "signals",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/signals.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(signal_tests).step);
 
     const example = b.addExecutable(.{
         .name = "pipeline",
@@ -130,6 +207,104 @@ pub fn build(b: *std.Build) void {
     const run_reduction = b.addRunArtifact(reduction_example);
     example_step.dependOn(&run_reduction.step);
     test_step.dependOn(&run_reduction.step);
+    const stream_example = b.addExecutable(.{
+        .name = "streams",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/streams.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_streams = b.addRunArtifact(stream_example);
+    const streams_step = b.step("example-streams", "Run the bounded stream pipeline example");
+    streams_step.dependOn(&run_streams.step);
+    example_step.dependOn(&run_streams.step);
+    test_step.dependOn(&run_streams.step);
+    const branching_example = b.addExecutable(.{
+        .name = "branching",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/branching.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_branching = b.addRunArtifact(branching_example);
+    const branching_step = b.step("example-branching", "Run independent capacity-one reader pipelines");
+    branching_step.dependOn(&run_branching.step);
+    example_step.dependOn(&run_branching.step);
+    test_step.dependOn(&run_branching.step);
+    const pipes_example = b.addExecutable(.{
+        .name = "pipes",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pipes.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_pipes = b.addRunArtifact(pipes_example);
+    const pipes_step = b.step("example-pipes", "Run two lazy effect flows over one shared declared pipe");
+    pipes_step.dependOn(&run_pipes.step);
+    example_step.dependOn(&run_pipes.step);
+    test_step.dependOn(&run_pipes.step);
+    const retention_example = b.addExecutable(.{
+        .name = "retention",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/retention.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_retention = b.addRunArtifact(retention_example);
+    const retention_step = b.step("example-retention", "Retain the final 100 of 1000 logs");
+    retention_step.dependOn(&run_retention.step);
+    example_step.dependOn(&run_retention.step);
+    test_step.dependOn(&run_retention.step);
+    const merge_example = b.addExecutable(.{
+        .name = "merge",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/merge.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_merge = b.addRunArtifact(merge_example);
+    const merge_step = b.step("example-merge", "Merge two declared inputs into one decision/effect flow");
+    merge_step.dependOn(&run_merge.step);
+    example_step.dependOn(&run_merge.step);
+    test_step.dependOn(&run_merge.step);
+    const batch_example = b.addExecutable(.{
+        .name = "batching",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/batching.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_batch = b.addRunArtifact(batch_example);
+    const batch_step = b.step("example-batching", "Send 1000 logs in batches of 100");
+    batch_step.dependOn(&run_batch.step);
+    example_step.dependOn(&run_batch.step);
+    test_step.dependOn(&run_batch.step);
+    const signals_example = b.addExecutable(.{
+        .name = "signals",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/signals.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_signals = b.addRunArtifact(signals_example);
+    const signals_step = b.step("example-signals", "Observe replacement and derived signal values");
+    signals_step.dependOn(&run_signals.step);
+    example_step.dependOn(&run_signals.step);
+    test_step.dependOn(&run_signals.step);
 
     const failures = .{
         .{ "empty_pipe", "pipe: operator tuple must not be empty" },
@@ -155,8 +330,6 @@ pub fn build(b: *std.Build) void {
         .{ "each_empty", "each: transformer tuple must not be empty" },
         .{ "each_nested", "each: transformer 1 is a nested tuple; use a flat tuple or a named helper operator" },
         .{ "each_incompatible_input", "expected type 'bool', found 'u32'" },
-        .{ "collect_const_buffer", "collectInto: expected a mutable slice or pointer-to-array" },
-        .{ "collect_wrong_element", "expected type 'u32', found 'bool'" },
         .{ "keep_if_implicit_unwrap", "expected type 'u32', found '?u32'" },
         .{ "invalid_operator_output", "expected type 'bool', found 'u32'" },
         .{ "tap_wrong_return", "tap: effect must return void or an error union with void payload" },
@@ -192,6 +365,70 @@ pub fn build(b: *std.Build) void {
         .{ "try_fold_wrong_arity", "tryFold: reducer must have two explicitly typed runtime parameters and an explicit return type" },
         .{ "try_fold_plain_next", "expected type 'u32', found 'error{Failed}!u32'" },
         .{ "try_fold_empty_wrong_element", "expected type 'bool', found 'u32'" },
+        .{ "fold_stream_source", "fold: run-backed sources cannot be reduced eagerly; use a terminal flow" },
+        .{ "fold_fallible_cursor", "fold: fallible sequence cursors are not supported; reduce an infallible finite source" },
+        .{ "try_fold_fallible_cursor", "tryFold: fallible sequence cursors are not supported; reduce an infallible finite source" },
+        .{ "iterator_value", "fromIterator: expected a mutable single-item pointer to an iterator with next(self) returning ?T or E!?T" },
+        .{ "iterator_wrong_next", "fromIterator: expected a mutable single-item pointer to an iterator with next(self) returning ?T or E!?T" },
+        .{ "iterator_generic", "fromIterator: expected a mutable single-item pointer to an iterator with next(self) returning ?T or E!?T" },
+        .{ "iterator_const", "fromIterator: expected a mutable single-item pointer to an iterator with next(self) returning ?T or E!?T" },
+        .{ "stream_zero_element", "Stream: zero-sized elements are not supported" },
+        .{ "stream_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
+        .{ "take_last_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
+        .{ "take_last_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+        .{ "merge_empty", "merge: input tuple must not be empty" },
+        .{ "merge_non_tuple", "merge: expected a nonempty flat tuple of inputs" },
+        .{ "merge_nested_tuple", "merge: input 2 is a nested tuple; use a flat tuple or a merge declaration" },
+        .{ "merge_item_type", "merge: input 2 must have the same item type as input 1; use each to convert explicitly" },
+        .{ "merge_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+        .{ "merge_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
+        .{ "stream_collection", "has no member named 'collectInto'" },
+        .{ "run_empty", "run: expected a nonempty flat tuple of terminal effect flows" },
+        .{ "run_non_tuple", "run: expected a nonempty flat tuple of terminal effect flows" },
+        .{ "run_non_flow", "run: expected a nonempty flat tuple of terminal effect flows" },
+        .{ "run_nested", "run: expected a nonempty flat tuple of terminal effect flows" },
+        .{ "read_from_invalid", "readFrom: expected a mutable pointer to std.Io.Queue(T); declare stream flows directly" },
+        .{ "read_from_const", "readFrom: expected a mutable pointer to std.Io.Queue(T); declare stream flows directly" },
+        .{ "read_from_owned", "readFrom: expected a mutable pointer to std.Io.Queue(T); declare stream flows directly" },
+        .{ "producer_wrong_return", "Stream.fromProducer: producer must return void or E!void" },
+        .{ "producer_wrong_capability", "Stream.fromProducer: producer must accept *Emitter(T)" },
+        .{ "producer_generic", "Stream.fromProducer: producer must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "producer_function_pointer", "Stream.fromProducer: producer must be a function" },
+        .{ "producer_with_wrong_return", "Stream.fromProducerWith: producer must return void or E!void" },
+        .{ "producer_with_wrong_capability", "expected type '*const u32', found '*const bool'" },
+        .{ "producer_value_capability", "Stream.fromProducerWith: capability must be a single-item pointer" },
+        .{ "producer_with_wrong_arity", "Stream.fromProducerWith: producer must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "producer_with_function_pointer", "Stream.fromProducerWith: producer must be a function" },
+        .{ "for_each_wrong_return", "forEach: effect must return void or an error union with void payload" },
+        .{ "for_each_generic", "forEach: effect must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "for_each_function_pointer", "forEach: effect must be a function" },
+        .{ "for_each_wrong_capability", "expected type 'u32', found 'bool'" },
+        .{ "collect_then_wrong_return", "collectThen: effect must return void or an error union with void payload" },
+        .{ "collect_then_generic", "collectThen: effect must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "collect_then_function_pointer", "collectThen: effect must be a function" },
+        .{ "collect_then_mutable_slice", "collectThen: effect must accept a read-only slice []const T" },
+        .{ "collect_then_scalar", "collectThen: effect must accept a read-only slice []const T" },
+        .{ "collect_then_element", "expected type '[]const bool', found '[]const u32'" },
+        .{ "collect_then_capability", "expected type 'u32', found 'bool'" },
+        .{ "batch_then_wrong_return", "batchThen: effect must return void or an error union with void payload" },
+        .{ "batch_then_generic", "batchThen: effect must have one explicitly typed runtime parameter and an explicit return type" },
+        .{ "batch_then_function_pointer", "batchThen: effect must be a function" },
+        .{ "batch_then_mutable_slice", "batchThen: effect must accept a read-only slice []const T" },
+        .{ "batch_then_scalar", "batchThen: effect must accept a read-only slice []const T" },
+        .{ "batch_then_element", "expected type '[]const bool', found '[]const u32'" },
+        .{ "batch_then_capability", "expected type 'u32', found 'bool'" },
+        .{ "batch_then_with_arity", "batchThenWith: effect must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "signal_each", "each: use map for signals, or each on values(signal)" },
+        .{ "signal_terminal", "signal: use values(signal) for stream operators and terminal effects" },
+        .{ "signal_filter", "signal: use values(signal) for stream operators and terminal effects" },
+        .{ "signal_initial_type", "expected type 'bool', found 'comptime_int'" },
+        .{ "signal_map_input", "expected type 'bool', found 'u32'" },
+        .{ "signal_values_input", "signal: expected a signal declaration; use hold(initial) on an update source" },
+        .{ "signal_sample_input", "signal: expected a signal declaration; use hold(initial) on an update source" },
+        .{ "signal_map_void", "map: signal transforms must return nonzero-sized values; use values and terminal effects" },
+        .{ "signal_map_group_void", "map: signal transforms must return nonzero-sized values; use values and terminal effects" },
+        .{ "signal_initial_undefined", "hold: initial value must not be undefined" },
+        .{ "signal_try_group_unwrap", "expected type 'u32', found 'error{Bad}!u32'" },
     };
     inline for (failures) |failure| {
         const check = b.addTest(.{
@@ -201,6 +438,27 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "zrx", .module = zrx }},
+            }),
+        });
+        check.expect_errors = .{ .contains = failure[1] };
+        test_step.dependOn(&check.step);
+    }
+
+    inline for (.{
+        .{ "collect_const_buffer", "collectInto: expected a mutable slice or pointer-to-array" },
+        .{ "collect_wrong_element", "expected type 'u32', found 'bool'" },
+        .{ "tee_non_stream", "tee: expected a mutable pointer to Stream(T)" },
+        .{ "tee_const_stream", "tee: expected a mutable pointer to Stream(T)" },
+        .{ "tee_standard_queue", "tee: expected a mutable pointer to Stream(T)" },
+        .{ "share_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+    }) |failure| {
+        const check = b.addTest(.{
+            .name = failure[0],
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/compile_fail/" ++ failure[0] ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zrx", .module = runtime_api }},
             }),
         });
         check.expect_errors = .{ .contains = failure[1] };

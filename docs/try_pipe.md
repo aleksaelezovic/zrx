@@ -39,12 +39,15 @@ no operator that changes executor policy halfway through a pipeline.
 
 Failure does not roll back earlier state changes or free intermediate owned
 values. Arrange cleanup in a caller-owned scope or a named helper with Zig
-`defer` or `errdefer`. Allocating via `collectAlloc` before a later fallible stage
-can lose the only reference to that allocation when an error is returned; the
-caller must arrange ownership explicitly.
+`defer` or `errdefer`. A custom stage allocating an owned result before a later
+fallible stage can lose the only reference when an error is returned; arrange
+ownership explicitly. Run-owned terminal buffers have their own
+[execution cleanup boundary](pipes.md#ownership-and-cleanup).
 
 There is no implicit allocation, scheduling, retry, or resource-management
-runtime. A successful return does not imply durable persistence.
+runtime in `tryPipe` itself. Graph descriptions, including signal maps, remain
+descriptions: `tryPipe` does not inspect deferred signal values or replace `run`.
+A successful return does not imply durable persistence.
 
 ## Validation
 

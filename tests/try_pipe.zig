@@ -5,7 +5,6 @@ const tryPipe = zrx.tryPipe;
 const map = zrx.map;
 const keepIf = zrx.keepIf;
 const each = zrx.each;
-const collectInto = zrx.collectInto;
 
 fn double(value: u32) u32 {
     return value * 2;
@@ -150,14 +149,11 @@ test "tryPipe preserves null and void; error data can be transformed or boxed" {
 
 test "tryPipe does not inspect error unions inside lazy sequence elements" {
     const source = [_]u32{ 0, 2 };
-    var storage: [2]error{Zero}!u32 = undefined;
-    const result = try tryPipe(&source, .{
-        each(nonzero),
-        collectInto(&storage),
-    });
-    try std.testing.expectEqual(@as(usize, 2), result.len);
-    try std.testing.expectError(error.Zero, result[0]);
-    try std.testing.expectEqual(@as(u32, 2), try result[1]);
+    const result = try tryPipe(&source, .{each(nonzero)});
+    var cursor = result.iterator();
+    try std.testing.expectError(error.Zero, cursor.next().?);
+    try std.testing.expectEqual(@as(u32, 2), try cursor.next().?);
+    try std.testing.expectEqual(@as(?error{Zero}!u32, null), cursor.next());
 }
 
 test "resource cleanup remains with the caller on tryPipe failure" {

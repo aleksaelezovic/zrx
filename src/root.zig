@@ -1,15 +1,37 @@
 const composition = @import("composition.zig");
 const sequences = @import("sequences.zig");
 const effects = @import("effects.zig");
+const consumers = @import("consumers.zig");
+const streams = @import("streams.zig");
+const declarations = @import("declarations.zig");
+const sources = @import("sources.zig");
+const merging = @import("merging.zig");
+const signals = @import("signals.zig");
+const signal_kind = @import("signal_kind.zig");
 
 pub const filter = sequences.filter;
 pub const each = sequences.each;
 pub const fold = sequences.fold;
 pub const tryFold = sequences.tryFold;
-pub const collectInto = sequences.collectInto;
-pub const collectAlloc = sequences.collectAlloc;
+pub const maxItems = sequences.maxItems;
+pub const takeLast = sequences.takeLast;
+pub const merge = merging.merge;
+pub const hold = signals.hold;
+pub const values = signals.values;
+pub const withLatestFrom = signals.withLatestFrom;
 pub const tap = effects.tap;
 pub const tapWith = effects.tapWith;
+pub const fromIterator = sequences.fromIterator;
+pub const forEach = consumers.forEach;
+pub const forEachWith = consumers.forEachWith;
+pub const collectThen = consumers.collectThen;
+pub const collectThenWith = consumers.collectThenWith;
+pub const batchThen = consumers.batchThen;
+pub const batchThenWith = consumers.batchThenWith;
+pub const Stream = sources.Stream;
+pub const Emitter = sources.Emitter;
+pub const readFrom = streams.readFrom;
+pub const run = declarations.run;
 
 /// Apply a nonempty, flat tuple of operators from left to right.
 /// Types and callbacks specialize at comptime; operator instances may carry
@@ -40,10 +62,12 @@ fn Map(comptime transforms: anytype) type {
         pub const map_transforms = functions;
 
         pub fn Output(comptime Input: type) type {
+            if (signal_kind.isSignal(Input)) return signals.Mapped(Input, functions);
             return composition.ComposedOutput(Input, @TypeOf(functions), 0);
         }
 
         pub fn apply(_: @This(), value: anytype) Output(@TypeOf(value)) {
+            if (comptime signal_kind.isSignal(@TypeOf(value))) return .{ .source = value };
             return composition.compose(value, functions, 0);
         }
     };

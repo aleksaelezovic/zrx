@@ -1,4 +1,5 @@
 const std = @import("std");
+const signal_kind = @import("signal_kind.zig");
 
 pub fn isTuple(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -140,7 +141,7 @@ fn Errors(comptime T: type) type {
 }
 
 fn TryStepResult(comptime Input: type, comptime Step: type) type {
-    if (isMapGroup(Step)) return TryValueOutput(Input, @TypeOf(Step.map_transforms), 0);
+    if (isMapGroup(Step) and !signal_kind.isSignal(Input)) return TryValueOutput(Input, @TypeOf(Step.map_transforms), 0);
     const Result = StepOutput(Input, Step);
     if (@typeInfo(Result) == .error_set) {
         @compileError("tryPipe: bare error-set stage results are not supported; wrap error data in a struct");
@@ -170,7 +171,7 @@ pub fn tryCompose(value: anytype, steps: anytype, comptime index: usize) TryComp
 // boundary: a nested payload error union is data, not another automatic try.
 fn tryComposeValue(value: anytype, steps: anytype, comptime index: usize) TryValueOutput(@TypeOf(value), @TypeOf(steps), index) {
     const Step = @TypeOf(steps[index]);
-    const result = if (comptime isMapGroup(Step))
+    const result = if (comptime isMapGroup(Step) and !signal_kind.isSignal(@TypeOf(value)))
         tryComposeValue(value, Step.map_transforms, 0)
     else
         invoke(value, steps[index]);

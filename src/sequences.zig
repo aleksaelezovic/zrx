@@ -1,6 +1,17 @@
-const std = @import("std");
 const composition = @import("composition.zig");
-const SequenceTag = opaque {};
+const signal_kind = @import("signal_kind.zig");
+pub const SequenceTag = opaque {};
+pub const GraphTag = opaque {};
+
+pub fn isGraph(comptime Input: type) bool {
+    const T = if (@typeInfo(Input) == .pointer and @typeInfo(Input).pointer.size == .one)
+        @typeInfo(Input).pointer.child
+    else
+        Input;
+    if (@typeInfo(T) != .@"struct") return false;
+    if (@hasDecl(T, "graph_tag") and T.graph_tag == GraphTag) return true;
+    return @hasDecl(T, "declaration_source") and isGraph(T.declaration_source);
+}
 
 /// Construct a borrowed, lazy filtered view. The predicate is not run until next().
 pub fn filter(comptime predicate: anytype) Filter(predicate) {
@@ -25,10 +36,82 @@ pub fn each(comptime transforms: anytype) Each(transforms) {
     return .{};
 }
 
+/// Fail on the first excess item, without forwarding it or truncating input.
+pub fn maxItems(limit: usize) MaxItems {
+    return .{ .limit = limit };
+}
+
+/// Retain a shallow final suffix, publishing it only after successful input end.
+/// Ring storage belongs to run; even finite inputs cannot iterate this directly.
+pub fn takeLast(limit: usize) TakeLast {
+    return .{ .limit = limit };
+}
+
+const TakeLast = struct {
+    limit: usize,
+
+    pub fn Output(comptime Input: type) type {
+        const Element = Item(Input);
+        return struct {
+            source: Input,
+            limit: usize,
+            pub const sequence_tag = SequenceTag;
+            pub const graph_tag = GraphTag;
+            pub const Item = Element;
+            pub const declaration_source = Input;
+            pub const declaration_kind = .retained;
+        };
+    }
+
+    pub fn apply(self: @This(), source: anytype) Output(@TypeOf(source)) {
+        return .{ .source = source, .limit = self.limit };
+    }
+};
+
+const MaxItems = struct {
+    limit: usize,
+
+    pub fn Output(comptime Input: type) type {
+        return Bounded(Input);
+    }
+
+    pub fn apply(self: @This(), source: anytype) Output(@TypeOf(source)) {
+        return .{ .source = source, .limit = self.limit };
+    }
+};
+
+fn Bounded(comptime Source: type) type {
+    const Element = Item(Source);
+    return struct {
+        source: Source,
+        limit: usize,
+        pub const sequence_tag = SequenceTag;
+        pub const Item = Element;
+        pub const declaration_source = Source;
+        pub const declaration_kind = .bounded;
+        pub const Iterator = struct {
+            input: Cursor(Source),
+            remaining: usize,
+
+            pub fn next(self: *@This()) (Errors(Source) || error{TooManyItems})!?Element {
+                const value = (if (comptime isFallible(Source)) try self.input.next() else self.input.next()) orelse return null;
+                if (self.remaining == 0) return error.TooManyItems;
+                self.remaining -= 1;
+                return @as(?Element, value);
+            }
+        };
+
+        pub fn iterator(self: @This()) Iterator {
+            return .{ .input = cursor(self.source), .remaining = self.limit };
+        }
+    };
+}
+
 fn Each(comptime transforms: anytype) type {
     const functions = composition.functions(transforms, "each");
     return struct {
         pub fn Output(comptime Input: type) type {
+            if (signal_kind.isSignal(Input)) @compileError("each: use map for signals, or each on values(signal)");
             return Mapped(Input, functions);
         }
 
@@ -38,13 +121,18 @@ fn Each(comptime transforms: anytype) type {
     };
 }
 
-fn isView(comptime Source: type) bool {
-    return @typeInfo(Source) == .@"struct" and @hasDecl(Source, "sequence_tag") and
-        Source.sequence_tag == SequenceTag;
+fn ViewType(comptime Source: type) ?type {
+    const T = if (@typeInfo(Source) == .pointer and @typeInfo(Source).pointer.size == .one)
+        @typeInfo(Source).pointer.child
+    else
+        Source;
+    return if (@typeInfo(T) == .@"struct" and @hasDecl(T, "sequence_tag") and
+        T.sequence_tag == SequenceTag) T else null;
 }
 
-fn Item(comptime Source: type) type {
-    if (isView(Source)) return Source.Item;
+pub fn Item(comptime Source: type) type {
+    if (signal_kind.isSignal(Source)) @compileError("signal: use values(signal) for stream operators and terminal effects");
+    if (ViewType(Source)) |View| return View.Item;
     if (@typeInfo(Source) == .pointer) {
         const info = @typeInfo(Source).pointer;
         if (info.size == .slice) return info.child;
@@ -53,8 +141,10 @@ fn Item(comptime Source: type) type {
     @compileError("sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference");
 }
 
-fn Cursor(comptime Source: type) type {
-    if (isView(Source)) return Source.Iterator;
+pub fn Cursor(comptime Source: type) type {
+    if (isGraph(Source))
+        @compileError("stream declarations execute through run; use a terminal effect instead of direct iteration");
+    if (ViewType(Source)) |View| return View.Iterator;
     const Element = Item(Source);
     // A slice for-loop has no resumable cursor. Keep only its traversal state
     // for these lazy adapters, using Zig's usual next() convention.
@@ -71,9 +161,71 @@ fn Cursor(comptime Source: type) type {
     };
 }
 
-fn cursor(source: anytype) Cursor(@TypeOf(source)) {
-    if (comptime isView(@TypeOf(source))) return source.iterator();
+pub fn cursor(source: anytype) Cursor(@TypeOf(source)) {
+    if (comptime ViewType(@TypeOf(source)) != null) return source.iterator();
     return .{ .source = source };
+}
+
+pub fn isFallible(comptime Source: type) bool {
+    return @typeInfo(@typeInfo(@TypeOf(Cursor(Source).next)).@"fn".return_type.?) == .error_union;
+}
+
+pub fn Errors(comptime Source: type) type {
+    const Return = @typeInfo(@TypeOf(Cursor(Source).next)).@"fn".return_type.?;
+    return if (@typeInfo(Return) == .error_union) @typeInfo(Return).error_union.error_set else error{};
+}
+
+fn NextResult(comptime Source: type, comptime Element: type) type {
+    return if (isFallible(Source)) Errors(Source)!?Element else ?Element;
+}
+
+/// Borrow a conventional mutable iterator. Construction never calls next.
+/// New view iterators share this input's position; they do not rewind or clone it.
+pub fn fromIterator(input: anytype) PullView(BorrowedCursor(@TypeOf(input))) {
+    return .{ .input = .{ .input = input } };
+}
+
+fn BorrowedCursor(comptime Pointer: type) type {
+    const contract = "fromIterator: expected a mutable single-item pointer to an iterator with next(self) returning ?T or E!?T";
+    if (@typeInfo(Pointer) != .pointer or @typeInfo(Pointer).pointer.size != .one or
+        @typeInfo(Pointer).pointer.attrs.@"const")
+        @compileError(contract);
+    const Input = @typeInfo(Pointer).pointer.child;
+    if (@typeInfo(Input) != .@"struct" or !@hasDecl(Input, "next"))
+        @compileError(contract);
+    const info = switch (@typeInfo(@TypeOf(Input.next))) {
+        .@"fn" => |info| info,
+        else => @compileError(contract),
+    };
+    if (info.is_generic or info.attrs.varargs or info.param_types.len != 1 or
+        info.param_types[0] != Pointer or info.return_type == null)
+        @compileError(contract);
+    const Return = info.return_type.?;
+    const Payload = composition.Payload(Return);
+    if (@typeInfo(Payload) != .optional) @compileError(contract);
+    return struct {
+        input: Pointer,
+
+        pub fn next(self: *@This()) Return {
+            return self.input.next();
+        }
+    };
+}
+
+// Internal bridge for adapters whose cursor owns its small traversal state.
+pub fn PullView(comptime Input: type) type {
+    const Return = @typeInfo(@TypeOf(Input.next)).@"fn".return_type.?;
+    const Element = @typeInfo(composition.Payload(Return)).optional.child;
+    return struct {
+        input: Input,
+        pub const sequence_tag = SequenceTag;
+        pub const Item = Element;
+        pub const Iterator = Input;
+
+        pub fn iterator(self: @This()) Iterator {
+            return self.input;
+        }
+    };
 }
 
 fn Filtered(comptime Source: type, comptime predicate: anytype) type {
@@ -84,12 +236,15 @@ fn Filtered(comptime Source: type, comptime predicate: anytype) type {
         source: Source,
         pub const sequence_tag = SequenceTag;
         pub const Item = Element;
+        pub const declaration_source = Source;
+        pub const declaration_kind = .filtered;
+        pub const declaration_predicate = predicate;
         pub const Iterator = struct {
             input: Cursor(Source),
 
-            pub fn next(self: *@This()) ?Element {
-                while (self.input.next()) |value| {
-                    if (predicate(value)) return value;
+            pub fn next(self: *@This()) NextResult(Source, Element) {
+                while (if (comptime isFallible(Source)) try self.input.next() else self.input.next()) |value| {
+                    if (predicate(value)) return @as(?Element, value);
                 }
                 return null;
             }
@@ -111,12 +266,16 @@ fn Mapped(comptime Source: type, comptime functions: anytype) type {
         source: Source,
         pub const sequence_tag = SequenceTag;
         pub const Item = Element;
+        pub const declaration_source = Source;
+        pub const declaration_kind = .mapped;
+        pub const declaration_functions = functions;
         pub const Iterator = struct {
             input: Cursor(Source),
 
-            pub fn next(self: *@This()) ?Element {
-                const value = self.input.next() orelse return null;
-                return composition.compose(value, functions, 0);
+            pub fn next(self: *@This()) NextResult(Source, Element) {
+                const value = (if (comptime isFallible(Source)) try self.input.next() else self.input.next()) orelse return null;
+                // The optional boundary keeps element errors/nulls inside the item.
+                return @as(?Element, composition.compose(value, functions, 0));
             }
         };
 
@@ -163,6 +322,12 @@ fn Fold(comptime reducer: anytype, comptime fallible: bool) type {
         initial: State,
 
         pub fn Output(comptime Input: type) type {
+            if (isGraph(Input)) {
+                @compileError(name ++ ": run-backed sources cannot be reduced eagerly; use a terminal flow");
+            }
+            if (isFallible(Input)) {
+                @compileError(name ++ ": fallible sequence cursors are not supported; reduce an infallible finite source");
+            }
             // Check even empty sources, without running callbacks.
             _ = @TypeOf(reducer(@as(State, undefined), @as(Item(Input), undefined)));
             return Result;
@@ -178,64 +343,3 @@ fn Fold(comptime reducer: anytype, comptime fallible: bool) type {
         }
     };
 }
-
-/// Collect into borrowed mutable storage, without allocation. On overflow the
-/// written prefix remains modified and one additional element has been evaluated.
-pub fn collectInto(buffer: anytype) CollectInto(BufferItem(@TypeOf(buffer))) {
-    return .{ .buffer = buffer };
-}
-
-fn BufferItem(comptime Buffer: type) type {
-    if (@typeInfo(Buffer) == .pointer) {
-        const info = @typeInfo(Buffer).pointer;
-        if (!info.attrs.@"const") {
-            if (info.size == .slice) return info.child;
-            if (info.size == .one and @typeInfo(info.child) == .array) return @typeInfo(info.child).array.child;
-        }
-    }
-    @compileError("collectInto: expected a mutable slice or pointer-to-array");
-}
-
-fn CollectInto(comptime Element: type) type {
-    return struct {
-        buffer: []Element,
-
-        pub fn Output(comptime Input: type) type {
-            _ = @TypeOf(@as(Element, @as(Item(Input), undefined)));
-            return error{NoSpaceLeft}![]Element;
-        }
-
-        pub fn apply(self: @This(), source: anytype) Output(@TypeOf(source)) {
-            var input = cursor(source);
-            var written: usize = 0;
-            while (input.next()) |value| {
-                if (written == self.buffer.len) return error.NoSpaceLeft;
-                self.buffer[written] = value;
-                written += 1;
-            }
-            return self.buffer[0..written];
-        }
-    };
-}
-
-/// Allocate an owned result with the supplied standard allocator. Free the
-/// returned slice with the same allocator; source storage remains borrowed.
-pub fn collectAlloc(allocator: std.mem.Allocator) CollectAlloc {
-    return .{ .allocator = allocator };
-}
-
-const CollectAlloc = struct {
-    allocator: std.mem.Allocator,
-
-    pub fn Output(comptime Input: type) type {
-        return std.mem.Allocator.Error![]Item(Input);
-    }
-
-    pub fn apply(self: @This(), source: anytype) Output(@TypeOf(source)) {
-        var result: std.ArrayList(Item(@TypeOf(source))) = .empty;
-        errdefer result.deinit(self.allocator);
-        var input = cursor(source);
-        while (input.next()) |value| try result.append(self.allocator, value);
-        return result.toOwnedSlice(self.allocator);
-    }
-};

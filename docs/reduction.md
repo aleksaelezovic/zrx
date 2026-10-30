@@ -5,6 +5,13 @@ an existing borrowed slice, pointer to an array, or zrx view in source order.
 They return one accumulated value without materializing the sequence.
 See the executable [reduction example](../examples/reduction.zig).
 
+These eager value operators stay separate from run-backed stream graphs.
+Their source cursor must be infallible: stream declarations and fallible
+iterator adapters/count guards are not accepted directly. Use a run terminal
+such as `collectThen` and reduce its finite callback slice when needed.
+Source-error propagation for eager reduction is a separate contract, not
+silently added to the reviewed reducer error sets.
+
 | Operator | Reducer | Stage output |
 |---|---|---|
 | `fold(initialState, reducer)` | `fn (A, T) A` | `A` |
@@ -35,8 +42,11 @@ times and cursor `next()` `n + 1` times, including exhaustion.
 
 Upstream lazy callbacks run interleaved with reduction as needed to produce
 each item; filters can examine more source items than they yield. Views remain
-reusable: another application starts over, rereads storage, and reruns callbacks.
-Arrays by value, bare cursors, and arbitrary iterators are not accepted sources.
+reusable over slices: another application starts over, rereads storage, and reruns
+callbacks. An infallible conventional iterator may be borrowed explicitly through
+`fromIterator`; reuse then resumes its shared position rather than rewinding.
+Such consuming sources must eventually end for reduction to complete. Arrays
+by value, bare cursors, and arbitrary unadapted iterators are not accepted sources.
 Even empty input must satisfy source and callback type contracts at comptime.
 
 ## Loop errors and pipeline errors

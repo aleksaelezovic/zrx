@@ -1,4 +1,6 @@
 const std = @import("std");
+// Internal cursor/materialization fixtures; public terminal lifecycle is tested
+// through run in terminals.zig.
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const map = zrx.map;

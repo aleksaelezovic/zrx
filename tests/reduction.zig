@@ -5,6 +5,7 @@ const tryPipe = zrx.tryPipe;
 const map = zrx.map;
 const filter = zrx.filter;
 const each = zrx.each;
+const fromIterator = zrx.fromIterator;
 const fold = zrx.fold;
 const tryFold = zrx.tryFold;
 const tapWith = zrx.tapWith;
@@ -299,4 +300,24 @@ test "tryFold error sets merge with input and later stage errors" {
     try std.testing.expectEqual(error{ Initial, Zero, TooLarge }!u64, @TypeOf(result));
     try std.testing.expectError(error.TooLarge, result);
     try std.testing.expectEqual(@as(u64, 5), try tryPipe(source[0..2], .{ tryFold(2, checkedAdd), map(Helpers.finish) }));
+}
+
+test "folds borrow standard infallible iterators without rewinding or extra probes" {
+    const Helpers = struct {
+        fn count(total: usize, text: []const u8) usize {
+            return total + text.len;
+        }
+        fn checked(total: usize, text: []const u8) error{Empty}!usize {
+            if (text.len == 0) return error.Empty;
+            return count(total, text);
+        }
+    };
+    var pieces = std.mem.splitScalar(u8, "a,bb,ccc", ',');
+    const view = fromIterator(&pieces);
+    try std.testing.expectEqual(@as(usize, 6), pipe(view, .{fold(0, Helpers.count)}));
+    try std.testing.expectEqual(@as(usize, 7), pipe(view, .{fold(7, Helpers.count)}));
+
+    var failing = std.mem.splitScalar(u8, "a,,c", ',');
+    try std.testing.expectError(error.Empty, pipe(fromIterator(&failing), .{tryFold(0, Helpers.checked)}));
+    try std.testing.expectEqualStrings("c", failing.next().?);
 }

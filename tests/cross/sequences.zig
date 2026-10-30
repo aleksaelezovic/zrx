@@ -6,8 +6,10 @@ const filter = zrx.filter;
 const each = zrx.each;
 const fold = zrx.fold;
 const tryFold = zrx.tryFold;
-const collectInto = zrx.collectInto;
-const collectAlloc = zrx.collectAlloc;
+const collectThenWith = zrx.collectThenWith;
+const maxItems = zrx.maxItems;
+const takeLast = zrx.takeLast;
+const run = zrx.run;
 
 fn even(value: u32) bool {
     return value % 2 == 0;
@@ -29,23 +31,42 @@ export fn view_coverage(source: [*]const u32, len: usize) u32 {
     return total;
 }
 
-export fn buffer_coverage(source: [*]const u32, len: usize, buffer: [*]u32, capacity: usize) usize {
-    const result = pipe(source[0..len], .{
+const Destination = struct {
+    buffer: []u32,
+    len: usize = 0,
+
+    fn copy(self: *@This(), values: []const u32) !void {
+        if (values.len > self.buffer.len) return error.NoSpaceLeft;
+        @memcpy(self.buffer[0..values.len], values);
+        self.len = values.len;
+    }
+};
+
+export fn buffer_coverage(allocator: *const std.mem.Allocator, io: *const std.Io, source: [*]const u32, len: usize, buffer: [*]u32, capacity: usize) usize {
+    var destination: Destination = .{ .buffer = buffer[0..capacity] };
+    const flow = pipe(source[0..len], .{
         filter(even),
         each(twice),
-        collectInto(buffer[0..capacity]),
-    }) catch return std.math.maxInt(usize);
-    return result.len;
+        maxItems(capacity),
+        collectThenWith(&destination, Destination.copy),
+    });
+    run(allocator.*, io.*, .{flow}) catch return std.math.maxInt(usize);
+    return destination.len;
 }
 
-export fn allocation_coverage(allocator: *const std.mem.Allocator, source: [*]const u32, len: usize) usize {
-    const owned = pipe(source[0..len], .{
+fn storeLength(destination: *usize, values: []const u32) void {
+    destination.* = values.len;
+}
+
+export fn allocation_coverage(allocator: *const std.mem.Allocator, io: *const std.Io, source: [*]const u32, len: usize) usize {
+    var length: usize = 0;
+    const flow = pipe(source[0..len], .{
         filter(even),
         each(twice),
-        collectAlloc(allocator.*),
-    }) catch return std.math.maxInt(usize);
-    defer allocator.free(owned);
-    return owned.len;
+        collectThenWith(&length, storeLength),
+    });
+    run(allocator.*, io.*, .{flow}) catch return std.math.maxInt(usize);
+    return length;
 }
 
 fn accumulate(total: u64, value: u32) u64 {
@@ -94,4 +115,16 @@ fn checkedAccumulate(total: u64, value: u32) error{Zero}!u64 {
 export fn try_fold_coverage(source: [*]const u32, len: usize, initial: u64, output: *u64) bool {
     output.* = pipe(source[0..len], .{tryFold(initial, checkedAccumulate)}) catch return false;
     return true;
+}
+
+export fn retention_coverage(allocator: *const std.mem.Allocator, io: *const std.Io, source: [*]const u32, len: usize, limit: usize, buffer: [*]u32, capacity: usize) usize {
+    var destination: Destination = .{ .buffer = buffer[0..capacity] };
+    const flow = pipe(source[0..len], .{
+        takeLast(limit),
+        each(twice),
+        maxItems(capacity),
+        collectThenWith(&destination, Destination.copy),
+    });
+    run(allocator.*, io.*, .{flow}) catch return std.math.maxInt(usize);
+    return destination.len;
 }
