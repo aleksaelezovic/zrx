@@ -18,3 +18,6 @@ pub const Stream = runtime.Stream;
 pub const tee = runtime.tee;
 pub const share = runtime.share;
 pub const readFrom = core.readFrom;
+pub const io_api = core;
+pub const line_records = @import("data/lines.zig");
+pub const resources = @import("internal/resources.zig");

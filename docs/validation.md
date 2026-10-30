@@ -15,12 +15,17 @@ zig build check
 ```
 
 - `test`: native behavior, compile-fail fixtures, codegen-parser/fixture tests,
-  and every executable example. Invalid contracts must fail with their expected
-  diagnostic; unrelated errors or successful compilation fail the check.
+  and executable example coverage. Invalid contracts must fail with their expected
+  diagnostic; unrelated errors or successful compilation fail the check. I/O
+  entry points compile, their actual graphs run with finite files/loopback peers,
+  and the CLI executable receives scripted stdin with exact stdout/stderr checks.
+  [External example tests](../tests/io_examples.zig) import the same composition
+  functions used by the entry points, keeping fixtures/assertions out of examples.
 - `check`: formatting, native tests, cross builds, and scoped codegen comparisons.
 - `fmt`, `cross`, `codegen`: focused build steps using the same configuration.
-- `example`: all examples; the [index](README.md#executable-examples) lists
-  focused commands for stream examples.
+- `example`: finite noninteractive demos; the [index](README.md#executable-examples)
+  lists focused commands. `io-examples` builds/installs live-I/O executables
+  without running them or waiting for external input.
 
 Native coverage includes ordering, coercions/type transitions, single/tuple
 equivalence, errors-as-data, fail-fast boundaries, caller ownership, graph
@@ -29,12 +34,17 @@ retention, batching, merge, and signal coherence/completion. Private transport/
 cursor helpers preserve low-level tests without re-exposing retired public
 ownership APIs. Neither tests nor comptime checks prove arbitrary callback
 purity, termination, lifetime safety, or thread safety.
+Line-I/O coverage includes framing across short reads, record ownership,
+resource acquisition/cleanup, startup/allocation failures, write failure,
+exclusive file creation, rerun, and cancellation of a blocked TCP read.
 
 ## Cross-target and codegen scope
 
 The single [catalog](../tests/codegen/catalog.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly. Exported
 runtime-input fixtures actually instantiate APIs, including graph execution.
+OS-backed line I/O is hosted-only (five targets); the catalog records that
+restriction. Inline line-value composition is checked on all six targets.
 Object compilation exercises target code/object writers; it is **not foreign
 runtime execution**, support for all Zig targets, or a graph benchmark.
 

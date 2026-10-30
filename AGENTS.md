@@ -26,6 +26,9 @@ edit `AGENTS.md` rather than maintaining copies.
   run-owned `takeLast` suffix retention, declarative fan-in with `merge`,
   callback-scoped count batching with `batchThen`/`batchThenWith`, and replacement
   signals with `hold`, `values`, `withLatestFrom`, and single-parent signal `map`.
+  High-level bounded line I/O includes stdin/stdout/stderr, path-based file
+  input/output, and outgoing receive-only TCP, with run-owned acquire/release
+  and terminal finalization. Listeners and full-duplex sessions remain separate.
   Stop for review before adding writable refs, multi-parent state, time windows,
   or further reactive behavior.
 - A formatter, linter, or canonicalizing optimizer is separate future work.
@@ -35,6 +38,9 @@ edit `AGENTS.md` rather than maintaining copies.
 - Aim to describe whole systems declaratively: externally pushed inputs,
   transformations, decisions, and explicit effects should be visible in named,
   searchable pipeline stages rather than hidden in unrelated control flow.
+- Treat multi-pipe programs activated by one `run` as the design target.
+  Validate external-I/O abstractions with small terminal, filesystem, and network
+  programs; keep domain decisions in named stages, not hidden in adapter loops.
 - Writable refs, reactive reducers, dynamic subscriptions, and idempotency are
   future design topics, not implemented contracts. A check-then-skip operator
   alone does not establish
@@ -46,6 +52,10 @@ edit `AGENTS.md` rather than maintaining copies.
 - Prefer standard readers/writers and existing iterator APIs where they fit.
   Add only the small composition adapters needed by zrx, not parallel stream,
   iterator, or I/O frameworks.
+- Prefer high-level I/O declarations taking paths, standard-library addresses,
+  and explicit options; run should instantiate and manage their resources.
+  Borrowed-handle primitives are secondary interoperability, not required setup
+  for the default user-facing API.
 
 ## Public API and contracts
 
@@ -176,6 +186,16 @@ edit `AGENTS.md` rather than maintaining copies.
   implicit error propagation.
 - `tryPipe` provides no rollback or automatic cleanup of owned intermediates;
   keep resource ownership in explicit caller/helper scopes.
+- Line I/O declares configuration, never open handles. Run acquires selected
+  endpoints after preparation/gated worker startup and closes owned resources
+  only after work joins. Successful line output includes flushing, not fsync;
+  failure/cancellation drops pending buffering without rollback. Process stdio
+  handles are not owned. Reject duplicate standard endpoints/textual file
+  conflicts; do not claim path canonicalization or shared-writer serialization.
+- `Line(n)` stores bounded bytes inline so fan-out/retention/collection cannot
+  borrow a reusable read buffer. LF is framing; CR/encoding remain data.
+  High-level live-I/O executables are opt-in, never human/network waits in the
+  default checks. Test their actual graphs with finite fixtures/loopback peers.
 
 ## Implementation and performance
 
@@ -220,6 +240,9 @@ edit `AGENTS.md` rather than maintaining copies.
   required for cross checks. Do not duplicate the target catalog in CI.
 - Keep implemented API examples executable and tested. Clearly label design-only
   snippets as illustrative until implementation exists.
+- Keep examples focused on entry points, reusable composition, and named stages.
+  Put example integration tests/fixtures under `tests/`, importing the same
+  composition functions, and retain executable smoke checks for entry points.
 - Keep API contracts in source doc comments beside their declarations and
   usage in tested examples. `docs/README.md` indexes them; retain Markdown guides
   for cross-cutting lifecycle/design context, not duplicated API prose or partial

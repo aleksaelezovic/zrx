@@ -32,10 +32,16 @@ pub const assembly_cases = .{
 // cross builds covered without claiming equality or weakening the comparator.
 pub const behavior_only_cases = [_][]const u8{ "keep_if", "try_flow", "try_fold" };
 
-// These exercise additional API contracts on every target without asserting
+// These exercise additional API contracts on applicable targets without asserting
 // identical LLVM bodies for imperative loops and lazy adapters.
 // Graph/retention fixtures instantiate run here; strict comparisons above do not.
-pub const cross_only = .{
+const CrossFixture = struct {
+    name: []const u8,
+    path: []const u8,
+    requires_hosted: bool = false,
+};
+
+pub const cross_only = [_]CrossFixture{
     .{ .name = "sequences", .path = "tests/cross/sequences.zig" },
     .{ .name = "try-pipe", .path = "tests/cross/try_pipe.zig" },
     .{ .name = "effects", .path = "tests/cross/effects.zig" },
@@ -43,4 +49,7 @@ pub const cross_only = .{
     .{ .name = "merge", .path = "tests/cross/merge.zig" },
     .{ .name = "batching", .path = "tests/cross/batching.zig" },
     .{ .name = "signals", .path = "tests/cross/signals.zig" },
+    .{ .name = "line-values", .path = "tests/cross/line_values.zig" },
+    // Process handles/cwd and OS sockets have no freestanding host.
+    .{ .name = "io", .path = "tests/cross/io.zig", .requires_hosted = true },
 };

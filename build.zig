@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zrx", .module = zrx }},
         }),
     });
-    const test_step = b.step("test", "Run unit tests, compile-fail checks, and all examples");
+    const test_step = b.step("test", "Run tests, diagnostics, and noninteractive examples");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     const try_pipe_tests = b.addTest(.{
         .name = "try-pipe",
@@ -73,6 +73,47 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(effect_tests).step);
+    const io_tests = b.addTest(.{
+        .name = "io",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/io.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = runtime_api }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(io_tests).step);
+    const io_example_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/io_examples.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zrx", .module = zrx }},
+    });
+    const io_examples_step = b.step("io-examples", "Build/install opt-in terminal, file, and TCP programs");
+    inline for (.{ "cli", "file", "tcp" }) |name| {
+        const program = b.addExecutable(.{
+            .name = "io-" ++ name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/io_" ++ name ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zrx", .module = zrx }},
+            }),
+        });
+        io_examples_step.dependOn(&b.addInstallArtifact(program, .{}).step);
+        test_step.dependOn(&program.step);
+        io_example_test_module.addImport("io_" ++ name, program.root_module);
+        if (comptime std.mem.eql(u8, name, "cli")) {
+            const smoke = b.addRunArtifact(program);
+            smoke.setStdIn(.{ .bytes = "ping\nupper Hello, Zig!\nunknown\n" });
+            smoke.expectStdOutEqual("pong\nHELLO, ZIG!\n");
+            smoke.expectStdErrEqual("error: expected ping or upper TEXT\n");
+            smoke.expectExitCode(0);
+            test_step.dependOn(&smoke.step);
+        }
+    }
+    const io_example_tests = b.addTest(.{ .name = "io-examples", .root_module = io_example_test_module });
+    test_step.dependOn(&b.addRunArtifact(io_example_tests).step);
     inline for (.{ "streams", "branching", "sharing" }) |name| {
         const runtime_tests = b.addTest(.{
             .name = "runtime-" ++ name,
@@ -307,6 +348,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_signals.step);
 
     const failures = .{
+        .{ "line_zero", "Line: maxBytes must be positive" },
+        .{ "line_sink_item", "line output: expected Line(maxBytes) items" },
+        .{ "line_file_path", "expected type '[]const u8', found 'bool'" },
+        .{ "line_tcp_address", "expected type 'Io.net.IpAddress', found 'u16'" },
         .{ "empty_pipe", "pipe: operator tuple must not be empty" },
         .{ "empty_map", "map: transformer tuple must not be empty" },
         .{ "nested_pipe", "pipe: stage 2 is a nested tuple; use a flat tuple or a named helper operator" },
@@ -518,14 +563,16 @@ pub fn build(b: *std.Build) void {
         );
         cross_step.dependOn(&object.step);
         inline for (codegen.cross_only) |fixture| {
-            const coverage = addCrossObject(
-                b,
-                cross_zrx,
-                cross_target,
-                b.fmt("{s}-{s}", .{ fixture.name, triple }),
-                b.path(fixture.path),
-            );
-            cross_step.dependOn(&coverage.step);
+            if (!fixture.requires_hosted or cross_target.result.os.tag != .freestanding) {
+                const coverage = addCrossObject(
+                    b,
+                    cross_zrx,
+                    cross_target,
+                    b.fmt("{s}-{s}", .{ fixture.name, triple }),
+                    b.path(fixture.path),
+                );
+                cross_step.dependOn(&coverage.step);
+            }
         }
         const comparison = b.addRunArtifact(checker);
         comparison.addArg(triple);

@@ -10,7 +10,7 @@ their code in partial snippets.
 1. [Execution, sharing, and ownership](execution.md)
 2. [Signal coherence and lifecycle](state.md)
 3. [Toolchain, testing, and codegen scope](validation.md)
-4. [Future terminal, TCP, and filesystem adapters](../src/io/README.md) — not implemented
+4. [Terminal, file, and TCP programs](../src/io/README.md)
 
 ## API reference
 
@@ -25,6 +25,7 @@ Source paths below are documentation/navigation, not new package imports.
 | Eager finite reduction | [`fold`](../src/ops/fold.zig), [`tryFold`](../src/ops/tryFold.zig) |
 | Synchronous whole-value effects | [`tap`](../src/ops/tap.zig), [`tapWith`](../src/ops/tapWith.zig) |
 | Input declarations/adapters | [`Stream` / `Emitter`](../src/data/streams.zig), [`fromIterator`](../src/data/iterators.zig), [`readFrom`](../src/io/readFrom.zig) |
+| Value-owned line I/O | [`Line` / `line`](../src/data/lines.zig), [`stdinLines` / `fileLines` / `tcpLines` and output terminals](../src/io/lines.zig) |
 | Count guard / suffix retention | [`maxItems`](../src/ops/maxItems.zig), [`takeLast`](../src/ops/takeLast.zig) |
 | Fan-in | [`merge`](../src/ops/merge.zig) |
 | State | [`hold`](../src/ops/hold.zig), [`values`](../src/ops/values.zig), [`withLatestFrom`](../src/ops/withLatestFrom.zig), signal [`map`](../src/ops/map.zig) |
@@ -40,7 +41,9 @@ output types, ordering, and ownership.
 
 ## Executable examples
 
-`zig build example` runs all examples, also included in `zig build test`.
+`zig build example` runs the finite, noninteractive demos below. `zig build test`
+also checks the I/O program entry points and runs their graphs with finite test
+endpoints/loopback peers. Live I/O entry points are opt-in; see the I/O guide.
 
 | Example | What it demonstrates | Focused command |
 |---|---|---|
@@ -56,6 +59,9 @@ output types, ordering, and ownership.
 | [Merge](../examples/merge.zig) | Explicit event union, decisions, service effects | `zig build example-merge` |
 | [Batching](../examples/batching.zig) | 1000 logs in ten batches of 100 | `zig build example-batching` |
 | [Signals](../examples/signals.zig) | Initial/replacement temperature and derived comfort | `zig build example-signals` |
+| [CLI interpreter](../examples/io_cli.zig) | Named command parsing/decisions and two terminal pipes | `zig build io-examples` (build only) |
+| [File extraction](../examples/io_file.zig) | Path-based input, exclusive output, rejected-line diagnostics | `zig build io-examples` (build only) |
+| [TCP display](../examples/io_tcp.zig) | One receive-only connection shared by display and file audit | `zig build io-examples` (build only) |
 
 ## Source layout
 

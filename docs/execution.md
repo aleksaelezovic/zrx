@@ -77,6 +77,10 @@ reader records, producer/forwarding/updater tasks, caches, and prepared batch
 buffers. Resources/readers and gated consumer/state workers are prepared before
 initial signal maps and activation. Preparation or consumer/state-worker startup
 failure frees partial runtime state without producer/effect/initial-map calls.
+Selected high-level I/O endpoints are acquired after that startup and before
+initial maps/data activation. Partially acquired endpoints are released on
+failure. File creation/truncation or connections are effects of acquisition,
+not rollback-safe preparation. Empty file-output flows still create their file.
 Merge's local forwarding-worker startup occurs after graph activation; its gate
 prevents partial local forwarding, but peer flows may already have worked.
 
@@ -85,6 +89,9 @@ are freed; updaters stop before publication transport; derived workers stop
 before upstream producers. Caches survive until samplers and stream work join.
 Collection buffers are freed in their consumer after the callback or on failure.
 Prepared cold batch/retention storage is also freed on startup failure.
+Owned I/O files/sockets close after all work joins. Line terminals flush before
+successful completion; cleanup does not flush failed/canceled buffered output.
+Process stdin/stdout/stderr handles remain open; their run-owned buffers do not.
 
 Collection/batch callbacks borrow read-only slices **only during their calls**.
 Join work using them before returning, or copy into explicitly application-owned

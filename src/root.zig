@@ -9,6 +9,14 @@ pub const Stream = @import("data/streams.zig").Stream;
 pub const Emitter = @import("data/streams.zig").Emitter;
 pub const fromIterator = @import("data/iterators.zig").fromIterator;
 pub const readFrom = @import("io/readFrom.zig").readFrom;
+pub const Line = @import("data/lines.zig").Line;
+pub const line = @import("data/lines.zig").line;
+pub const stdinLines = @import("io/lines.zig").stdinLines;
+pub const fileLines = @import("io/lines.zig").fileLines;
+pub const tcpLines = @import("io/lines.zig").tcpLines;
+pub const stdoutLines = @import("io/lines.zig").stdoutLines;
+pub const stderrLines = @import("io/lines.zig").stderrLines;
+pub const writeFileLines = @import("io/lines.zig").writeFileLines;
 
 pub const map = @import("ops/map.zig").map;
 pub const keepIf = @import("ops/keepIf.zig").keepIf;

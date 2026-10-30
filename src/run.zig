@@ -10,6 +10,8 @@ const filter = @import("ops/filter.zig").filter;
 const maxItems = @import("ops/maxItems.zig").maxItems;
 const signal_kind = @import("internal/signal_kind.zig");
 const state = @import("internal/runtime/signals.zig");
+const resources = @import("internal/resources.zig");
+const line_io = @import("io/lines.zig");
 const FlowTag = opaque {};
 
 fn isSource(comptime T: type) bool {
@@ -29,6 +31,8 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
             try self.consumer.prepare(scope.allocator);
             const node = try resolve(scope, &self.source);
             self.reader = try node.acquire(scope.allocator);
+            if (@hasDecl(Consumer, "prepareResources"))
+                try self.consumer.prepareResources(&scope.resources);
         }
 
         fn execute(self: *@This(), allocator: std.mem.Allocator, io: std.Io) !void {
@@ -62,9 +66,16 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 /// worked. First observed failure cancels peers without rollback; cleanup
 /// cancellation cannot replace the chosen result.
 ///
+/// High-level line I/O resources are acquired after preparation and gated worker
+/// startup, before initial maps/data activation. Only selected nodes acquire.
+/// Partial acquisition is cleaned up; acquisition can itself create/truncate
+/// files/connect and is not rolled back. I/O terminals include flushing in their
+/// successful completion. Owned handles close after all users join; process
+/// stdio handles remain open. Equal paths do not imply shared resource identity.
+///
 /// Cancellation is cooperative: blocking/long callbacks must cooperate, and
 /// non-returning non-cancelable code cannot be forcibly stopped. Shallow item
-/// referents and application resources are not owned or cleaned up by run.
+/// referents and caller-supplied capabilities remain borrowed, not run-owned.
 /// See docs/execution.md and examples/pipes.zig for the cross-operator lifecycle.
 pub fn run(allocator: std.mem.Allocator, io: std.Io, flows: anytype) anyerror!void {
     const Flows = @TypeOf(flows);
@@ -81,7 +92,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, flows: anytype) anyerror!vo
     // runtime fields for mutable consumer storage and stable worker addresses.
     var definitions: @Tuple(@typeInfo(Flows).@"struct".field_types) = undefined;
     inline for (0..count) |i| definitions[i] = flows[i];
-    var scope: Scope = .{ .allocator = allocator, .io = io };
+    var scope: Scope = .{
+        .allocator = allocator,
+        .io = io,
+        .resources = .{ .allocator = allocator, .io = io },
+    };
     defer scope.deinit();
     defer inline for (0..count) |i| definitions[i].deinit(allocator);
     inline for (0..count) |i| try definitions[i].prepare(&scope);
@@ -115,6 +130,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, flows: anytype) anyerror!vo
             return execution.failure().?;
         };
     }
+    try scope.resources.acquireAll();
     for (scope.families.items) |family| try family.initialize();
     try io.checkCancel();
     execution.armed.set(io);
@@ -179,6 +195,7 @@ const Node = struct {
 const Scope = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    resources: resources.Scope,
     index: std.AutoHashMapUnmanaged(Key, *Node) = .{},
     nodes: std.ArrayList(*Node) = .empty,
     signal_index: std.AutoHashMapUnmanaged(Key, *state.Entry) = .{},
@@ -221,6 +238,7 @@ const Scope = struct {
         for (self.families.items) |family| family.destroy(self.allocator);
         self.families.deinit(self.allocator);
         self.signal_index.deinit(self.allocator);
+        self.resources.deinit();
     }
 };
 
@@ -320,7 +338,17 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     };
     if (scope.index.get(key)) |node| return @ptrCast(@alignCast(node.context));
 
-    if (root) {
+    if (comptime line_io.isSource(Definition)) {
+        if (reference.capacity == 0) return error.UnsupportedCapacity;
+        try scope.reserve();
+        const owner = try scope.allocator.create(streams.Stream(Element));
+        errdefer scope.allocator.destroy(owner);
+        owner.* = try reference.instantiate(&scope.resources);
+        errdefer owner.deinit();
+        const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity);
+        scope.insert(key, &runtime.node);
+        return runtime;
+    } else if (root) {
         if (reference.capacity == 0) return error.UnsupportedCapacity;
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
