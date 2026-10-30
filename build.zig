@@ -90,11 +90,16 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "zrx", .module = zrx }},
     });
     const io_examples_step = b.step("io-examples", "Build/install opt-in terminal, file, and TCP programs");
-    inline for (.{ "cli", "file", "tcp" }) |name| {
+    inline for (.{
+        .{ .file = "io_cli", .executable = "io-cli" },
+        .{ .file = "io_file", .executable = "io-file" },
+        .{ .file = "io_tcp", .executable = "io-tcp" },
+        .{ .file = "io_tcp_take", .executable = "io-tcp-take" },
+    }) |example| {
         const program = b.addExecutable(.{
-            .name = "io-" ++ name,
+            .name = example.executable,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/io_" ++ name ++ ".zig"),
+                .root_source_file = b.path("examples/" ++ example.file ++ ".zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -102,8 +107,8 @@ pub fn build(b: *std.Build) void {
         });
         io_examples_step.dependOn(&b.addInstallArtifact(program, .{}).step);
         test_step.dependOn(&program.step);
-        io_example_test_module.addImport("io_" ++ name, program.root_module);
-        if (comptime std.mem.eql(u8, name, "cli")) {
+        io_example_test_module.addImport(example.file, program.root_module);
+        if (comptime std.mem.eql(u8, example.file, "io_cli")) {
             const smoke = b.addRunArtifact(program);
             smoke.setStdIn(.{ .bytes = "ping\nupper Hello, Zig!\nunknown\n" });
             smoke.expectStdOutEqual("pong\nHELLO, ZIG!\n");
@@ -146,6 +151,16 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(terminal_tests).step);
+    const take_tests = b.addTest(.{
+        .name = "take",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/take.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(take_tests).step);
     const retention_tests = b.addTest(.{
         .name = "take-last",
         .root_module = b.createModule(.{
@@ -348,6 +363,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_signals.step);
 
     const failures = .{
+        .{ "take_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+        .{ "take_stream_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
+        .{ "take_signal", "signal: use values(signal) for stream operators and terminal effects" },
+        .{ "take_limit", "expected type 'usize', found 'bool'" },
         .{ "line_zero", "Line: maxBytes must be positive" },
         .{ "line_sink_item", "line output: expected Line(maxBytes) items" },
         .{ "line_file_path", "expected type '[]const u8', found 'bool'" },

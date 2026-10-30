@@ -16,6 +16,7 @@ const writeFileLines = zrx.writeFileLines;
 const forEach = zrx.forEach;
 const collectThenWith = zrx.collectThenWith;
 const takeLast = zrx.takeLast;
+const take = zrx.take;
 const stdoutLines = zrx.stdoutLines;
 const stdinLines = zrx.stdinLines;
 const run = zrx.run;
@@ -208,6 +209,35 @@ test "an absent input does not create its dependent output" {
         pipe(&input, .{writeFileLines(output_path, .{ .exclusive = true })}),
     }));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(io, "output", .{}));
+}
+
+test "take zero still acquires selected files but never reads their content" {
+    const Probe = struct {
+        var reads: std.atomic.Value(usize) = .init(0);
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_read_streaming) _ = reads.fetchAdd(1, .monotonic);
+            return io.vtable.operate(userdata, operation);
+        }
+    };
+    Probe.reads.store(0, .monotonic);
+    var table = io.vtable.*;
+    table.operate = Probe.operate;
+    const observed: std.Io = .{ .vtable = &table, .userdata = io.userdata };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const input_path = try temporaryPath(&tmp, "input");
+    defer allocator.free(input_path);
+    const output_path = try temporaryPath(&tmp, "output");
+    defer allocator.free(output_path);
+    const input = fileLines(input_path, 4, 1);
+    const flow = pipe(&input, .{ take(0), writeFileLines(output_path, .{ .exclusive = true }) });
+    try std.testing.expectError(error.FileNotFound, run(allocator, observed, .{flow}));
+    try tmp.dir.writeFile(io, .{ .sub_path = "input", .data = "abc\n" });
+    try run(allocator, observed, .{flow});
+    try std.testing.expectEqual(@as(usize, 0), Probe.reads.load(.monotonic));
+    const output = try tmp.dir.readFileAlloc(io, "output", allocator, .limited(16));
+    defer allocator.free(output);
+    try std.testing.expectEqual(@as(usize, 0), output.len);
 }
 
 test "standard output wrappers do not own or close process handles" {

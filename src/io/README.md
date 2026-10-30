@@ -16,8 +16,10 @@ cleanup. Standard stdin/stdout/stderr handles remain open.
   output file and send rejected entries to stderr.
 - [TCP display](../../examples/io_tcp.zig): LF-framed `INFO`/`WARN` messages;
   share decoding between stdout display and a new file audit.
+- [TCP take](../../examples/io_tcp_take.zig): share the first n records
+  between display and a new file; finish without waiting for peer EOF.
 
-API details live beside the source declarations. All three example graphs are
+API details live beside the source declarations. All example graphs are
 tested externally in [the I/O example suite](../../tests/io_examples.zig) using
 finite endpoints; TCP tests use a local controlled peer.
 
@@ -41,6 +43,12 @@ records, and closing to signal EOF:
 
 ```sh
 ./zig-out/bin/io-tcp 127.0.0.1 9000 NEW_AUDIT_PATH
+```
+
+To stop successfully after five records even when the peer stays open:
+
+```sh
+./zig-out/bin/io-tcp-take 127.0.0.1 9000 5 NEW_OUTPUT_PATH
 ```
 
 Live invocations are opt-in. `zig build test` compiles the actual entry points

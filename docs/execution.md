@@ -36,6 +36,13 @@ derived node evaluates once per item it processes, then distributes results.
 Repeating `&source` in a merge is two delivery edges, not two activations.
 Referencing one merge shares the same chosen interleaving among its consumers.
 
+Successful stream completion detaches that edge. A node with no remaining
+stream readers retires its inputs and stops its producer, releasing backpressure
+through exclusive chains without stopping still-demanded siblings. Reader/queue
+storage and owned I/O handles remain allocated until joined run cleanup.
+Signal families/caches remain run-scoped; ended observation delivery does not
+stop their updates or sampling.
+
 See the [shared-pipe example](../examples/pipes.zig) and
 [merge example](../examples/merge.zig). Shared mutable capabilities require
 application synchronization: independent nodes/flows can run concurrently.
@@ -51,6 +58,9 @@ not replay, coalescing, fairness, or a lossy queue policy.
 
 Queue bounds do **not** bound a whole-input collection. Choose:
 
+- [`take(n)`](../src/ops/take.zig): forward up to n items, then complete successfully
+  without an extra input probe or waiting for EOF. Short input is successful.
+  Zero reads none, while selected-resource acquisition rules still apply.
 - [`maxItems(n)`](../src/ops/maxItems.zig): reject excess at its pipeline position,
   consuming but not forwarding the first excess item. Reaching n still waits for
   end/excess; this cannot make an endless source finite.
@@ -65,6 +75,9 @@ Operator order matters: a guard before filtering counts input; afterward it
 counts matches. Retention/batching after merge follows the chosen interleaving,
 not separate per-input sequences. Retention and collection own separate storage;
 there is no implied buffer transfer or deep payload-memory bound.
+Prefix completion bounds delivery at its position, not upstream prefetch/work or
+effects. Observed failures before cutoff propagate; another live branch or
+signal dependency can still fail the run after a prefix branch completes.
 
 Current lowering materializes owned transport per recognized derived node,
 including linear ones. It reuses standard Io/transport machinery, not a new
@@ -109,7 +122,8 @@ where appropriate; see the [I/O adapter scope](../src/io/README.md).
 
 Source/iterator/callback failures are execution errors; optional/error-valued
 items remain data. Standard queue closure means end only after draining;
-a producer returning `Closed` is still a failure.
+an observed producer `Closed` error is still a failure. Completed prefixes do
+not probe for later source outcomes; other active edges/dependencies still can.
 
 The first observed failure fails the run and cancels peers. No input/tuple-index
 priority is promised. Peer buffered prefixes, pending collection, partial batches,

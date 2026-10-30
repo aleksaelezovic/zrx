@@ -60,6 +60,7 @@ Collection/batching over `values` counts the initial snapshot.
 |---|---|
 | Update input ends normally | Final cache remains sampleable; observations drain/close |
 | Event input ends | Its sampling flow finishes without waiting for more updates |
+| Observation prefix ends | Detach its delivery; keep caches/updaters alive for the run |
 | Update source fails | Fail the run, including idle samplers without observers |
 | Optional/error-valued state | Preserve it as data, under both pipe executors |
 | All selected terminals finish | End the run and stop remaining updater dependencies |
@@ -67,7 +68,9 @@ Collection/batching over `values` counts the initial snapshot.
 | Another run | Fresh declared initial caches/input execution, not external-state rewind |
 
 Dependencies are supervised for the **whole run**, not retired independently per
-branch. Final caches survive until run cleanup, not afterward. Completion and
+branch. A finished `take` observation no longer backpressures publication, but
+does not retire the signal family or suppress its source failures.
+Final caches survive until run cleanup, not afterward. Completion and
 dependency failure use a synchronized first-result boundary: a failure observed
 first fails execution; shutdown cancellation cannot overturn chosen success.
 Pending notifications/partial collection/batches can be discarded on failure.

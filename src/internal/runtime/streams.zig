@@ -12,6 +12,11 @@ pub fn Stream(comptime T: type) type {
     return struct {
         const Self = @This();
         const Buffer = broadcast.Buffer(T);
+        const Retirement = struct {
+            context: *anyopaque,
+            inputs: *const fn (*anyopaque) void,
+            unused: *const fn (*anyopaque) void,
+        };
         pub const sequence_tag = sequences.SequenceTag;
         pub const Item = T;
         const State = struct {
@@ -30,6 +35,7 @@ pub fn Stream(comptime T: type) type {
             stopped: bool = false,
             start_error: ?std.Io.ConcurrentError = null,
             external_error: ?anyerror = null,
+            retirement: ?Retirement = null,
         };
         state: *State,
 
@@ -146,6 +152,12 @@ pub fn Stream(comptime T: type) type {
             if (self.state.buffer.len == 0) self.state.rendezvous.close(self.state.io);
         }
 
+        // Run alone owns these edges; borrowed low-level stream adapters do not
+        // gain ownership of their input. Install only during graph preparation.
+        pub fn setRetirement(self: *Self, context: *anyopaque, inputs: *const fn (*anyopaque) void, unused: *const fn (*anyopaque) void) void {
+            self.state.retirement = .{ .context = context, .inputs = inputs, .unused = unused };
+        }
+
         // Internal externally driven publishers (signal values) carry an outer
         // execution error even though they have no owned producer future.
         pub fn fail(self: *Self, err: anyerror) void {
@@ -212,6 +224,7 @@ pub fn Stream(comptime T: type) type {
                 if (self.state.buffer_state.detach(self.record)) {
                     var owner: Self = .{ .state = self.state };
                     owner.close();
+                    if (self.state.retirement) |retirement| retirement.unused(retirement.context);
                 }
             }
 
@@ -267,6 +280,7 @@ pub fn Stream(comptime T: type) type {
         fn runProducer(state: *State) anyerror!void {
             var output: Self = .{ .state = state };
             const result = state.producer.?(state.capability, &output);
+            if (state.retirement) |retirement| retirement.inputs(retirement.context);
             output.close();
             state.buffer_state.producerPending(false);
             return result;
@@ -445,8 +459,13 @@ fn Owner(comptime Pointer: type) type {
     return Source;
 }
 
-// Package-internal execution cleanup. Consumers must already have joined.
+// Package-internal stop/join, also used by last-reader retirement during run.
+// Storage destruction still waits until all reader/cursor users have joined.
 pub fn stopProducer(source: anytype) void {
     source.close();
+    // Reader retirement may race a completed reader's Future.await or another
+    // retirement. Futures are not threadsafe; serialize all joins of this task.
+    source.state.result_mutex.lockUncancelable(source.state.io);
+    defer source.state.result_mutex.unlock(source.state.io);
     if (source.state.task) |*task| task.cancel(source.state.io) catch {};
 }

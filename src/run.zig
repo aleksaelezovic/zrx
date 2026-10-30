@@ -8,6 +8,7 @@ const merging = @import("ops/merge.zig");
 const each = @import("ops/each.zig").each;
 const filter = @import("ops/filter.zig").filter;
 const maxItems = @import("ops/maxItems.zig").maxItems;
+const take = @import("ops/take.zig").take;
 const signal_kind = @import("internal/signal_kind.zig");
 const state = @import("internal/runtime/signals.zig");
 const resources = @import("internal/resources.zig");
@@ -37,6 +38,9 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 
         fn execute(self: *@This(), allocator: std.mem.Allocator, io: std.Io) !void {
             try self.consumer.consume(self.reader.?, allocator, io);
+            // Success retires this branch. Failure is reported first and uses
+            // run-wide shutdown, preserving signal backpressure during unwind.
+            self.reader.?.close();
         }
 
         fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -54,6 +58,8 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 /// Stable pointer references share address-and-type identity within one run;
 /// by-value descriptions are independent. Only reachable nodes activate. Each
 /// selected edge gets its own reader; unselected declarations pin no buffer.
+/// Successful branches detach; unused stream nodes stop and retire their input
+/// edges without stopping demanded siblings. State families stay run-scoped.
 /// Preserve input order; independent nodes/effects can execute concurrently.
 /// Descriptions must stay valid/unmodified, capability referents alive and safe
 /// for concurrent use. Each new run creates fresh state and calls producers again.
@@ -185,6 +191,10 @@ const Execution = struct {
 };
 
 const Key = struct { address: usize, type_id: usize };
+const Edge = struct {
+    context: *anyopaque,
+    close: *const fn (*anyopaque) void,
+};
 const Node = struct {
     context: *anyopaque,
     finalize: *const fn (*anyopaque) void,
@@ -249,19 +259,34 @@ fn Runtime(comptime T: type) type {
         owner: *streams.Stream(T),
         capacity: usize,
         split: streams.Stream(T).Split,
+        inputs: []Edge,
         used: usize = 0,
         clones: std.ArrayList(*streams.Stream(T).Reader) = .empty,
 
-        fn create(gpa: std.mem.Allocator, owner: *streams.Stream(T), capacity: usize) !*Self {
+        fn create(gpa: std.mem.Allocator, owner: *streams.Stream(T), capacity: usize, inputs: anytype) !*Self {
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
+            const edges = try gpa.alloc(Edge, inputs.len);
+            errdefer gpa.free(edges);
+            inline for (inputs, 0..) |input, i| {
+                const Reader = @typeInfo(@TypeOf(input)).pointer.child;
+                const Close = struct {
+                    fn call(context: *anyopaque) void {
+                        const reader: *Reader = @ptrCast(@alignCast(context));
+                        reader.close();
+                    }
+                };
+                edges[i] = .{ .context = input, .close = Close.call };
+            }
             const split = try streams.tee(owner);
             self.* = .{
                 .node = .{ .context = self, .finalize = finalize, .stop = stop, .destroy = destroy },
                 .owner = owner,
                 .capacity = capacity,
                 .split = split,
+                .inputs = edges,
             };
+            owner.setRetirement(self, retireInputs, unused);
             return self;
         }
 
@@ -290,6 +315,16 @@ fn Runtime(comptime T: type) type {
         fn stop(context: *anyopaque) void {
             streams.stopProducer(cast(context).owner);
         }
+        fn retireInputs(context: *anyopaque) void {
+            // Reader.close is synchronized and idempotent. Different producers
+            // may retire sibling edges concurrently; never infer ownership from
+            // arbitrary iterator fields or close run-scoped signal dependencies.
+            for (cast(context).inputs) |edge| edge.close(edge.context);
+        }
+        fn unused(context: *anyopaque) void {
+            retireInputs(context);
+            streams.stopProducer(cast(context).owner);
+        }
         fn destroy(context: *anyopaque, gpa: std.mem.Allocator) void {
             const self = cast(context);
             for (self.clones.items) |reader| {
@@ -298,6 +333,7 @@ fn Runtime(comptime T: type) type {
             }
             self.clones.deinit(gpa);
             self.split.deinit();
+            gpa.free(self.inputs);
             self.owner.deinit();
             gpa.destroy(self.owner);
             gpa.destroy(self);
@@ -345,7 +381,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try reference.instantiate(&scope.resources);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity, .{});
         scope.insert(key, &runtime.node);
         return runtime;
     } else if (root) {
@@ -355,7 +391,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try sources.instantiate(reference.*, scope.allocator, scope.io);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity, .{});
         scope.insert(key, &runtime.node);
         return runtime;
     } else if (comptime signal_kind.isValues(Definition)) {
@@ -366,7 +402,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try streams.Stream(Element).init(scope.allocator, scope.io, 1);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, 1);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, 1, .{});
         scope.insert(key, &runtime.node);
         cell.observation = owner;
         cell.observation_node = runtime;
@@ -380,7 +416,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try state.sample(scope.allocator, scope.io, reader, signal_kind.Value(@TypeOf(reference.signal)), cell);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, 1);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, 1, .{reader});
         scope.insert(key, &runtime.node);
         return runtime;
     } else if (comptime merging.isMerge(Definition)) {
@@ -395,7 +431,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try streams.merge(scope.allocator, scope.io, 1, readers);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, 1);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, 1, readers);
         scope.insert(key, &runtime.node);
         return runtime;
     } else if (comptime @typeInfo(Definition) == .@"struct" and @hasDecl(Definition, "declaration_source")) {
@@ -413,12 +449,14 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
                 filter(Definition.declaration_predicate).apply(reader)
             else if (Definition.declaration_kind == .bounded)
                 maxItems(reference.limit).apply(reader)
+            else if (Definition.declaration_kind == .taken)
+                take(reference.limit).apply(reader)
             else
                 @compileError("run: unsupported declaration kind");
             break :block try streams.share(scope.allocator, scope.io, upstream.capacity, view);
         };
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, upstream.capacity);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, upstream.capacity, .{reader});
         scope.insert(key, &runtime.node);
         return runtime;
     } else {
@@ -430,7 +468,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = try streams.share(scope.allocator, scope.io, 1, input);
         errdefer owner.deinit();
-        const runtime = try Runtime(Element).create(scope.allocator, owner, 1);
+        const runtime = try Runtime(Element).create(scope.allocator, owner, 1, .{});
         scope.insert(key, &runtime.node);
         return runtime;
     }

@@ -49,6 +49,7 @@ pub const cross_only = [_]CrossFixture{
     .{ .name = "merge", .path = "tests/cross/merge.zig" },
     .{ .name = "batching", .path = "tests/cross/batching.zig" },
     .{ .name = "signals", .path = "tests/cross/signals.zig" },
+    .{ .name = "take", .path = "tests/cross/take.zig" },
     .{ .name = "line-values", .path = "tests/cross/line_values.zig" },
     // Process handles/cwd and OS sockets have no freestanding host.
     .{ .name = "io", .path = "tests/cross/io.zig", .requires_hosted = true },

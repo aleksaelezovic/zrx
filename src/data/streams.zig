@@ -12,8 +12,9 @@ const runtime = @import("../internal/runtime/streams.zig");
 /// Producers must be comptime-known functions with typed runtime parameters and
 /// explicit void/E!void returns; generic functions, closures, caller-supplied
 /// function pointers, and other payloads are unsupported. Return closes output;
-/// accepted items drain before its outcome is observed. Producer errors (even
-/// Closed) are failures, unlike standard queue closure normalized by readFrom.
+/// accepted items drain before its outcome is observed. Observed producer errors
+/// (even Closed) are failures, unlike queue closure normalized by readFrom.
+/// A completed prefix does not probe for later errors; other live edges can.
 /// No public init/push/close/reader/tee/share ownership API is exposed.
 pub fn Stream(comptime T: type) type {
     if (@sizeOf(T) == 0) @compileError("Stream: zero-sized elements are not supported");

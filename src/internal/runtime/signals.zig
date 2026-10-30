@@ -121,7 +121,12 @@ pub fn Cell(comptime T: type) type {
         }
         fn publish(entry: *Entry) !void {
             const self = cast(entry);
-            if (self.observation) |output| try output.push(self.candidate);
+            if (self.observation) |output| output.push(self.candidate) catch |err| switch (err) {
+                // An observation prefix can finish while this family remains
+                // sampleable by other flows. Closed delivery is not state failure.
+                error.Closed => {},
+                else => return err,
+            };
         }
         fn close(entry: *Entry, err: ?anyerror) void {
             if (cast(entry).observation) |output| {

@@ -3,6 +3,7 @@ const zrx = @import("zrx");
 const cli = @import("io_cli");
 const file = @import("io_file");
 const tcp = @import("io_tcp");
+const tcp_take = @import("io_tcp_take");
 const Line = zrx.Line;
 const line = zrx.line;
 const writeFileLines = zrx.writeFileLines;
@@ -69,6 +70,52 @@ test "network program shares decoding between display and file audit" {
     try peer.await(io);
     try expectFile(&tmp, "display", "INFO ready\nWARN hot\n");
     try expectFile(&tmp, "audit", "WARN hot\nbad\n");
+}
+
+test "TCP prefix capture finalizes both outputs and closes without peer EOF" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try temporaryPath(&tmp, "display");
+    defer allocator.free(output);
+    const capture = try temporaryPath(&tmp, "capture");
+    defer allocator.free(capture);
+    const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(0) };
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    const Peer = struct {
+        fn send(listener: *std.Io.net.Server) !void {
+            const connection = try listener.accept(io);
+            defer connection.close(io);
+            var buffer: [64]u8 = undefined;
+            var writer = connection.writer(io, &buffer);
+            try writer.interface.writeAll("first\nsecond\n");
+            try writer.interface.flush();
+            // Do not close our sending half: wait for the completed client to
+            // close. A client waiting for peer EOF would deadlock here.
+            var reader = connection.reader(io, &buffer);
+            try std.testing.expectError(error.EndOfStream, reader.interface.takeByte());
+        }
+    };
+    const Execution = struct {
+        address: std.Io.net.IpAddress,
+        capture: []const u8,
+        output: []const u8,
+        done: std.Io.Event = .unset,
+        fn execute(self: *@This()) !void {
+            defer self.done.set(io);
+            try tcp_take.execute(allocator, io, self.address, 2, self.capture, writeFileLines(self.output, .{ .exclusive = true }));
+        }
+    };
+    var peer = try io.concurrent(Peer.send, .{&server});
+    defer peer.cancel(io) catch {};
+    var execution: Execution = .{ .address = server.socket.address, .capture = capture, .output = output };
+    var client = try io.concurrent(Execution.execute, .{&execution});
+    defer client.cancel(io) catch {};
+    try execution.done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    try client.await(io);
+    try peer.await(io);
+    try expectFile(&tmp, "display", "first\nsecond\n");
+    try expectFile(&tmp, "capture", "first\nsecond\n");
 }
 
 // Fixture files remain inside the repository's Zig cache. Examples take only

@@ -27,6 +27,7 @@ pub const tryFold = @import("ops/tryFold.zig").tryFold;
 pub const tap = @import("ops/tap.zig").tap;
 pub const tapWith = @import("ops/tapWith.zig").tapWith;
 pub const maxItems = @import("ops/maxItems.zig").maxItems;
+pub const take = @import("ops/take.zig").take;
 pub const takeLast = @import("ops/takeLast.zig").takeLast;
 pub const merge = @import("ops/merge.zig").merge;
 pub const hold = @import("ops/hold.zig").hold;

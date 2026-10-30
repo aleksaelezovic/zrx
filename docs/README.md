@@ -26,7 +26,7 @@ Source paths below are documentation/navigation, not new package imports.
 | Synchronous whole-value effects | [`tap`](../src/ops/tap.zig), [`tapWith`](../src/ops/tapWith.zig) |
 | Input declarations/adapters | [`Stream` / `Emitter`](../src/data/streams.zig), [`fromIterator`](../src/data/iterators.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Value-owned line I/O | [`Line` / `line`](../src/data/lines.zig), [`stdinLines` / `fileLines` / `tcpLines` and output terminals](../src/io/lines.zig) |
-| Count guard / suffix retention | [`maxItems`](../src/ops/maxItems.zig), [`takeLast`](../src/ops/takeLast.zig) |
+| Count guard / prefix / suffix | [`maxItems`](../src/ops/maxItems.zig), [`take`](../src/ops/take.zig), [`takeLast`](../src/ops/takeLast.zig) |
 | Fan-in | [`merge`](../src/ops/merge.zig) |
 | State | [`hold`](../src/ops/hold.zig), [`values`](../src/ops/values.zig), [`withLatestFrom`](../src/ops/withLatestFrom.zig), signal [`map`](../src/ops/map.zig) |
 | Per-item terminals | [`forEach`](../src/ops/forEach.zig), [`forEachWith`](../src/ops/forEachWith.zig) |
@@ -62,6 +62,7 @@ endpoints/loopback peers. Live I/O entry points are opt-in; see the I/O guide.
 | [CLI interpreter](../examples/io_cli.zig) | Named command parsing/decisions and two terminal pipes | `zig build io-examples` (build only) |
 | [File extraction](../examples/io_file.zig) | Path-based input, exclusive output, rejected-line diagnostics | `zig build io-examples` (build only) |
 | [TCP display](../examples/io_tcp.zig) | One receive-only connection shared by display and file audit | `zig build io-examples` (build only) |
+| [TCP take](../examples/io_tcp_take.zig) | Finish two output pipes after n records without peer EOF | `zig build io-examples` (build only) |
 
 ## Source layout
 
@@ -70,7 +71,7 @@ endpoints/loopback peers. Live I/O entry points are opt-in; see the I/O guide.
 - `src/data/`: stream/signal declarations, borrowed sequence/cursor machinery.
 - `src/ops/`: named operators; related forms share specialization rather than
   duplicating behavior.
-- `src/io/`: standard I/O interoperability and the future-adapter scope note.
+- `src/io/`: high-level I/O declarations, interoperability, and the I/O guide.
 - `src/internal/`: shared validation, terminal consumption, and test-only helpers.
 - `src/internal/runtime/`: live transport, broadcast readers, and signal
   synchronization. Everything here is private execution machinery, not an

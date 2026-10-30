@@ -22,7 +22,8 @@ edit `AGENTS.md` rather than maintaining copies.
   synchronous `tap`/`tapWith` effects and
   explicit fail-fast `tryPipe`, plus declarative producer-backed streams and
   grouped `run` execution with automatic reader/result sharing, deferred terminal
-  effects and scoped collection callbacks, optional `maxItems` guards,
+  effects and scoped collection callbacks, optional `maxItems` guards, successful
+  `take` prefix completion with stream-edge retirement,
   run-owned `takeLast` suffix retention, declarative fan-in with `merge`,
   callback-scoped count batching with `batchThen`/`batchThenWith`, and replacement
   signals with `hold`, `values`, `withLatestFrom`, and single-parent signal `map`.
@@ -41,9 +42,10 @@ edit `AGENTS.md` rather than maintaining copies.
 - Treat multi-pipe programs activated by one `run` as the design target.
   Validate external-I/O abstractions with small terminal, filesystem, and network
   programs; keep domain decisions in named stages, not hidden in adapter loops.
-- Writable refs, reactive reducers, dynamic subscriptions, and idempotency are
-  future design topics, not implemented contracts. A check-then-skip operator
-  alone does not establish
+- Writable refs, reactive reducers, and dynamic subscriptions remain future
+  design topics, not implemented contracts.
+- Idempotency and durable workflows are a priority for future design, not
+  implemented contracts. A check-then-skip operator alone does not establish
   durable execution; persistence, atomicity, retries, and crash recovery need
   separate designs. Do not promise exactly-once effects.
 - Reuse Zig standard-library capabilities and conventions before inventing
@@ -132,7 +134,7 @@ edit `AGENTS.md` rather than maintaining copies.
 - Borrowed slice-sequence sources are slices, pointers to arrays, or zrx views;
   reject arrays by value to avoid returning a view into copied temporary storage.
   Iteration is repeatable, re-reads source storage, and re-executes callbacks.
-- Stream-backed `each`/`filter`/`maxItems` describe work for `run`. All public
+- Stream-backed `each`/`filter`/`maxItems`/`take` describe work for `run`. All public
   terminal `forEach`/`collectThen`/`batchThen` operators and their `With` variants
   are deferred, for finite inputs and streams alike. Pure whole-value composition
   and borrowed cursor mechanics remain separate; direct stream iteration is unsupported.
@@ -145,6 +147,14 @@ edit `AGENTS.md` rather than maintaining copies.
   the first excess item, then fail with `TooManyItems`. Exactly n items still
   requires end/excess observation. It is not prefix-taking, retention, batching,
   or a lossy queue policy.
+- `take(n)` forwards at most n items, then ends successfully without an extra
+  input probe. Zero reads none; normal selected-resource acquisition still
+  applies. Finite views stay lazy; consuming iterators resume. Stream completion
+  detaches only its edge, retiring unused producer/input chains without blocking
+  live siblings. Prefetch can do extra upstream work; observed errors/other live
+  dependencies still fail run. Signal caches/updaters remain run-scoped, even
+  after their observation delivery retires. Flush/partial batches/suffixes use
+  normal successful-end semantics. Do not turn cutoff into a count-limit error.
 - `takeLast(n)` preallocates a run-owned n-item ring, consumes the full input,
   and publishes the retained suffix in source order only after successful end.
   Zero still consumes and observes errors; failure/cancellation discards pending
