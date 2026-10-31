@@ -8,7 +8,7 @@ entry point remains [`src/root.zig`](../src/root.zig).
 
 ```sh
 zig version
-zig fmt --check build.zig build.zig.zon src tests examples
+zig fmt --check build.zig build.zig.zon src tests examples benchmarks
 zig build test
 zig build test -Doptimize=ReleaseFast
 zig build check
@@ -22,6 +22,18 @@ zig build check
   [External example tests](../tests/io_examples.zig) import the same composition
   functions used by the entry points, keeping fixtures/assertions out of examples.
 - `check`: formatting, native tests, cross builds, and scoped codegen comparisons.
+- `declarative-test`: current public API, service/resource contracts, direct
+  regions, producer sharing, signals, merge/reduction, scan, cancellation and I/O.
+- `lifecycle-test`: forced runtime alias/completion schedules and both
+  producer-await/retirement join orders, using test-local Io observation.
+- `measurement-test`: concurrent raw allocator accounting, fault cleanup and
+  callback/coordinator checkpoint invariants, without performance thresholds.
+- `benchmark-costs` / `benchmark-spans`: opt-in run-allocator and instrumented
+  activity reports, kept separate from uninstrumented `benchmark` timings.
+- `benchmark-phases`: opt-in private coordinator checkpoints, separating
+  preparation, acquisition/initialization, active execution and return cleanup.
+  [Definitions, native data and erasure evidence](measurements/phases.md)
+  distinguish elapsed intervals from CPU time.
 - `fmt`, `cross`, `codegen`: focused build steps using the same configuration.
 - `example`: finite noninteractive demos; the [index](README.md#executable-examples)
   lists focused commands. `io-examples` builds/installs live-I/O executables
@@ -35,10 +47,12 @@ cursor helpers preserve low-level tests without re-exposing retired public
 ownership APIs. Neither tests nor comptime checks prove arbitrary callback
 purity, termination, lifetime safety, or thread safety.
 
-Streaming accumulation coverage includes rerun/reset, sharing, shallow value
-snapshots, bounded slow-reader delivery, prefixes, and held-state sampling. Its
-two-pipe transfer monitor has external integration tests and an executable
-smoke run.
+Current public streaming accumulation tests cover rerun/reset, injected reducer
+requirements, managed lifetimes, ordinary suffix arguments, exclusive lowering,
+sharing/prefix retirement, boxed error data, held state and source failure.
+The original scan fixtures remain private regression evidence for shallow
+snapshots, bounded slow-reader delivery and cancellation. The migrated two-pipe
+transfer monitor has external integration tests and an executable smoke run.
 
 Line-I/O coverage includes framing across short reads, record ownership,
 resource acquisition/cleanup, startup/allocation failures, write failure,
@@ -57,7 +71,7 @@ Object compilation exercises target code/object writers; it is **not foreign
 runtime execution**, support for all Zig targets, or a graph benchmark.
 
 Selected direct imperative functions are compared with grouped/separate
-pipelines using pinned LLVM ReleaseFast output:
+composition-kernel fixtures using pinned LLVM ReleaseFast output:
 
 - Resolve aliases and narrowly normalize function-scoped LLVM IR.
 - Compare selected AArch64 loop assembly without erasing instructions,
@@ -71,6 +85,13 @@ three catalog AArch64 targets. Optional recovery after `keepIf`, fallible
 Native fixture comparisons also exercise short inputs, tails, wrapping arithmetic,
 and explicit vectors. Matching selected bodies is not whole-binary equality,
 a universal zero-cost/inlining proof, or a signal/run performance claim.
+
+The eager kernel used by those original fixtures is now an internal regression
+facade, not an exported API. Its comparisons were not weakened or reinterpreted
+as checks of the new executor. The same catalog also includes current public
+declarative finite/producer fixtures; those have object-only coverage, not
+body-equality claims. Current native tests and executable examples import the
+actual `zrx` module; archived lifecycle fixtures use explicit private facades.
 
 Ordinary optimization may inline/fuse/auto-vectorize when callback semantics,
 aliasing, and targets permit. Explicit `@Vector` callbacks already work with

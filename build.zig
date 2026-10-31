@@ -12,8 +12,13 @@ comptime {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const zrx = b.addModule("zrx", .{
+    const public_zrx = b.addModule("zrx", .{
         .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zrx = b.createModule(.{
+        .root_source_file = b.path("src/legacy_test_api.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -22,6 +27,86 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Native-only, opt-in measurements; independent of the cross/codegen catalog.
+    const benchmark_zrx = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_api.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    const benchmark = b.addExecutable(.{
+        .name = "graph-baseline",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/graphs.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .imports = &.{.{ .name = "api", .module = benchmark_zrx }},
+        }),
+        .use_llvm = true,
+    });
+    const run_benchmark = b.addRunArtifact(benchmark);
+    var benchmark_values: [4]usize = undefined;
+    inline for (.{
+        .{ "bench-items", "Finite producer item count", 4096 },
+        .{ "bench-warmups", "Unreported warmups per variant", 2 },
+        .{ "bench-trials", "Reported trials per variant", 7 },
+        .{ "bench-capacity", "Source and inherited transport capacity", 16 },
+    }, 0..) |option, i| {
+        const value = b.option(usize, option[0], option[1]) orelse option[2];
+        benchmark_values[i] = value;
+        run_benchmark.addArg(b.fmt("{d}", .{value}));
+    }
+    run_benchmark.has_side_effects = true;
+    b.step("benchmark", "Run opt-in native LLVM ReleaseFast graph measurements").dependOn(&run_benchmark.step);
+    const workloads = b.createModule(.{
+        .root_source_file = b.path("benchmarks/graphs.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .imports = &.{.{ .name = "api", .module = benchmark_zrx }},
+    });
+    const meter = b.createModule(.{
+        .root_source_file = b.path("benchmarks/tracking_allocator.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    const spans = b.createModule(.{
+        .root_source_file = b.path("benchmarks/callback_spans.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+    });
+    const phases = b.createModule(.{
+        .root_source_file = b.path("benchmarks/executor_phases.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .imports = &.{.{ .name = "api", .module = benchmark_zrx }},
+    });
+    const costs = b.addExecutable(.{
+        .name = "graph-costs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/costs.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "api", .module = benchmark_zrx },
+                .{ .name = "workloads", .module = workloads },
+                .{ .name = "meter", .module = meter },
+                .{ .name = "spans", .module = spans },
+                .{ .name = "phases", .module = phases },
+            },
+        }),
+        .use_llvm = true,
+    });
+    inline for (.{
+        .{ "benchmark-costs", "allocations", "Measure run allocator costs without timing" },
+        .{ "benchmark-spans", "activity", "Observe instrumented callback spans, not exact executor phases" },
+        .{ "benchmark-phases", "phases", "Measure private coordinator phase checkpoints" },
+    }) |mode| {
+        const instrumented = b.addRunArtifact(costs);
+        instrumented.addArg(mode[1]);
+        for (benchmark_values) |value| instrumented.addArg(b.fmt("{d}", .{value}));
+        instrumented.has_side_effects = true;
+        b.step(mode[0], mode[2]).dependOn(&instrumented.step);
+    }
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -33,6 +118,182 @@ pub fn build(b: *std.Build) void {
     });
     const test_step = b.step("test", "Run tests, diagnostics, and noninteractive examples");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    const measurement_api = b.createModule(.{
+        .root_source_file = b.path("src/benchmark_api.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const measurement_tests = b.addTest(.{
+        .name = "measurement-instrumentation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/measurement.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "api", .module = measurement_api },
+                .{ .name = "phases", .module = b.createModule(.{
+                    .root_source_file = b.path("benchmarks/executor_phases.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "api", .module = measurement_api }},
+                }) },
+                .{ .name = "meter", .module = b.createModule(.{
+                    .root_source_file = b.path("benchmarks/tracking_allocator.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+                .{ .name = "spans", .module = b.createModule(.{
+                    .root_source_file = b.path("benchmarks/callback_spans.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+                .{ .name = "workloads", .module = b.createModule(.{
+                    .root_source_file = b.path("benchmarks/graphs.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                    .imports = &.{.{ .name = "api", .module = measurement_api }},
+                }) },
+            },
+        }),
+    });
+    const run_measurement_tests = b.addRunArtifact(measurement_tests);
+    b.step("measurement-test", "Test concurrent allocator accounting and callback checkpoint instrumentation").dependOn(&run_measurement_tests.step);
+    test_step.dependOn(&run_measurement_tests.step);
+    const world_api = public_zrx;
+    const world_example_module = b.createModule(.{
+        .root_source_file = b.path("examples/resources.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zrx", .module = world_api }},
+    });
+    const world_example = b.addExecutable(.{
+        .name = "world-resources",
+        .root_module = world_example_module,
+        .use_llvm = true,
+    });
+    const world_smoke = b.addRunArtifact(world_example);
+    world_smoke.expectStdErrEqual("Resources: primary=6 audit=12 acquired=2 released=2\n");
+    world_smoke.expectExitCode(0);
+    const world_tests = b.addTest(.{
+        .name = "declarative-resources",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/world.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zrx", .module = world_api },
+                .{ .name = "world_example", .module = world_example_module },
+            },
+        }),
+        .use_llvm = true,
+    });
+    const world_step = b.step("declarative-test", "Run public declaration, dependency, resource and graph checks");
+    world_step.dependOn(&world_smoke.step);
+    world_step.dependOn(&b.addRunArtifact(world_tests).step);
+    const public_io_module = b.createModule(.{
+        .root_source_file = b.path("examples/io_file.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+    });
+    const public_io = b.addExecutable(.{ .name = "copy-lines", .root_module = public_io_module });
+    b.step("io-examples", "Build/install the opt-in declarative file program").dependOn(&b.addInstallArtifact(public_io, .{}).step);
+    world_step.dependOn(&public_io.step);
+    const graph_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/declarative_graphs.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zrx", .module = public_zrx },
+                .{ .name = "io_example", .module = public_io_module },
+            },
+        }),
+    });
+    world_step.dependOn(&b.addRunArtifact(graph_tests).step);
+    const lifecycle_tests = b.addTest(.{
+        .name = "lifecycle-hardening",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/lifecycle_hardening.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+        }),
+    });
+    const join_tests = b.addTest(.{
+        .name = "join-retirement",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/join_retirement.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "runtime", .module = runtime_api }},
+        }),
+    });
+    const lifecycle_step = b.step("lifecycle-test", "Force alias, completion and producer join/retirement schedules");
+    const run_lifecycle = b.addRunArtifact(lifecycle_tests);
+    lifecycle_step.dependOn(&run_lifecycle.step);
+    lifecycle_step.dependOn(&b.addRunArtifact(join_tests).step);
+    world_step.dependOn(&run_lifecycle.step);
+    test_step.dependOn(lifecycle_step);
+    const public_examples = b.step("example", "Run declarative public API examples");
+    public_examples.dependOn(&b.addRunArtifact(world_example).step);
+    inline for (.{
+        .{ "streams", "Stream total: 14\n" },
+        .{ "signals", "Signal state: 21\nSignal state: 24\nSignal state: 19\n" },
+    }) |item| {
+        const demo = b.addExecutable(.{
+            .name = "declarative-" ++ item[0],
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/" ++ item[0] ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+            }),
+        });
+        public_examples.dependOn(&b.addRunArtifact(demo).step);
+        const smoke = b.addRunArtifact(demo);
+        smoke.expectStdErrEqual(item[1]);
+        smoke.expectExitCode(0);
+        world_step.dependOn(&smoke.step);
+    }
+    inline for (.{
+        .{ "world_missing", "world: missing dependency world_missing.Database" },
+        .{ "world_duplicate", "world: duplicate binding for world_duplicate.Service" },
+        .{ "world_cycle", "world: dependency cycle at world_cycle.A" },
+        .{ "world_nonterminal", "world: selected roots must be terminal flows" },
+        .{ "world_bootstrap", "world: allocator and Io bootstrap bindings must be supplied values" },
+        .{ "world_missing_allocator", "world: missing dependency mem.Allocator" },
+        .{ "world_terminal_result", "terminal: callback must return void or E!void" },
+        .{ "world_dependencies", "callback must have explicitly typed runtime parameters, trailing data arguments, and an explicit return type" },
+        .{ "world_role", "deriveResource: role must be a single-field struct of the provided type" },
+        .{ "world_release_result", "world resource: release must accept the provided type and return void" },
+        .{ "world_qualifier", "world: missing dependency *const world_qualifier.Service" },
+        .{ "world_input_type", "expected type 'bool', found 'u32'" },
+        .{ "world_raw_input", "pipe: input must be a declaration; use fromSlice or fromValue" },
+        .{ "world_missing_io", "world: missing dependency Io" },
+        .{ "world_empty_callbacks", "callback tuple must not be empty" },
+        .{ "world_fold_state", "fold: reducer must return the exact non-error accumulator type or E!A" },
+        .{ "declarative_scan_missing", "world: missing dependency declarative_scan_missing.Scale" },
+        .{ "declarative_scan_fallible", "scan: fallible reducers are not supported" },
+        .{ "declarative_scan_result", "scan: reducer result must exactly match the accumulator type" },
+        .{ "declarative_scan_zero_state", "scan: zero-sized accumulator values are not supported" },
+        .{ "declarative_scan_error_state", "scan: accumulator must not be an outer error union; wrap error data in a struct" },
+        .{ "declarative_scan_empty_item", "expected type 'bool', found 'u32'" },
+        .{ "declarative_scan_signal", "signal: use values(signal) for stream operators and terminal effects" },
+    }) |failure| {
+        const invalid_world = b.addTest(.{
+            .name = failure[0],
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/compile_fail/" ++ failure[0] ++ ".zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "zrx", .module = world_api }},
+            }),
+        });
+        invalid_world.expect_errors = .{ .contains = failure[1] };
+        world_step.dependOn(&invalid_world.step);
+    }
+    test_step.dependOn(world_step);
     const try_pipe_tests = b.addTest(.{
         .name = "try-pipe",
         .root_module = b.createModule(.{
@@ -89,7 +350,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "zrx", .module = zrx }},
     });
-    const io_examples_step = b.step("io-examples", "Build/install opt-in terminal, file, and TCP programs");
+    const io_examples_step = b.step("legacy-io-fixtures", "Build archived I/O regression programs");
     inline for (.{
         .{ .file = "io_cli", .executable = "io-cli" },
         .{ .file = "io_file", .executable = "io-file" },
@@ -99,7 +360,7 @@ pub fn build(b: *std.Build) void {
         const program = b.addExecutable(.{
             .name = example.executable,
             .root_module = b.createModule(.{
-                .root_source_file = b.path("examples/" ++ example.file ++ ".zig"),
+                .root_source_file = b.path("tests/legacy_examples/" ++ example.file ++ ".zig"),
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -216,20 +477,20 @@ pub fn build(b: *std.Build) void {
     const example = b.addExecutable(.{
         .name = "pipeline",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/pipeline.zig"),
+            .root_source_file = b.path("tests/legacy_examples/pipeline.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
         }),
     });
     const run_example = b.addRunArtifact(example);
-    const example_step = b.step("example", "Run executable examples");
+    const example_step = b.step("legacy-fixtures", "Run archived composition-kernel regression programs");
     example_step.dependOn(&run_example.step);
     test_step.dependOn(&run_example.step);
     const try_pipe_example = b.addExecutable(.{
         .name = "try-pipe",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/try_pipe.zig"),
+            .root_source_file = b.path("tests/legacy_examples/try_pipe.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -241,7 +502,7 @@ pub fn build(b: *std.Build) void {
     const sequence_example = b.addExecutable(.{
         .name = "sequences",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/sequences.zig"),
+            .root_source_file = b.path("tests/legacy_examples/sequences.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -253,7 +514,7 @@ pub fn build(b: *std.Build) void {
     const effect_example = b.addExecutable(.{
         .name = "effects",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/effects.zig"),
+            .root_source_file = b.path("tests/legacy_examples/effects.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -265,7 +526,7 @@ pub fn build(b: *std.Build) void {
     const reduction_example = b.addExecutable(.{
         .name = "reduction",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/reduction.zig"),
+            .root_source_file = b.path("tests/legacy_examples/reduction.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -277,7 +538,7 @@ pub fn build(b: *std.Build) void {
     const stream_example = b.addExecutable(.{
         .name = "streams",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/streams.zig"),
+            .root_source_file = b.path("tests/legacy_examples/streams.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -291,7 +552,7 @@ pub fn build(b: *std.Build) void {
     const branching_example = b.addExecutable(.{
         .name = "branching",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/branching.zig"),
+            .root_source_file = b.path("tests/legacy_examples/branching.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -305,7 +566,7 @@ pub fn build(b: *std.Build) void {
     const pipes_example = b.addExecutable(.{
         .name = "pipes",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/pipes.zig"),
+            .root_source_file = b.path("tests/legacy_examples/pipes.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -319,7 +580,7 @@ pub fn build(b: *std.Build) void {
     const retention_example = b.addExecutable(.{
         .name = "retention",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/retention.zig"),
+            .root_source_file = b.path("tests/legacy_examples/retention.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -333,7 +594,7 @@ pub fn build(b: *std.Build) void {
     const merge_example = b.addExecutable(.{
         .name = "merge",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/merge.zig"),
+            .root_source_file = b.path("tests/legacy_examples/merge.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -347,7 +608,7 @@ pub fn build(b: *std.Build) void {
     const batch_example = b.addExecutable(.{
         .name = "batching",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/batching.zig"),
+            .root_source_file = b.path("tests/legacy_examples/batching.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -361,7 +622,7 @@ pub fn build(b: *std.Build) void {
     const signals_example = b.addExecutable(.{
         .name = "signals",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/signals.zig"),
+            .root_source_file = b.path("tests/legacy_examples/signals.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{.{ .name = "zrx", .module = zrx }},
@@ -379,13 +640,14 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("examples/scan.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zrx", .module = zrx }},
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
         }),
     });
     const run_scan = b.addRunArtifact(scan_example);
     const scan_step = b.step("example-scan", "Run the accumulated transfer monitor");
     scan_step.dependOn(&run_scan.step);
-    example_step.dependOn(&run_scan.step);
+    public_examples.dependOn(&run_scan.step);
+    world_step.dependOn(&run_scan.step);
     test_step.dependOn(&run_scan.step);
     const scan_example_tests = b.addTest(.{
         .name = "scan-example",
@@ -394,12 +656,22 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zrx", .module = zrx },
+                .{ .name = "zrx", .module = public_zrx },
                 .{ .name = "scan_example", .module = scan_example.root_module },
             },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(scan_example_tests).step);
+    world_step.dependOn(&b.addRunArtifact(scan_example_tests).step);
+    const public_scan_tests = b.addTest(.{
+        .name = "declarative-scan",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/declarative_scan.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+        }),
+    });
+    world_step.dependOn(&b.addRunArtifact(public_scan_tests).step);
 
     const failures = .{
         .{ "scan_arity", "scan: reducer must have two explicitly typed runtime parameters and an explicit return type" },
@@ -591,6 +863,7 @@ pub fn build(b: *std.Build) void {
             b.path("src"),
             b.path("tests"),
             b.path("examples"),
+            b.path("benchmarks"),
         },
         .check = true,
     }).step);
@@ -623,6 +896,11 @@ pub fn build(b: *std.Build) void {
         const query = std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable;
         const cross_target = b.resolveTargetQuery(query);
         const cross_zrx = b.createModule(.{
+            .root_source_file = b.path("src/legacy_test_api.zig"),
+            .target = cross_target,
+            .optimize = .ReleaseFast,
+        });
+        const cross_public = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = cross_target,
             .optimize = .ReleaseFast,
@@ -639,7 +917,7 @@ pub fn build(b: *std.Build) void {
             if (!fixture.requires_hosted or cross_target.result.os.tag != .freestanding) {
                 const coverage = addCrossObject(
                     b,
-                    cross_zrx,
+                    if (fixture.public_api) cross_public else cross_zrx,
                     cross_target,
                     b.fmt("{s}-{s}", .{ fixture.name, triple }),
                     b.path(fixture.path),

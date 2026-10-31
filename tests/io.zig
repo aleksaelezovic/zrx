@@ -14,6 +14,7 @@ const fileLines = zrx.fileLines;
 const tcpLines = zrx.tcpLines;
 const writeFileLines = zrx.writeFileLines;
 const forEach = zrx.forEach;
+const forEachWith = zrx.forEachWith;
 const collectThenWith = zrx.collectThenWith;
 const takeLast = zrx.takeLast;
 const take = zrx.take;
@@ -153,6 +154,47 @@ test "resource slots release only acquired resources in reverse order" {
     try std.testing.expectError(error.AcquireFailed, scope.acquireAll());
     scope.deinit();
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 12, 11 }, state.events[0..state.count]);
+}
+
+test "cancellation during acquisition releases earlier slots but not the failed slot" {
+    const State = struct {
+        acquiring: std.Io.Event = .unset,
+        gate: std.Io.Event = .unset,
+        attempts: usize = 0,
+        releases: [3]u8 = undefined,
+        released: usize = 0,
+    };
+    const Resource = struct {
+        state: *State,
+        id: u8,
+        pub fn acquire(self: *@This(), resource_io: std.Io) !void {
+            self.state.attempts += 1;
+            if (self.id == 2) {
+                self.state.acquiring.set(resource_io);
+                // A failing acquire owns cleanup of any partial work itself.
+                try self.state.gate.wait(resource_io);
+            }
+        }
+        pub fn release(self: *@This(), _: std.Io) void {
+            self.state.releases[self.state.released] = self.id;
+            self.state.released += 1;
+        }
+    };
+    const Helpers = struct {
+        fn execute(state: *State) !void {
+            var scope: resources.Scope = .{ .allocator = allocator, .io = io };
+            defer scope.deinit();
+            for (1..4) |id| _ = try scope.add(Resource, .{ .state = state, .id = @intCast(id) }, null);
+            try scope.acquireAll();
+        }
+    };
+    var state: State = .{};
+    var task = try io.concurrent(Helpers.execute, .{&state});
+    defer task.cancel(io) catch {};
+    try state.acquiring.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+    try std.testing.expectError(error.Canceled, task.cancel(io));
+    try std.testing.expectEqual(@as(usize, 2), state.attempts);
+    try std.testing.expectEqualSlices(u8, &.{1}, state.releases[0..state.released]);
 }
 
 test "file declarations stay cold and a shared read retains independent values" {
@@ -364,6 +406,57 @@ test "backend write failure fails run and closes owned output" {
         pipe(&input, .{writeFileLines(output_path, .{ .exclusive = true })}),
     }));
     try std.testing.expectEqual(@as(usize, 1), Probe.closes.load(.monotonic));
+}
+
+test "callback failure joins producer and blocked peer before releasing owned output" {
+    const State = struct {
+        entered: std.Io.Event = .unset,
+        gate: std.Io.Event = .unset,
+        producer_stopped: std.atomic.Value(bool) = .init(false),
+        callback_stopped: std.atomic.Value(bool) = .init(false),
+        closed: usize = 0,
+        released_early: bool = false,
+    };
+    const Helpers = struct {
+        var state: *State = undefined;
+        fn produce(context: *State, output: *Emitter(Line(4))) !void {
+            defer context.producer_stopped.store(true, .release);
+            try output.push(try line(4, "abc"));
+            try context.gate.wait(output.io);
+        }
+        fn block(context: *State, _: Line(4)) !void {
+            defer context.callback_stopped.store(true, .release);
+            context.entered.set(io);
+            try context.gate.wait(io);
+        }
+        fn fail(context: *State, _: Line(4)) !void {
+            try context.entered.wait(io);
+            return error.CallbackFailed;
+        }
+        fn close(userdata: ?*anyopaque, files: []const std.Io.File) void {
+            state.closed += files.len;
+            if (!state.producer_stopped.load(.acquire) or !state.callback_stopped.load(.acquire))
+                state.released_early = true;
+            io.vtable.fileClose(userdata, files);
+        }
+    };
+    var state: State = .{};
+    Helpers.state = &state;
+    var table = io.vtable.*;
+    table.fileClose = Helpers.close;
+    const observed: std.Io = .{ .vtable = &table, .userdata = io.userdata };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try temporaryPath(&tmp, "joined");
+    defer allocator.free(output_path);
+    const source = Stream(Line(4)).fromProducerWith(1, Helpers.produce, &state);
+    try std.testing.expectError(error.CallbackFailed, run(allocator, observed, .{
+        pipe(&source, .{writeFileLines(output_path, .{ .exclusive = true })}),
+        pipe(&source, .{forEachWith(&state, Helpers.block)}),
+        pipe(&source, .{forEachWith(&state, Helpers.fail)}),
+    }));
+    try std.testing.expectEqual(@as(usize, 1), state.closed);
+    try std.testing.expect(!state.released_early);
 }
 
 fn allocationScenario(gpa: std.mem.Allocator, input_path: []const u8, output_path: []const u8) !void {

@@ -2,19 +2,19 @@
 
 [Documentation index](README.md) · [Execution and ownership](execution.md)
 
-The [tested example](../examples/signals.zig) observes temperatures **20, 23, 18**
-and derived comfort **comfortable, warm, cool**: `zig build example-signals`.
+The [tested example](../examples/signals.zig) derives **21, 24, 19** from initial
+20 and replacements 23, 18 using an injected offset: `zig build example`.
 Construction/typing contracts live beside [`hold`](../src/ops/hold.zig),
-signal [`map`](../src/ops/map.zig), [`values`](../src/ops/values.zig), and
+signal [`map`](../src/data/declarations.zig), [`values`](../src/ops/values.zig), and
 [`withLatestFrom`](../src/ops/withLatestFrom.zig). Signal declaration/borrowing
-rules live in [`data/signals.zig`](../src/data/signals.zig).
+rules also apply to the [typed declaration model](../src/data/declarations.zig).
 
 ## One root family, one coherent commit
 
 Only reachable dependencies are prepared. Stable references share a
 cache/derivation; unused state runs no transforms and retains no input.
-Run prepares resources and gated workers, evaluates pure initial maps, then
-initializes all selected caches/stages initial snapshots before activation.
+Run prepares state and gated workers, acquires dependencies/I/O, evaluates pure
+initial maps, then initializes selected caches/stages observations before activation.
 
 Each root processes replacements serially:
 
@@ -62,7 +62,7 @@ Collection/batching over `values` counts the initial snapshot.
 | Event input ends | Its sampling flow finishes without waiting for more updates |
 | Observation prefix ends | Detach its delivery; keep caches/updaters alive for the run |
 | Update source fails | Fail the run, including idle samplers without observers |
-| Optional/error-valued state | Preserve it as data, under both pipe executors |
+| Optional/error-valued state | Preserve it as state data; no second pipe executor |
 | All selected terminals finish | End the run and stop remaining updater dependencies |
 | Parent cancellation/effect failure | Cancel/join work; no rollback of committed state/effects |
 | Another run | Fresh declared initial caches/input execution, not external-state rewind |
@@ -94,10 +94,11 @@ Use [`scan`](../src/ops/scan.zig) before `hold(seed)` to accumulate events into
 replacement updates. Scan does not emit seed; `values` of the held signal does.
 Keeping accumulation and current state separate lets callers consume update-only
 prefixes without introducing a second signal-root kind. Bind one typed seed and
-reuse it when composing both; this still materializes transport, with no fusion
-or performance-equivalence claim.
+reuse it when composing both. Exclusive scan stages use typed synchronous regions;
+the held signal still owns its cache/publication boundary. No performance-equivalence
+claim is made.
 Its upstream accumulator can advance ahead of the committed cache because of
-buffering; sampling reads only that cache, not the worker's private state.
+buffering; sampling reads only that cache, not private recurrence state.
 An observation prefix still leaves the scan-fed state dependency run-scoped.
 
 There are no live setters/getters, feedback safety, multi-parent computed values,

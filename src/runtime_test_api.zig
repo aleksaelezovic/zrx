@@ -1,6 +1,6 @@
 // Internal cursor/transport test facade, including test-only eager consumers.
 // None of its ownership/collection helpers are exported from the public API.
-const core = @import("root.zig");
+const core = @import("legacy_test_api.zig");
 const runtime = @import("internal/runtime/streams.zig");
 const visits = @import("internal/test_consumers.zig");
 pub const pipe = core.pipe;
@@ -17,6 +17,7 @@ pub const forEachWith = visits.forEachWith;
 pub const Stream = runtime.Stream;
 pub const tee = runtime.tee;
 pub const share = runtime.share;
+pub const stopProducer = runtime.stopProducer;
 pub const readFrom = core.readFrom;
 pub const io_api = core;
 pub const line_records = @import("data/lines.zig");

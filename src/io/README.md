@@ -1,82 +1,38 @@
-# Line I/O programs
+# Bounded line I/O
 
-Declare paths or standard-library IP addresses, not open handles. The same
-`run(allocator, io, flows)` owns the selected resources, their buffers, and
-cleanup. Standard stdin/stdout/stderr handles remain open.
+Inputs declare paths, standard endpoints, or standard-library IP addresses.
+`run(.{ allocator, io, services... }, flows)` acquires selected resources and
+releases owned handles after execution users join. Process stdio stays borrowed.
 
-## Contracts and examples
-
-- [Value-owned `Line(n)` records and `line`](../data/lines.zig).
-- [Input/output declarations](lines.zig): `stdinLines`, `fileLines`, `tcpLines`,
-  `stdoutLines`, `stderrLines`, and `writeFileLines`.
-- [Queue interoperability](readFrom.zig) remains separate.
-- [CLI interpreter](../../examples/io_cli.zig): `ping` and `upper TEXT`;
-  replies on stdout, invalid commands on stderr, EOF ends the program.
-- [File extraction](../../examples/io_file.zig): save `keep ` entries to a new
-  output file and send rejected entries to stderr.
-- [TCP display](../../examples/io_tcp.zig): LF-framed `INFO`/`WARN` messages;
-  share decoding between stdout display and a new file audit.
-- [TCP take](../../examples/io_tcp_take.zig): share the first n records
-  between display and a new file; finish without waiting for peer EOF.
-
-API details live beside the source declarations. All example graphs are
-tested externally in [the I/O example suite](../../tests/io_examples.zig) using
-finite endpoints; TCP tests use a local controlled peer.
-
-## Run the programs
-
-Build/install without starting an interactive program:
+- [Line-owned records](../data/lines.zig) keep bounded bytes inline.
+- [Sources and resource glue](lines.zig) provide stdin, files, and outgoing TCP.
+- [Public terminal adapters](../compose.zig) provide stdout/stderr/file effects.
+- [File-copy program](../../examples/io_file.zig) is tested through its actual
+  composition with temporary files in [public graph tests](../../tests/declarative_graphs.zig).
 
 ```sh
 zig build io-examples
-printf 'ping\nupper Hello, Zig!\nunknown\n' | ./zig-out/bin/io-cli
+./zig-out/bin/copy-lines INPUT_PATH NEW_OUTPUT_PATH
 ```
 
-With your own input and a **nonexistent** output path:
+Live invocations are opt-in. The output must not already exist. The program
+frames records and adds LF; it is not a byte-exact copy for unterminated input.
+Successful completion includes flush, not fsync, rollback or atomic publication.
 
-```sh
-./zig-out/bin/io-file INPUT_PATH NEW_OUTPUT_PATH
-```
+Default tests never wait for human input or a public network. Archived terminal
+and loopback TCP regression programs remain in
+[tests/legacy_examples](../../tests/legacy_examples/README.md) and exercise the
+same internal transport/resource implementation, not the old public API.
 
-With a peer listening at the selected local address, sending LF-delimited
-records, and closing to signal EOF:
+Preparation and gated worker startup precede resource acquisition. Empty selected
+outputs still create files; failures release earlier resources without undoing
+creation/truncation or writes. Failed/canceled cleanup does not flush.
 
-```sh
-./zig-out/bin/io-tcp 127.0.0.1 9000 NEW_AUDIT_PATH
-```
+LF is framing; encoding and CR are data. Fan-out, retention and collection can
+copy line values safely, but larger bounds cost storage and copies. Duplicate
+standard endpoints/textual file conflicts fail before acquisition; path alias
+canonicalization and concurrent shared-writer serialization are not provided.
 
-To stop successfully after five records even when the peer stays open:
-
-```sh
-./zig-out/bin/io-tcp-take 127.0.0.1 9000 5 NEW_OUTPUT_PATH
-```
-
-Live invocations are opt-in. `zig build test` compiles the actual entry points
-and tests their graphs without waiting for human input or an external service.
-`zig build check` additionally cross-compiles hosted I/O for the five hosted
-catalog targets. Line values remain covered on all six, including freestanding
-WebAssembly; process handles/cwd and OS sockets require a host.
-
-## Boundaries worth keeping visible
-
-Records own bytes inline; they never borrow the reader's reusable buffer.
-Large bounds cost copies/queued storage. LF is framing; encoding/CR normalization
-are explicit application transformations. Output adds LF and flushes per record,
-not byte-exact copying, atomic publication, fsync, or remote acknowledgement.
-
-Preparation and gated worker startup precede acquisition. Acquisition failures
-clean up partial resources; selected output files are created even for empty
-input. Creation/truncation and earlier writes are not rolled back. Owned
-handles close after their users join, not merely when a producer returns.
-
-Use one terminal per standard output endpoint; merge inputs to combine writes.
-Duplicate standard endpoints and textual input/output file conflicts are
-rejected before acquisition. Path aliases (symlinks/hardlinks/relative spellings)
-and conflicts with other processes are not detected. Concurrent runs must not
-unsafely share process inputs or outputs.
-
-Listeners, full-duplex connection declarations, DNS/reconnect policy, application
-read timeouts, arbitrary owned payloads, terminal UI, and filesystem watching
-remain separate features. No additional scheduler or universal service context
-is introduced. See the [execution guide](../../docs/execution.md) for sharing,
-cancellation, error, and lifetime rules across operators.
+Listeners, full-duplex sessions, DNS/reconnect policy, application timeouts and
+filesystem watching are separate designs. See the
+[execution guide](../../docs/execution.md) for dependency and cleanup rules.

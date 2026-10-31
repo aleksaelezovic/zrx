@@ -9,11 +9,13 @@ const scan = zrx.scan;
 const hold = zrx.hold;
 const values = zrx.values;
 const withLatestFrom = zrx.withLatestFrom;
-const forEachWith = zrx.forEachWith;
+const forEach = zrx.forEach;
 const run = zrx.run;
 
 pub const Chunk = struct { bytes: u32 };
 pub const Totals = struct { chunks: u64 = 0, bytes: u64 = 0 };
+pub const Dashboard = struct { writer: *std.Io.Writer };
+pub const Reports = struct { writer: *std.Io.Writer };
 const Report = @Tuple(&.{ u32, Totals });
 
 fn addChunk(previous: Totals, chunk: Chunk) Totals {
@@ -23,35 +25,32 @@ fn addChunk(previous: Totals, chunk: Chunk) Totals {
     };
 }
 
-fn writeTotals(writer: *std.Io.Writer, total: Totals) !void {
-    try writer.print("{d} chunks, {d} bytes\n", .{ total.chunks, total.bytes });
+fn writeTotals(output: Dashboard, total: Totals) !void {
+    try output.writer.print("{d} chunks, {d} bytes\n", .{ total.chunks, total.bytes });
 }
 
-fn writeReport(writer: *std.Io.Writer, report: Report) !void {
-    try writer.print("request {d}: {d} bytes\n", .{ report[0], report[1].bytes });
+fn writeReport(output: Reports, report: Report) !void {
+    try output.writer.print("request {d}: {d} bytes\n", .{ report[0], report[1].bytes });
 }
 
 /// The callers own two distinct writers and source capabilities through run.
 /// Only the held cache defines sampled progress; upstream admission is not commit.
 pub fn monitor(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    chunks: *const Stream(Chunk),
-    requests: *const Stream(u32),
-    dashboard: *std.Io.Writer,
-    replies: *std.Io.Writer,
+    bindings: anytype,
+    chunks: anytype,
+    requests: anytype,
 ) !void {
     const seed: Totals = .{};
     const totals = pipe(chunks, .{scan(seed, addChunk)});
     const current = pipe(&totals, .{hold(seed)});
     const displayFlow = pipe(values(&current), .{
-        forEachWith(dashboard, writeTotals),
+        forEach(writeTotals),
     });
     const replyFlow = pipe(requests, .{
         withLatestFrom(&current),
-        forEachWith(replies, writeReport),
+        forEach(writeReport),
     });
-    try run(allocator, io, .{ displayFlow, replyFlow });
+    try run(bindings, .{ displayFlow, replyFlow });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -61,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     var replies: std.Io.Writer = .fixed(&report_buffer);
     const chunks = Stream(Chunk).fromProducer(1, produceChunks);
     const requests = Stream(u32).fromProducer(1, produceRequests);
-    try monitor(init.gpa, init.io, &chunks, &requests, &dashboard, &replies);
+    try monitor(.{ init.gpa, init.io, Dashboard{ .writer = &dashboard }, Reports{ .writer = &replies } }, &chunks, &requests);
     std.debug.print("Transfer progress:\n{s}Sampled reports:\n{s}", .{ dashboard.buffered(), replies.buffered() });
 }
 

@@ -265,6 +265,52 @@ test "prefix after repeated merge edges retires both edges while a sibling conti
     try std.testing.expectEqualSlices(u32, &input, whole.slice());
 }
 
+test "diamond prefixes retire concurrently while a shared sibling drains" {
+    const State = struct {
+        prefixes: std.atomic.Value(usize) = .init(0),
+        both_prefixes: std.Io.Event = .unset,
+        calls: std.atomic.Value(usize) = .init(0),
+    };
+    const Helpers = struct {
+        fn produce(state: *State, output: *Emitter(u32)) !void {
+            _ = state.calls.fetchAdd(1, .monotonic);
+            for (0..100) |i| try output.push(@intCast(i));
+        }
+        fn same(value: u32) u32 {
+            return value;
+        }
+        fn accept(_: u32) bool {
+            return true;
+        }
+        fn prefix(state: *State, input: []const u32) !void {
+            try std.testing.expectEqualSlices(u32, &.{ 0, 1 }, input);
+            if (state.prefixes.fetchAdd(1, .acq_rel) == 1) state.both_prefixes.set(io);
+            // Release both finalizers together, before either closes its edge.
+            try state.both_prefixes.wait(io);
+        }
+    };
+    for (0..16) |_| {
+        var state: State = .{};
+        const source = Stream(u32).fromProducerWith(1, Helpers.produce, &state);
+        const shared = pipe(&source, .{each(Helpers.same)});
+        const left = pipe(&shared, .{each(Helpers.same)});
+        const right = pipe(&shared, .{filter(Helpers.accept)});
+        const diamond = merge(.{ &left, &right });
+        var whole: Saved = .{};
+        var merged: Saved = .{};
+        try runWithin(.{
+            pipe(&left, .{ take(2), collectThenWith(&state, Helpers.prefix) }),
+            pipe(&right, .{ take(2), collectThenWith(&state, Helpers.prefix) }),
+            pipe(&diamond, .{ take(2), collectThenWith(&merged, Saved.copy) }),
+            pipe(&source, .{collectThenWith(&whole, Saved.copy)}),
+        });
+        try std.testing.expectEqual(@as(usize, 1), state.calls.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 2), merged.len);
+        try std.testing.expectEqual(@as(usize, 100), whole.len);
+        for (whole.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i)), value);
+    }
+}
+
 test "unused idle merge input stops while an unrelated flow still requires progress" {
     const State = struct {
         idle_entered: std.Io.Event = .unset,

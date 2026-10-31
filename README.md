@@ -1,51 +1,50 @@
 # zrx
 
-A functional reactive library for Zig: readable, standalone pipelines with
-comptime-checked composition.
+A declarative functional/reactive library for Zig. Describe inputs,
+transformations, decisions and terminal effects as named standalone stages;
+execute them together with `run(bindings, flows)`.
 
-**Experimental:** value pipelines, lazy borrowed sequences, finite reduction,
-streaming accumulation, explicit effects, declarative event streams, and
-replacement/derived signals.
-High-level line I/O connects terminal, file, and TCP inputs to declared effects.
+**Experimental, breaking API migration:** one declaration-only public model,
+type-keyed dependency injection, managed resources, finite inputs, producer-backed
+streams, streaming accumulation, replacement/derived signals, and bounded line I/O.
+Ordinary synchronous stages compose directly rather than acquiring a worker/queue
+per stage.
 
-The build exports a `zrx` package module. Alias its functions at the top of your
-file and compose them without method chaining. From the tested
-[value example](examples/pipeline.zig):
+The package module is `zrx`. Callbacks declare dependencies as typed leading
+parameters; ordinary data arguments come last. Supply allocator, Io, service
+values or lifecycle recipes at `run`. Only selected terminal roots execute.
+Errors and ownership stay explicit; no universal zero-overhead claim is made.
 
-```zig
-const zrx = @import("zrx");
-const pipe = zrx.pipe;
-const map = zrx.map;
+Start with the tested [resource](examples/resources.zig),
+[stream](examples/streams.zig), [signal](examples/signals.zig), and
+[accumulation](examples/scan.zig) examples:
 
-const result: u32 = pipe(3, .{
-    map(.{ double, increment }),
-});
+```sh
+zig build example
 ```
 
-Value operations evaluate normally; stream graphs and terminal effects are
-resource-free declarations activated by `run(allocator, io, flows)`.
-Errors and ownership stay explicit.
-
-See the **[documentation index](docs/README.md)** for API contracts, lifecycle
-guides, executable examples, and the source layout.
+See the **[documentation index](docs/README.md)** for contracts, lifecycle,
+migration details, and the opt-in [file program](examples/io_file.zig).
 
 ## Toolchain and checks
 
-Target Zig **0.17.0**, recorded in [`.zigversion`](.zigversion).
-With that compiler on your `PATH`, run:
+Use exactly Zig **0.17.0**, recorded in [`.zigversion`](.zigversion).
 
 ```sh
-zig version                  # must report 0.17.0
-zig fmt --check build.zig build.zig.zon src tests examples
-zig build test               # unit tests, compile-fail checks, and example coverage
+zig version
+zig fmt --check build.zig build.zig.zon src tests examples benchmarks
+zig build test
 zig build test -Doptimize=ReleaseFast
-zig build check              # formatting, native tests, cross builds, codegen
+zig build check
 ```
 
-See [validation scope and focused commands](docs/validation.md). Cross builds
-compile objects; they do not execute foreign targets or prove performance.
-Build the opt-in [terminal/file/TCP programs](src/io/README.md) with
-`zig build io-examples`.
+`zig build declarative-test` focuses on the current public API. `check` includes
+native tests, formatting, catalog cross builds, and scoped kernel codegen checks.
+Cross compilation is not foreign execution or performance proof.
+
+`zig build benchmark` is an opt-in direct/legacy/current graph comparison with
+correctness checks, never a default timing threshold. See
+[measurement scope and next investigations](docs/performance.md).
 
 ## License
 

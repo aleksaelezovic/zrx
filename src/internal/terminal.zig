@@ -2,7 +2,7 @@ const std = @import("std");
 const composition = @import("composition.zig");
 const sequences = @import("../data/sequences.zig");
 const streams = @import("runtime/streams.zig");
-const declarations = @import("../run.zig");
+const declarations = @import("graph_run.zig");
 
 // One validation/consumption rule for all public terminal variants in ops/.
 pub fn Terminal(comptime effect: anytype, comptime with_capability: bool, comptime mode: enum { each, collection, batch }) type {

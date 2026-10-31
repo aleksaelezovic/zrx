@@ -4,7 +4,7 @@ const records = @import("../data/lines.zig");
 const sequences = @import("../data/sequences.zig");
 const runtime = @import("../internal/runtime/streams.zig");
 const resources = @import("../internal/resources.zig");
-const execution = @import("../run.zig");
+const execution = @import("../internal/graph_run.zig");
 const SourceTag = opaque {};
 
 fn requireHosted() void {
@@ -170,6 +170,7 @@ const Sink = struct {
 };
 
 fn Consumer(comptime Item: type) type {
+    _ = Item;
     return struct {
         output: OutputConfig,
         slot: ?*OutputResource = null,
@@ -184,7 +185,7 @@ fn Consumer(comptime Item: type) type {
             self.slot = try scope.add(OutputResource, .{ .output = self.output }, claim);
         }
         pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
-        pub fn consume(self: @This(), reader: *runtime.Stream(Item).Reader, _: std.mem.Allocator, io: std.Io) !void {
+        pub fn consume(self: @This(), reader: anytype, _: std.mem.Allocator, io: std.Io) !void {
             var input = reader.iterator();
             const slot = self.slot.?;
             while (true) {

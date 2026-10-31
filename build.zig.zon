@@ -9,6 +9,7 @@
         "src",
         "tests",
         "examples",
+        "benchmarks",
         "docs",
         "README.md",
         "LICENSE",

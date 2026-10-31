@@ -39,9 +39,13 @@ const CrossFixture = struct {
     name: []const u8,
     path: []const u8,
     requires_hosted: bool = false,
+    public_api: bool = false,
 };
 
 pub const cross_only = [_]CrossFixture{
+    .{ .name = "declarative", .path = "tests/cross/declarative.zig", .public_api = true },
+    .{ .name = "declarative-scan", .path = "tests/cross/declarative_scan.zig", .public_api = true },
+    .{ .name = "declarative-io", .path = "tests/cross/declarative_io.zig", .public_api = true, .requires_hosted = true },
     .{ .name = "sequences", .path = "tests/cross/sequences.zig" },
     .{ .name = "try-pipe", .path = "tests/cross/try_pipe.zig" },
     .{ .name = "effects", .path = "tests/cross/effects.zig" },

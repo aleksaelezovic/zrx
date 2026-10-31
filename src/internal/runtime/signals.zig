@@ -93,6 +93,7 @@ pub fn Cell(comptime T: type) type {
         updates: ?*streams.Stream(T).Reader = null,
         observation: ?*streams.Stream(T) = null,
         observation_node: ?*anyopaque = null,
+        binding: ?*anyopaque = null,
 
         pub fn create(allocator: std.mem.Allocator, family: *Family) !*Self {
             const self = try allocator.create(Self);

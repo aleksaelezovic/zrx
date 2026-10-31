@@ -397,6 +397,54 @@ test "cloning an ended reader observes end without restarting production" {
     try std.testing.expectEqual(@as(usize, 1), calls);
 }
 
+test "concurrent end readers join one producer and retain its failure" {
+    const count = 8;
+    const State = struct {
+        ready: std.atomic.Value(usize) = .init(0),
+        all_ready: std.Io.Event = .unset,
+        finished: std.atomic.Value(usize) = .init(0),
+    };
+    const Helpers = struct {
+        fn source(state: *State, _: *Stream(u32)) !void {
+            defer _ = state.finished.fetchAdd(1, .monotonic);
+            try state.all_ready.wait(io);
+            return error.Broken;
+        }
+        fn read(state: *State, reader: *Stream(u32).Reader) anyerror!void {
+            if (state.ready.fetchAdd(1, .acq_rel) == count - 1) state.all_ready.set(io);
+            var cursor = reader.iterator();
+            try std.testing.expectError(error.Broken, cursor.next());
+            // Future results must remain cached, not consumed by the first join.
+            try std.testing.expectError(error.Broken, cursor.next());
+        }
+    };
+    // Exercise concurrent completion joins, not just sequential cached reads.
+    for (0..16) |_| {
+        var state: State = .{};
+        var source = try Stream(u32).fromProducerWith(allocator, io, 1, Helpers.source, &state);
+        defer source.deinit();
+        var split = try tee(&source);
+        defer split.deinit();
+        var clones: [count - 2]Stream(u32).Reader = undefined;
+        var prepared: usize = 0;
+        defer for (clones[0..prepared]) |*reader| reader.deinit();
+        for (&clones) |*reader| {
+            reader.* = try split.left.clone();
+            prepared += 1;
+        }
+        var workers: [count]std.Io.Future(anyerror!void) = undefined;
+        var started: usize = 0;
+        defer for (workers[0..started]) |*task| task.cancel(io) catch {};
+        for (&workers, 0..) |*task, i| {
+            const reader = if (i == 0) &split.left else if (i == 1) &split.right else &clones[i - 2];
+            task.* = try io.concurrent(Helpers.read, .{ &state, reader });
+            started += 1;
+        }
+        for (&workers) |*task| try task.await(io);
+        try std.testing.expectEqual(@as(usize, 1), state.finished.load(.monotonic));
+    }
+}
+
 test "branching rejects zero capacity without changing or activating the source" {
     const Helpers = struct {
         fn source(calls: *usize, output: *Stream(u32)) error{ Closed, Canceled }!void {
