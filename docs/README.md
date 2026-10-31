@@ -23,6 +23,7 @@ Source paths below are documentation/navigation, not new package imports.
 | Whole values | [`map`](../src/ops/map.zig), [`keepIf`](../src/ops/keepIf.zig) |
 | Sequence transforms | [`filter`](../src/ops/filter.zig), [`each`](../src/ops/each.zig) |
 | Eager finite reduction | [`fold`](../src/ops/fold.zig), [`tryFold`](../src/ops/tryFold.zig) |
+| Run-backed accumulation | [`scan`](../src/ops/scan.zig) |
 | Synchronous whole-value effects | [`tap`](../src/ops/tap.zig), [`tapWith`](../src/ops/tapWith.zig) |
 | Input declarations/adapters | [`Stream` / `Emitter`](../src/data/streams.zig), [`fromIterator`](../src/data/iterators.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Value-owned line I/O | [`Line` / `line`](../src/data/lines.zig), [`stdinLines` / `fileLines` / `tcpLines` and output terminals](../src/io/lines.zig) |
@@ -59,6 +60,7 @@ endpoints/loopback peers. Live I/O entry points are opt-in; see the I/O guide.
 | [Merge](../examples/merge.zig) | Explicit event union, decisions, service effects | `zig build example-merge` |
 | [Batching](../examples/batching.zig) | 1000 logs in ten batches of 100 | `zig build example-batching` |
 | [Signals](../examples/signals.zig) | Initial/replacement temperature and derived comfort | `zig build example-signals` |
+| [Accumulation](../examples/scan.zig) | Running transfer totals and independently sampled reports | `zig build example-scan` |
 | [CLI interpreter](../examples/io_cli.zig) | Named command parsing/decisions and two terminal pipes | `zig build io-examples` (build only) |
 | [File extraction](../examples/io_file.zig) | Path-based input, exclusive output, rejected-line diagnostics | `zig build io-examples` (build only) |
 | [TCP display](../examples/io_tcp.zig) | One receive-only connection shared by display and file audit | `zig build io-examples` (build only) |

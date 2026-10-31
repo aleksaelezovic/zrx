@@ -90,7 +90,18 @@ Array/slice state stays one value; filter update inputs before `hold` to reject
 replacements while preserving its initial value. Effects belong in explicit
 terminals, not derived callbacks.
 
+Use [`scan`](../src/ops/scan.zig) before `hold(seed)` to accumulate events into
+replacement updates. Scan does not emit seed; `values` of the held signal does.
+Keeping accumulation and current state separate lets callers consume update-only
+prefixes without introducing a second signal-root kind. Bind one typed seed and
+reuse it when composing both; this still materializes transport, with no fusion
+or performance-equivalence claim.
+Its upstream accumulator can advance ahead of the committed cache because of
+buffering; sampling reads only that cache, not the worker's private state.
+An observation prefix still leaves the scan-fed state dependency run-scoped.
+
 There are no live setters/getters, feedback safety, multi-parent computed values,
-global transactions, equality/coalescing controls, reactive reducers/scan, replay,
-or durable effects. Updaters and all stream/sampling work join before cache
-storage is freed; non-cooperative code cannot be forcibly interrupted.
+global transactions, equality/coalescing controls, reducer-backed signal
+constructors, replay, or durable effects. Updaters and all stream/sampling work
+join before cache storage is freed; non-cooperative code cannot be forcibly
+interrupted.

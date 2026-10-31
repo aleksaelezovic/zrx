@@ -34,6 +34,12 @@ retention, batching, merge, and signal coherence/completion. Private transport/
 cursor helpers preserve low-level tests without re-exposing retired public
 ownership APIs. Neither tests nor comptime checks prove arbitrary callback
 purity, termination, lifetime safety, or thread safety.
+
+Streaming accumulation coverage includes rerun/reset, sharing, shallow value
+snapshots, bounded slow-reader delivery, prefixes, and held-state sampling. Its
+two-pipe transfer monitor has external integration tests and an executable
+smoke run.
+
 Line-I/O coverage includes framing across short reads, record ownership,
 resource acquisition/cleanup, startup/allocation failures, write failure,
 exclusive file creation, rerun, and cancellation of a blocked TCP read.
@@ -43,6 +49,8 @@ exclusive file creation, rerun, and cancellation of a blocked TCP read.
 The single [catalog](../tests/codegen/catalog.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly. Exported
 runtime-input fixtures actually instantiate APIs, including graph execution.
+Scan/hold/sampling are covered as graph cross-builds, not direct-loop codegen
+equality.
 OS-backed line I/O is hosted-only (five targets); the catalog records that
 restriction. Inline line-value composition is checked on all six targets.
 Object compilation exercises target code/object writers; it is **not foreign

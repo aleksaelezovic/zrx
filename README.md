@@ -4,7 +4,8 @@ A functional reactive library for Zig: readable, standalone pipelines with
 comptime-checked composition.
 
 **Experimental:** value pipelines, lazy borrowed sequences, finite reduction,
-explicit effects, declarative event streams, and replacement/derived signals.
+streaming accumulation, explicit effects, declarative event streams, and
+replacement/derived signals.
 High-level line I/O connects terminal, file, and TCP inputs to declared effects.
 
 The build exports a `zrx` package module. Alias its functions at the top of your

@@ -24,6 +24,7 @@ pub const each = @import("ops/each.zig").each;
 pub const filter = @import("ops/filter.zig").filter;
 pub const fold = @import("ops/fold.zig").fold;
 pub const tryFold = @import("ops/tryFold.zig").tryFold;
+pub const scan = @import("ops/scan.zig").scan;
 pub const tap = @import("ops/tap.zig").tap;
 pub const tapWith = @import("ops/tapWith.zig").tapWith;
 pub const maxItems = @import("ops/maxItems.zig").maxItems;

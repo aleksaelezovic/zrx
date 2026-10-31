@@ -19,7 +19,7 @@ edit `AGENTS.md` rather than maintaining copies.
   into requirements or preserve the conversation as a transcript.
 - Current scope includes synchronous value composition, scalar `keepIf`, borrowed
   lazy slice sequences with `filter`/`each`, finite `fold`/`tryFold` reduction,
-  synchronous `tap`/`tapWith` effects and
+  deferred streaming accumulation with `scan`, synchronous `tap`/`tapWith` effects and
   explicit fail-fast `tryPipe`, plus declarative producer-backed streams and
   grouped `run` execution with automatic reader/result sharing, deferred terminal
   effects and scoped collection callbacks, optional `maxItems` guards, successful
@@ -42,8 +42,8 @@ edit `AGENTS.md` rather than maintaining copies.
 - Treat multi-pipe programs activated by one `run` as the design target.
   Validate external-I/O abstractions with small terminal, filesystem, and network
   programs; keep domain decisions in named stages, not hidden in adapter loops.
-- Writable refs, reactive reducers, and dynamic subscriptions remain future
-  design topics, not implemented contracts.
+- Writable refs, reducer-backed signal constructors, and dynamic subscriptions
+  remain future design topics, not implemented contracts.
 - Idempotency and durable workflows are a priority for future design, not
   implemented contracts. A check-then-skip operator alone does not establish
   durable execution; persistence, atomicity, retries, and crash recovery need
@@ -101,6 +101,14 @@ edit `AGENTS.md` rather than maintaining copies.
 - `tryFold` stops at the first reducer error under either executor, without an
   extra cursor probe, cleanup, or rollback. `tryPipe` only checks the completed
   reduction's outer result; it does not supply per-item short-circuiting.
+- `scan(seed, reducer)` is a run-backed serial recurrence over sequence inputs,
+  even finite ones. Require one pure typed `fn (A, T) A`, exact nonzero-sized A,
+  and no outer error-union accumulator or fallible reducer. Each run starts from
+  a shallow seed copy and emits each accumulated value, not seed or an extra
+  final value; empty input emits none. Stable references share one recurrence.
+  Publish values, never pointers into changing accumulator storage; borrowed
+  referents must stay valid and unchanged for older snapshots too. Use existing
+  `hold(seed)` for current state. `scanWith` and fallible scan remain future work.
 - Follow Zig's normal function argument coercions. Preserve error unions as
   values in `pipe`; explicit `tryPipe` checks pipeline-stage error-union boundaries
   and skips later stages on failure. Grouped/separate whole-value maps must stay

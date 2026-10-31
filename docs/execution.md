@@ -10,6 +10,7 @@
 | Eager outer-error short-circuiting | [`tryPipe`](../src/tryPipe.zig) |
 | Lazy borrowed slice traversal | [`filter`](../src/ops/filter.zig)/[`each`](../src/ops/each.zig) cursors; no allocator/Io |
 | Finite infallible-cursor reduction | [`fold`](../src/ops/fold.zig)/[`tryFold`](../src/ops/tryFold.zig), eager when applied |
+| Accumulated updates, including finite inputs | [`scan`](../src/ops/scan.zig), deferred through run |
 | Stream graphs, signals, all public terminals | [`run(allocator, io, flows)`](../src/run.zig) |
 
 `pipe` is not an implicit effect runtime. It passes errors and optionals as data.
@@ -78,6 +79,12 @@ there is no implied buffer transfer or deep payload-memory bound.
 Prefix completion bounds delivery at its position, not upstream prefetch/work or
 effects. Observed failures before cutoff propagate; another live branch or
 signal dependency can still fail the run after a prefix branch completes.
+
+`scan` keeps a private serial accumulator and publishes each result, not its
+seed or an extra final value. It shares normal stream demand/retirement; it does
+not retain a publicly sampleable cache. Compose with `hold(seed)` for that.
+Empty scan output is empty, while held `values` includes initial state. Neither
+form deep-copies accumulator referents. See the [transfer monitor](../examples/scan.zig).
 
 Current lowering materializes owned transport per recognized derived node,
 including linear ones. It reuses standard Io/transport machinery, not a new

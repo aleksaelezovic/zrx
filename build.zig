@@ -202,6 +202,17 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(signal_tests).step);
 
+    const scan_tests = b.addTest(.{
+        .name = "scan",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/scan.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(scan_tests).step);
+
     const example = b.addExecutable(.{
         .name = "pipeline",
         .root_module = b.createModule(.{
@@ -362,7 +373,50 @@ pub fn build(b: *std.Build) void {
     example_step.dependOn(&run_signals.step);
     test_step.dependOn(&run_signals.step);
 
+    const scan_example = b.addExecutable(.{
+        .name = "scan",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/scan.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = zrx }},
+        }),
+    });
+    const run_scan = b.addRunArtifact(scan_example);
+    const scan_step = b.step("example-scan", "Run the accumulated transfer monitor");
+    scan_step.dependOn(&run_scan.step);
+    example_step.dependOn(&run_scan.step);
+    test_step.dependOn(&run_scan.step);
+    const scan_example_tests = b.addTest(.{
+        .name = "scan-example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/scan_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zrx", .module = zrx },
+                .{ .name = "scan_example", .module = scan_example.root_module },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(scan_example_tests).step);
+
     const failures = .{
+        .{ "scan_arity", "scan: reducer must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "scan_generic", "scan: reducer must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "scan_comptime", "scan: reducer must have two explicitly typed runtime parameters and an explicit return type" },
+        .{ "scan_pointer", "scan: reducer must be a function" },
+        .{ "scan_tuple", "scan: reducer must be a function" },
+        .{ "scan_result", "scan: reducer result must exactly match the accumulator type" },
+        .{ "scan_fallible", "scan: fallible reducers are not supported" },
+        .{ "scan_error_state", "scan: accumulator must not be an outer error union; wrap error data in a struct" },
+        .{ "scan_zero_state", "scan: zero-sized accumulator values are not supported" },
+        .{ "scan_seed", "expected type 'u32', found 'bool'" },
+        .{ "scan_empty_item", "expected type 'bool', found 'u32'" },
+        .{ "scan_undefined", "scan: initial value must not be undefined" },
+        .{ "scan_array", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
+        .{ "scan_signal", "signal: use values(signal) for stream operators and terminal effects" },
+        .{ "scan_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
         .{ "take_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
         .{ "take_stream_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
         .{ "take_signal", "signal: use values(signal) for stream operators and terminal effects" },

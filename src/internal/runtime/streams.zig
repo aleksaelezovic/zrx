@@ -315,6 +315,40 @@ pub fn share(
     return Stream(Element).fromProducerWith(allocator, io, capacity, Forward.produce, Context{ .input = input, .io = io });
 }
 
+/// Run-owned recurrence, never exposed as a mutable public cursor. Output slots
+/// receive shallow values, not references into the worker's accumulator.
+pub fn scan(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    capacity: usize,
+    input: anytype,
+    initial: anytype,
+    comptime reducer: anytype,
+) (std.mem.Allocator.Error || error{UnsupportedCapacity})!Stream(@TypeOf(initial)) {
+    if (capacity == 0) return error.UnsupportedCapacity;
+    const Input = @TypeOf(input);
+    const State = @TypeOf(initial);
+    const Context = struct { input: Input, initial: State, io: std.Io };
+    const Forward = struct {
+        fn produce(context: Context, output: *Stream(State)) anyerror!void {
+            var cursor = sequences.cursor(context.input);
+            var state = context.initial;
+            while (true) {
+                try context.io.checkCancel();
+                const value = (if (comptime sequences.isFallible(Input)) try cursor.next() else cursor.next()) orelse return;
+                state = reducer(state, value);
+                try context.io.checkCancel();
+                try output.push(state);
+            }
+        }
+    };
+    return Stream(State).fromProducerWith(allocator, io, capacity, Forward.produce, Context{
+        .input = input,
+        .initial = initial,
+        .io = io,
+    });
+}
+
 /// Run-owned retention. Allocate the ring during graph preparation, not on pull.
 /// Input and payload referents stay borrowed; only the shallow ring is owned here.
 pub fn takeLast(

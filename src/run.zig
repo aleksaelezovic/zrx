@@ -442,6 +442,8 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         errdefer scope.allocator.destroy(owner);
         owner.* = if (Definition.declaration_kind == .retained)
             try streams.takeLast(scope.allocator, scope.io, upstream.capacity, reader, reference.limit)
+        else if (Definition.declaration_kind == .scanned)
+            try streams.scan(scope.allocator, scope.io, upstream.capacity, reader, reference.initial, Definition.declaration_reducer)
         else block: {
             const view = if (Definition.declaration_kind == .mapped)
                 each(Definition.declaration_functions).apply(reader)
