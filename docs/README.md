@@ -52,6 +52,8 @@ smoke-check their entry points and import reusable compositions.
 
 ## Evidence and integration
 
+- [Approved retry direction](proposals/durable_workflows.md): not implemented;
+  application-owned idempotency, explicit retry decisions and run-supplied Io.
 - [Measurement records](measurements/README.md): elapsed, allocator/callback and
   executor-phase evidence, with original source baselines.
 - [Implementation history](history/README.md): migration and lifecycle audit.
