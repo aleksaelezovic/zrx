@@ -7,6 +7,10 @@
   managed lifetimes, prefix probes/retirement, snapshots and failures.
   `scan_example.zig` tests the public two-pipe monitor. Original `scan.zig`
   remains private transport/kernel regression evidence.
+- `branch.zig` tests current exclusive value/terminal cases, persistent state,
+  injected predicates/effects, retirement, allocation/startup failures and cancellation.
+- `http.zig` runs the actual current echo graph with finite loopback peers, including
+  body framing/limits, completion credits, routing/drops, cancellation and cleanup.
 - `lifecycle_hardening.zig` forces runtime-selected aliases, completed-prefix/
   peer-result ordering, and state failure after observation retirement with an
   idle sampler, including managed-service release checks.

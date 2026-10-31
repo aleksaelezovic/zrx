@@ -3,6 +3,7 @@ const composition = @import("../composition.zig");
 const sequences = @import("../../data/sequences.zig");
 const broadcast = @import("broadcast.zig");
 const queueNext = @import("../queue.zig").next;
+const completion = @import("completion.zig");
 
 // Live transport is private; the public producer description is data/streams.zig.
 /// Own a bounded queue, captured capabilities, and an optional lazy producer.
@@ -135,11 +136,22 @@ pub fn Stream(comptime T: type) type {
 
         /// Accept one item, waiting for capacity. Does not run downstream pipelines.
         pub fn push(self: *Self, value: T) (std.Io.QueueClosedError || std.Io.Cancelable)!void {
+            const token = if (self.completionOwner()) |owner| owner.acquire() else null;
+            errdefer if (token) |item| item.release();
             if (self.state.buffer.len == 0) {
                 try self.state.rendezvous.putOne(self.state.io, value);
             } else {
                 try self.state.buffer_state.push(value);
             }
+        }
+
+        pub fn setCompletion(self: *Self, owner: ?completion.Owner) void {
+            std.debug.assert(self.state.buffer.len != 0);
+            self.state.buffer_state.completion_owner = owner;
+        }
+
+        pub fn completionOwner(self: *Self) ?completion.Owner {
+            return self.state.buffer_state.completion_owner;
         }
 
         /// Idempotent. Buffered values drain before readers observe end.
@@ -177,6 +189,7 @@ pub fn Stream(comptime T: type) type {
             record: *Buffer.Record,
 
             pub fn next(self: *@This()) anyerror!?T {
+                self.state.buffer_state.finishDelivery(self.record);
                 try self.state.buffer_state.beginRead(self.record);
                 defer self.state.buffer_state.endRead(self.record);
                 try startProducer(self.state);
@@ -212,6 +225,10 @@ pub fn Stream(comptime T: type) type {
 
             pub fn iterator(self: *@This()) Self.Iterator {
                 return .{ .state = self.state, .record = self.record };
+            }
+
+            pub fn completionOwner(self: *@This()) ?completion.Owner {
+                return self.state.buffer_state.completion_owner;
             }
 
             /// Fork the next unread position without running callbacks.

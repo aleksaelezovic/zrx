@@ -20,6 +20,7 @@ pub const Scope = struct {
         claim: ?Claim,
         acquired: bool = false,
         acquire: *const fn (*anyopaque, std.Io) anyerror!void,
+        interrupt: ?*const fn (*anyopaque, std.Io) void,
         release: *const fn (*anyopaque, std.Io) void,
         destroy: *const fn (*anyopaque, std.mem.Allocator) void,
     };
@@ -38,6 +39,9 @@ pub const Scope = struct {
             fn release(context: *anyopaque, io: std.Io) void {
                 cast(context).release(io);
             }
+            fn interrupt(context: *anyopaque, io: std.Io) void {
+                cast(context).interrupt(io);
+            }
             fn destroy(context: *anyopaque, allocator: std.mem.Allocator) void {
                 allocator.destroy(cast(context));
             }
@@ -49,6 +53,7 @@ pub const Scope = struct {
             .context = slot,
             .claim = claim,
             .acquire = Calls.acquire,
+            .interrupt = if (@hasDecl(T, "interrupt")) Calls.interrupt else null,
             .release = Calls.release,
             .destroy = Calls.destroy,
         });
@@ -73,6 +78,14 @@ pub const Scope = struct {
             entry.destroy(entry.context, self.allocator);
         }
         self.entries.deinit(self.allocator);
+    }
+
+    // Stop blocking resource operations before joining graph producers.
+    // This interrupts work without closing/freeing resources still in use.
+    pub fn interruptAll(self: *@This()) void {
+        for (self.entries.items) |entry| {
+            if (entry.acquired) if (entry.interrupt) |interrupt| interrupt(entry.context, self.io);
+        }
     }
 };
 

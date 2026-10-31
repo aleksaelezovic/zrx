@@ -5,6 +5,16 @@ const seq = @import("../../data/sequences.zig");
 const cursors = @import("cursors.zig");
 const signals = @import("../signal_kind.zig");
 
+// Request-scoped HTTP values must not cross retention/stateful region stages.
+pub fn httpSafe(comptime T: type) bool {
+    if (comptime !inlineNode(T)) return true;
+    if (@hasDecl(T, "node_kind")) {
+        if (T.node_kind != .map and T.node_kind != .filter and T.node_kind != .tap)
+            return false;
+    } else if (T.declaration_kind != .taken) return false;
+    return httpSafe(@FieldType(T, "source"));
+}
+
 pub fn inlineNode(comptime T: type) bool {
     if (@typeInfo(T) == .pointer) return false;
     if (signals.isSignal(T)) return false;

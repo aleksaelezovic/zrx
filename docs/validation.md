@@ -24,6 +24,9 @@ zig build check
 - `check`: formatting, native tests, cross builds, and scoped codegen comparisons.
 - `declarative-test`: current public API, service/resource contracts, direct
   regions, producer sharing, signals, merge/reduction, scan, cancellation and I/O.
+- `test-branch` and `test-http`: current public routing and bounded HTTP
+  request-scope tests. They include DI, persistent case state, startup/allocation
+  failures, completion credits, deadlines and finite loopback peers.
 - `lifecycle-test`: forced runtime alias/completion schedules and both
   producer-await/retirement join orders, using test-local Io observation.
 - `measurement-test`: concurrent raw allocator accounting, fault cleanup and
@@ -37,7 +40,8 @@ zig build check
 - `fmt`, `cross`, `codegen`: focused build steps using the same configuration.
 - `example`: finite noninteractive demos; the [index](README.md#executable-examples)
   lists focused commands. `io-examples` builds/installs live-I/O executables
-  without running them or waiting for external input.
+  without running them or waiting for external input. `http-example` separately
+  builds/installs the opt-in echo server; `example-cases` runs terminal routing.
 
 Native coverage includes ordering, coercions/type transitions, single/tuple
 equivalence, errors-as-data, fail-fast boundaries, caller ownership, graph
@@ -67,6 +71,8 @@ Scan/hold/sampling are covered as graph cross-builds, not direct-loop codegen
 equality.
 OS-backed line I/O is hosted-only (five targets); the catalog records that
 restriction. Inline line-value composition is checked on all six targets.
+Current branch graphs compile on all six; HTTP graphs compile on the five
+hosted targets. Their entries import the current public module, not a legacy facade.
 Object compilation exercises target code/object writers; it is **not foreign
 runtime execution**, support for all Zig targets, or a graph benchmark.
 

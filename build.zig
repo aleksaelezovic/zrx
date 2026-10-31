@@ -294,6 +294,19 @@ pub fn build(b: *std.Build) void {
         world_step.dependOn(&invalid_world.step);
     }
     test_step.dependOn(world_step);
+    const branch_tests = b.addTest(.{
+        .name = "branch",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/branch.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+        }),
+    });
+    const branch_test_step = b.step("test-branch", "Run exclusive branch value and terminal tests");
+    const run_branch_tests = b.addRunArtifact(branch_tests);
+    branch_test_step.dependOn(&run_branch_tests.step);
+    test_step.dependOn(&run_branch_tests.step);
     const try_pipe_tests = b.addTest(.{
         .name = "try-pipe",
         .root_module = b.createModule(.{
@@ -380,6 +393,38 @@ pub fn build(b: *std.Build) void {
     }
     const io_example_tests = b.addTest(.{ .name = "io-examples", .root_module = io_example_test_module });
     test_step.dependOn(&b.addRunArtifact(io_example_tests).step);
+    const http_example = b.addExecutable(.{
+        .name = "http-echo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/http_echo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+        }),
+    });
+    const http_step = b.step("http-example", "Build/install the opt-in loopback HTTP server");
+    http_step.dependOn(&b.addInstallArtifact(http_example, .{}).step);
+    test_step.dependOn(&http_example.step);
+    const http_smoke = b.addRunArtifact(http_example);
+    http_smoke.addArgs(&.{ "0", "0" });
+    http_smoke.expectExitCode(0);
+    test_step.dependOn(&http_smoke.step);
+    const http_tests = b.addTest(.{
+        .name = "http",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/http.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zrx", .module = public_zrx },
+                .{ .name = "http_echo", .module = http_example.root_module },
+            },
+        }),
+    });
+    const http_test_step = b.step("test-http", "Test the HTTP adapter and actual example graph on loopback");
+    const run_http_tests = b.addRunArtifact(http_tests);
+    http_test_step.dependOn(&run_http_tests.step);
+    test_step.dependOn(&run_http_tests.step);
     inline for (.{ "streams", "branching", "sharing" }) |name| {
         const runtime_tests = b.addTest(.{
             .name = "runtime-" ++ name,
@@ -563,6 +608,23 @@ pub fn build(b: *std.Build) void {
     branching_step.dependOn(&run_branching.step);
     example_step.dependOn(&run_branching.step);
     test_step.dependOn(&run_branching.step);
+    const cases_example = b.addExecutable(.{
+        .name = "cases",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cases.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zrx", .module = public_zrx }},
+        }),
+    });
+    const run_cases = b.addRunArtifact(cases_example);
+    branch_tests.root_module.addImport("cases_example", cases_example.root_module);
+    run_cases.expectStdOutEqual("negative=2 nonnegative=3\n");
+    run_cases.expectExitCode(0);
+    const cases_step = b.step("example-cases", "Run exclusive case pipelines that all terminate");
+    cases_step.dependOn(&run_cases.step);
+    public_examples.dependOn(&run_cases.step);
+    test_step.dependOn(&run_cases.step);
     const pipes_example = b.addExecutable(.{
         .name = "pipes",
         .root_module = b.createModule(.{
@@ -689,6 +751,17 @@ pub fn build(b: *std.Build) void {
         .{ "scan_array", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
         .{ "scan_signal", "signal: use values(signal) for stream operators and terminal effects" },
         .{ "scan_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
+        .{ "branch_empty", "branch: cases must not be empty" },
+        .{ "branch_case", "branch: expected when/otherwise cases, not operators or nested tuples" },
+        .{ "branch_default_order", "branch: otherwise must be the last case" },
+        .{ "branch_predicate", "when: predicate must return bool" },
+        .{ "branch_mixed", "branch: cases must either all terminate or all produce sequences" },
+        .{ "branch_item_type", "branch: all output cases must have the same item type" },
+        .{ "branch_empty_pipeline", "pipe: operator tuple must not be empty" },
+        .{ "branch_nested_pipeline", "pipe: stage 1 is a nested tuple; use a flat tuple or a named helper operator" },
+        .{ "http_response_error", "respondHttp: expected HttpResponse values, not error unions or other items" },
+        .{ "http_response_item", "respondHttp: expected HttpResponse values, not error unions or other items" },
+        .{ "http_direct_iteration", "no field or member function named 'iterator' in 'data.declarations.Transform(.map,.{(function 'handle')}).Output(*const io.http.Source)'" },
         .{ "take_array_value", "sequence: expected a borrowed slice, pointer-to-array, or zrx view; pass arrays by reference" },
         .{ "take_stream_iteration", "stream declarations execute through run; use a terminal effect instead of direct iteration" },
         .{ "take_signal", "signal: use values(signal) for stream operators and terminal effects" },
@@ -827,7 +900,7 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = b.path("tests/compile_fail/" ++ failure[0] ++ ".zig"),
                 .target = target,
                 .optimize = optimize,
-                .imports = &.{.{ .name = "zrx", .module = zrx }},
+                .imports = &.{.{ .name = "zrx", .module = if (std.mem.startsWith(u8, failure[0], "branch_") or std.mem.startsWith(u8, failure[0], "http_")) public_zrx else zrx }},
             }),
         });
         check.expect_errors = .{ .contains = failure[1] };

@@ -32,6 +32,7 @@ fn Terminal(comptime mode: Mode, comptime effect: anytype) type {
             cb.validate(effect, &.{if (mode == .each) T else []const T});
             const Consumer = struct {
                 pub const Services = Meta.Services;
+                pub const http_scoped_supported = mode == .each;
                 size: if (mode == .batch) usize else void,
                 storage: if (mode == .batch) []T else void = if (mode == .batch) &.{} else {},
                 pub fn prepare(self: *@This(), allocator: std.mem.Allocator) !void {
@@ -94,12 +95,13 @@ fn External(comptime Operator: type) type {
             const OldFlow = Operator.Output(Source);
             const C = @FieldType(OldFlow, "consumer");
             const Consumer = struct {
+                pub const http_scoped_supported = !@hasDecl(C, "http_scoped_supported") or C.http_scoped_supported;
                 inner: C,
                 pub fn prepare(self: *@This(), allocator: std.mem.Allocator) !void {
                     try self.inner.prepare(allocator);
                 }
                 pub fn prepareResources(self: *@This(), scope: anytype) !void {
-                    try self.inner.prepareResources(scope);
+                    if (@hasDecl(C, "prepareResources")) try self.inner.prepareResources(scope);
                 }
                 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
                     self.inner.deinit(allocator);

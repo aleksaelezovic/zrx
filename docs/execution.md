@@ -92,6 +92,14 @@ are independent descriptions. Each selected delivery edge gets a reader; a new
 run creates fresh resources and calls producers again, not a replay or reset of
 borrowed application state. Keep declarations and referents stable through run.
 
+[`branch`](../src/ops/branch.zig) routes into persistent case substreams,
+evaluating injected `when` predicates in order until the first match. An optional
+`otherwise` must be last. All cases either produce the same item type, merged
+with per-case order and unspecified interleaving, or all end with terminal
+effects and the branch itself is a selected terminal. Each case owns its own
+fold/scan/prefix state. Unmatched items or items for a retired case are dropped;
+retiring one case does not stop its live siblings.
+
 ## Completion, bounds, and errors
 
 - `take(n)` succeeds after at most n items, with no extra input probe. Zero reads
@@ -130,3 +138,9 @@ callbacks may use cancelable Io. Non-returning/non-cancelable code can prevent
 shutdown. Callbacks must join work using borrowed arguments before returning.
 Allocators/capability referents used by concurrent graph work must be safe for
 that use. Retrying run can repeat external effects; this is not durable recovery.
+
+HTTP is a scoped exception to ordinary shallow-item retention: request/body/
+response storage lasts only through that request's final delivery. Supported
+exclusive pipelines track completion, including filtered/unanswered requests.
+Unsupported fan-out/retention/stateful compositions fail before listening.
+See [HTTP request scopes](http.md) rather than assuming run-scoped referent validity.

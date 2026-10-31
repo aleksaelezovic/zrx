@@ -23,6 +23,7 @@ pub fn runObserved(bindings: anytype, flows: anytype, observer: anytype) anyerro
     const types = @typeInfo(@TypeOf(flows)).@"struct".field_types;
     const direct = comptime block: {
         for (types) |F| {
+            if (@hasDecl(F, "branch_terminal") and F.branch_terminal) break :block false;
             if (!cursors.finite(@FieldType(F, "source")) or @hasDecl(@FieldType(F, "consumer"), "prepareResources"))
                 break :block false;
         }
@@ -31,6 +32,9 @@ pub fn runObserved(bindings: anytype, flows: anytype, observer: anytype) anyerro
     var scope: binding.Scope(Env) = .{ .allocator = env.allocator(), .env = &env };
     defer scope.deinit();
     inline for (flows) |flow| try scope.inspect(flow.source);
+    inline for (flows) |flow| {
+        if (comptime @hasField(@TypeOf(flow), "cases")) try scope.inspect(flow.cases);
+    }
     if (direct and !scope.hasShared()) {
         var definitions: @Tuple(types) = undefined;
         inline for (0..flows.len) |i| definitions[i] = flows[i];

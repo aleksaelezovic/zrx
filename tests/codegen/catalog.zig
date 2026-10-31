@@ -52,10 +52,12 @@ pub const cross_only = [_]CrossFixture{
     .{ .name = "streams", .path = "tests/cross/streams.zig" },
     .{ .name = "merge", .path = "tests/cross/merge.zig" },
     .{ .name = "batching", .path = "tests/cross/batching.zig" },
+    .{ .name = "branch", .path = "tests/cross/branch.zig", .public_api = true },
     .{ .name = "signals", .path = "tests/cross/signals.zig" },
     .{ .name = "scan", .path = "tests/cross/scan.zig" },
     .{ .name = "take", .path = "tests/cross/take.zig" },
     .{ .name = "line-values", .path = "tests/cross/line_values.zig" },
     // Process handles/cwd and OS sockets have no freestanding host.
     .{ .name = "io", .path = "tests/cross/io.zig", .requires_hosted = true },
+    .{ .name = "http", .path = "tests/cross/http.zig", .requires_hosted = true, .public_api = true },
 };

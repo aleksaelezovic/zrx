@@ -9,6 +9,8 @@ const graph = @import("../graph_run.zig");
 const streams = @import("../../data/streams.zig");
 const transport = @import("../runtime/streams.zig");
 const regions = @import("regions.zig");
+const branching = @import("../../ops/branch.zig");
+const branch_plan = @import("../branch.zig");
 const Key = struct { address: usize, type_id: usize };
 const Allocation = struct { ptr: *anyopaque, free: *const fn (std.mem.Allocator, *anyopaque) void };
 
@@ -19,6 +21,11 @@ fn referenceCapacity(comptime T: type) usize {
     if (@hasField(T, "signal")) count += referenceCapacity(@FieldType(T, "signal"));
     if (@hasField(T, "inputs")) {
         for (@typeInfo(@FieldType(T, "inputs")).@"struct".field_types) |I| count += referenceCapacity(I);
+    }
+    if (@hasField(T, "cases")) count += referenceCapacity(@FieldType(T, "cases"));
+    if (@hasField(T, "operators")) count += referenceCapacity(@FieldType(T, "operators"));
+    if (@import("../composition.zig").isTuple(T)) {
+        for (@typeInfo(T).@"struct".field_types) |I| count += referenceCapacity(I);
     }
     return count;
 }
@@ -34,7 +41,10 @@ fn typeId(comptime T: type) usize {
 pub fn Scope(comptime Env: type) type {
     const capacity = block: {
         var count: usize = 0;
-        for (Env.RootTypes) |F| count += referenceCapacity(@FieldType(F, "source"));
+        for (Env.RootTypes) |F| {
+            count += referenceCapacity(@FieldType(F, "source"));
+            if (@hasField(F, "cases")) count += referenceCapacity(@FieldType(F, "cases"));
+        }
         break :block count;
     };
     return struct {
@@ -67,6 +77,9 @@ pub fn Scope(comptime Env: type) type {
             if (comptime @hasField(T, "source")) try self.inspect(input.source);
             if (comptime @hasField(T, "signal")) try self.inspect(input.signal);
             if (comptime @hasField(T, "inputs")) inline for (input.inputs) |source| try self.inspect(source);
+            if (comptime @hasField(T, "cases")) try self.inspect(input.cases);
+            if (comptime @hasField(T, "operators")) try self.inspect(input.operators);
+            if (comptime @import("../composition.zig").isTuple(T)) inline for (input) |item| try self.inspect(item);
         }
         fn shared(self: *Self, input: anytype) bool {
             const key: Key = .{ .address = @intFromPtr(input), .type_id = typeId(decl.Child(@TypeOf(input))) };
@@ -102,6 +115,8 @@ pub fn Scope(comptime Env: type) type {
         pub fn lower(self: *Self, input: anytype) anyerror!Lowered(@TypeOf(input), Env) {
             const T = @TypeOf(input);
             if (comptime @typeInfo(T) == .pointer) return self.reference(input);
+            if (comptime @hasDecl(T, "branch_source"))
+                return .{ .source = try self.lower(input.source), .cases = boundCases(self, input) };
             if (comptime @hasDecl(T, "node_kind")) {
                 if (T.node_kind == .slice) return .{ .input = input, .env = self.env };
                 if (T.node_kind == .value) return .{ .input = input, .env = self.env };
@@ -140,6 +155,10 @@ pub fn Scope(comptime Env: type) type {
 
 pub fn Lowered(comptime T: type, comptime Env: type) type {
     if (@typeInfo(T) == .pointer) return *Lowered(@typeInfo(T).pointer.child, Env);
+    if (@hasDecl(T, "branch_source")) {
+        const S = Lowered(@FieldType(T, "source"), Env);
+        return branch_plan.Descriptor(S, BoundCases(T, Env));
+    }
     if (@hasDecl(T, "node_kind")) {
         if (T.node_kind == .slice) return regions.View(T, Env);
         if (T.node_kind == .value) return regions.View(T, Env);
@@ -193,13 +212,17 @@ fn Here(comptime Input: type, comptime Env: type) type {
         pub fn materialize(self: *@This(), scope: anytype) !*graph.Runtime(seq.Item(Input)) {
             const T = seq.Item(Input);
             const upstream = try graph.resolve(scope, &self.source);
+            if (upstream.scoped_http and !regions.httpSafe(Input)) return error.UnsupportedHttpComposition;
             const reader = try upstream.acquire(scope.allocator);
             try scope.reserve();
             const owner = try scope.allocator.create(transport.Stream(T));
             errdefer scope.allocator.destroy(owner);
             owner.* = try transport.share(scope.allocator, scope.io, upstream.capacity, regions.view(self.definition, reader, self.env));
             errdefer owner.deinit();
-            return graph.Runtime(T).create(scope.allocator, owner, upstream.capacity, .{reader});
+            owner.setCompletion(upstream.owner.completionOwner());
+            const result = try graph.Runtime(T).create(scope.allocator, owner, upstream.capacity, .{reader});
+            result.scoped_http = upstream.scoped_http;
+            return result;
         }
     };
 }
@@ -251,6 +274,8 @@ fn Root(comptime F: type, comptime Env: type) type {
     const Base = Lowered(regions.Base(Input), Env);
     const C = @FieldType(F, "consumer");
     const Consumer = struct {
+        pub const http_scoped_supported = regions.httpSafe(Input) and
+            (!@hasDecl(C, "http_scoped_supported") or C.http_scoped_supported);
         definition: Input,
         inner: C,
         env: *Env,
@@ -277,6 +302,8 @@ fn ExpandedFlow(comptime F: type) type {
     };
 }
 pub fn Flow(comptime F: type, comptime Env: type) type {
+    if (@hasDecl(F, "branch_terminal") and F.branch_terminal)
+        return graph.BranchFlow(Lowered(@FieldType(F, "source"), Env), BoundCases(F, Env));
     if (!regions.expandable(@FieldType(F, "source"))) return Root(F, Env);
     return union(enum) {
         pub const flow_tag = graph.FlowTag;
@@ -300,9 +327,17 @@ pub fn Flow(comptime F: type, comptime Env: type) type {
                 .upstream => |*value| value.deinit(allocator),
             }
         }
+        pub fn completionOwner(self: *@This()) ?@import("../runtime/completion.zig").Owner {
+            return switch (self.*) {
+                .here => |*value| value.completionOwner(),
+                .upstream => |*value| value.completionOwner(),
+            };
+        }
     };
 }
 pub fn flow(scope: anytype, definition: anytype) !Flow(@TypeOf(definition), @typeInfo(@TypeOf(scope.env)).pointer.child) {
+    if (comptime @hasDecl(@TypeOf(definition), "branch_terminal") and @TypeOf(definition).branch_terminal)
+        return .{ .source = try scope.lower(definition.source), .cases = boundCases(scope, definition) };
     if (comptime regions.expandable(@FieldType(@TypeOf(definition), "source"))) {
         if (!scope.shared(regions.base(definition.source))) {
             return .{ .upstream = try flow(scope, ExpandedFlow(@TypeOf(definition)){
@@ -318,5 +353,35 @@ pub fn flow(scope: anytype, definition: anytype) !Flow(@TypeOf(definition), @typ
     return .{
         .source = try scope.lower(regions.base(definition.source)),
         .consumer = .{ .definition = definition.source, .inner = definition.consumer, .env = scope.env },
+    };
+}
+
+fn BoundCases(comptime T: type, comptime Env: type) type {
+    const Cases = @typeInfo(@FieldType(T, "cases")).@"struct".field_types;
+    var types: [Cases.len]type = undefined;
+    for (Cases, 0..) |C, i| types[i] = BoundCase(seq.Item(@FieldType(T, "source")), C, Env);
+    return @Tuple(&types);
+}
+fn boundCases(scope: anytype, definition: anytype) BoundCases(@TypeOf(definition), @typeInfo(@TypeOf(scope.env)).pointer.child) {
+    var result: BoundCases(@TypeOf(definition), @typeInfo(@TypeOf(scope.env)).pointer.child) = undefined;
+    inline for (definition.cases, 0..) |case, i| result[i] = .{ .definition = case, .binding = scope };
+    return result;
+}
+fn BoundCase(comptime Item: type, comptime C: type, comptime Env: type) type {
+    const Public = branching.CaseOutput(Item, C);
+    const terminal = @hasDecl(Public, "world_flow_tag") and Public.world_flow_tag == @import("../world/dependencies.zig").FlowTag;
+    return struct {
+        pub const bound_case = true;
+        pub const is_default = C.is_default;
+        pub const Pipeline = if (terminal) Flow(Public, Env) else Lowered(Public, Env);
+        definition: C,
+        binding: *Scope(Env),
+        pub fn matches(self: @This(), item: Item) bool {
+            return cb.invoke(C.condition, self.binding.env, .{item});
+        }
+        pub fn build(self: @This(), source: branch_plan.Input(Item)) !Pipeline {
+            const pipeline = @import("../../compose.zig").pipe(source, self.definition.operators);
+            return if (terminal) flow(self.binding, pipeline) else self.binding.lower(pipeline);
+        }
     };
 }

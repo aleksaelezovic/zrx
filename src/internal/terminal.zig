@@ -30,6 +30,7 @@ pub fn Terminal(comptime effect: anytype, comptime with_capability: bool, compti
             const Item = sequences.Item(Input);
             _ = @TypeOf(@as(Argument, @as(if (mode == .each) Item else []const Item, undefined)));
             const Consumer = struct {
+                pub const http_scoped_supported = mode == .each;
                 capability: Capability,
                 batch_size: BatchSize,
                 storage: if (mode == .batch) []Item else void = if (mode == .batch) &.{} else {},

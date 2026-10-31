@@ -1,6 +1,7 @@
 // Private positive-capacity storage. Standard queues remain the adapter and
 // zero-capacity transport; independent read positions need different retention.
 const std = @import("std");
+const completion = @import("completion.zig");
 
 pub const BranchError = std.mem.Allocator.Error || std.Io.Cancelable || error{
     UnsupportedCapacity,
@@ -17,6 +18,7 @@ pub fn Buffer(comptime T: type) type {
             position: usize = 0,
             status: enum { active, closed, moved } = .active,
             pending: usize = 0,
+            delivery: ?completion.Token = null,
         };
 
         io: std.Io,
@@ -32,6 +34,7 @@ pub fn Buffer(comptime T: type) type {
         len: usize = 0,
         closed: bool = false,
         producer_pending: bool = false,
+        completion_owner: ?completion.Owner = null,
 
         // Called once after the containing state reaches its stable address.
         pub fn activate(self: *Self) void {
@@ -79,6 +82,7 @@ pub fn Buffer(comptime T: type) type {
                 try check(reader);
                 if (reader.position < self.len) {
                     const value = self.storage[self.index(reader.position)];
+                    if (self.completion_owner) |owner| reader.delivery = owner.peek();
                     reader.position += 1;
                     self.reclaim();
                     return @as(?T, value);
@@ -156,8 +160,15 @@ pub fn Buffer(comptime T: type) type {
         // Return true only when the last active claim was removed.
         pub fn detach(self: *Self, reader: *Record) bool {
             self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            if (reader.status != .active) return false;
+            if (reader.status != .active) {
+                self.mutex.unlock(self.io);
+                return false;
+            }
+            const delivery = reader.delivery;
+            reader.delivery = null;
+            const unread = self.len - reader.position;
+            const queued = if (self.completion_owner != null and unread != 0) self.completion_owner.?.peek() else null;
+            if (queued != null) std.debug.assert(self.active_readers == 1);
             reader.status = .closed;
             self.readers.remove(&reader.node);
             reader.node = .{};
@@ -166,7 +177,22 @@ pub fn Buffer(comptime T: type) type {
             if (self.active_readers == 0) self.closed = true;
             self.readable.broadcast(self.io);
             self.writable.broadcast(self.io);
-            return self.active_readers == 0;
+            const last = self.active_readers == 0;
+            self.mutex.unlock(self.io);
+            if (delivery) |token| token.release();
+            if (queued) |token| for (0..unread) |_| token.release();
+            return last;
+        }
+
+        pub fn finishDelivery(self: *Self, reader: *Record) void {
+            // Set once before activation. Ordinary streams have no completion
+            // credits and need no additional lock on every read.
+            if (self.completion_owner == null) return;
+            self.mutex.lockUncancelable(self.io);
+            const delivery = reader.delivery;
+            reader.delivery = null;
+            self.mutex.unlock(self.io);
+            if (delivery) |token| token.release();
         }
 
         pub fn destroy(self: *Self, allocator: std.mem.Allocator, reader: *Record) void {

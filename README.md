@@ -6,7 +6,8 @@ execute them together with `run(bindings, flows)`.
 
 **Experimental, breaking API migration:** one declaration-only public model,
 type-keyed dependency injection, managed resources, finite inputs, producer-backed
-streams, streaming accumulation, replacement/derived signals, and bounded line I/O.
+streams, streaming accumulation, replacement/derived signals, bounded line I/O
+and serial HTTP servers.
 Ordinary synchronous stages compose directly rather than acquiring a worker/queue
 per stage.
 

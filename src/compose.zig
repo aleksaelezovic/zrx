@@ -41,6 +41,9 @@ pub fn stdoutLines() @TypeOf(effects.external(@import("io/lines.zig").stdoutLine
 pub fn stderrLines() @TypeOf(effects.external(@import("io/lines.zig").stderrLines())) {
     return effects.external(@import("io/lines.zig").stderrLines());
 }
+pub fn respondHttp() @TypeOf(effects.external(@import("io/http.zig").respondHttp())) {
+    return effects.external(@import("io/http.zig").respondHttp());
+}
 pub fn writeFileLines(path: []const u8, options: std.Io.Dir.CreateFileOptions) @TypeOf(effects.external(@import("io/lines.zig").writeFileLines(path, options))) {
     return effects.external(@import("io/lines.zig").writeFileLines(path, options));
 }

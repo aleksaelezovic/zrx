@@ -122,6 +122,10 @@ to this file; edit `AGENTS.md`, not copies.
   on failure. Earlier effects remain. Zero fails before activation.
 - Merge uses separate delivery edges, preserves each edge's order, has unspecified
   interleaving, ends after all normal ends, and fails on first observed error.
+- `branch` uses ordered first-match `when` cases and an optional final
+  `otherwise`. Cases receive persistent substreams and either all produce one
+  common item type or all terminate. Prefixes retire only their case; unmatched
+  items and items for retired cases drop. Predicate/case dependencies use normal DI.
 - Signals initialize before activation, commit each single-root family together,
   and publish outside cache locks. Observe initial/every replacement with values;
   sampling emits typed event/current tuples without flattening or state consumption.
@@ -135,7 +139,12 @@ to this file; edit `AGENTS.md`, not copies.
   Textual endpoint/path conflicts are rejected; path alias canonicalization and
   shared-writer serialization are not promised.
 - Line(n) owns bounded bytes inline. LF is framing; CR/encoding remain data.
-  Listeners/full-duplex sessions are separate. No human/network waits in defaults.
+  General listeners/full-duplex sessions are separate. No human/network waits in defaults.
+- HTTP uses a bounded serial listener/request scope and standard body reader.
+  Request/response referents expire at completion, not at run end. Exclusive
+  routing and per-item effects track completion; unsupported fan-out, retention,
+  collection, batching and state dependencies fail before acquisition. Drops
+  close without inventing responses. Handlers own response/error policy.
 
 ## Layout, tests, and documentation
 

@@ -14,7 +14,16 @@ const state = @import("runtime/signals.zig");
 const resources = @import("resources.zig");
 const line_io = @import("../io/lines.zig");
 const observation = @import("execution/observation.zig");
+const http_io = @import("../io/http.zig");
+const branching = @import("branch.zig");
+const branch_runtime = @import("runtime/branch.zig");
+const completion = @import("runtime/completion.zig");
 pub const FlowTag = opaque {};
+
+pub fn isFlowType(comptime T: type) bool {
+    return (@typeInfo(T) == .@"struct" or @typeInfo(T) == .@"union") and
+        @hasDecl(T, "flow_tag") and T.flow_tag == FlowTag;
+}
 
 fn isSource(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "graph_tag") and
@@ -32,6 +41,9 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
         pub fn prepare(self: *@This(), scope: *Scope) !void {
             try self.consumer.prepare(scope.allocator);
             const node = try resolve(scope, &self.source);
+            if (node.scoped_http and @hasDecl(Consumer, "http_scoped_supported")) {
+                if (!Consumer.http_scoped_supported) return error.UnsupportedHttpComposition;
+            }
             self.reader = try node.acquire(scope.allocator);
             if (@hasDecl(Consumer, "prepareResources"))
                 try self.consumer.prepareResources(&scope.resources);
@@ -46,6 +58,153 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             self.consumer.deinit(allocator);
+        }
+
+        pub fn completionOwner(self: *@This()) ?completion.Owner {
+            return self.reader.?.completionOwner();
+        }
+    };
+}
+
+fn BranchPlan(comptime Item: type, comptime Cases: type) type {
+    const fields = @typeInfo(Cases).@"struct".field_types;
+    const terminal = branching.Terminates(Item, Cases);
+    const Pipelines = blk: {
+        var types: [fields.len]type = undefined;
+        for (fields, 0..) |C, i| types[i] = branching.CaseOutput(Item, C);
+        break :blk @Tuple(&types);
+    };
+    return struct {
+        const Self = @This();
+        node: Node,
+        router: branch_runtime.Router(Item, Cases),
+        pipelines: Pipelines = undefined,
+        constructed: usize = 0,
+        scoped_http: bool,
+
+        fn finalize(_: *anyopaque) void {}
+        fn stop(context: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            self.router.stop();
+        }
+        fn destroy(context: *anyopaque, allocator: std.mem.Allocator) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            if (terminal) inline for (0..fields.len) |i| {
+                if (i < self.constructed) self.pipelines[i].deinit(allocator);
+            };
+            allocator.destroy(self);
+        }
+    };
+}
+
+fn prepareBranch(scope: *Scope, source: anytype, cases: anytype) !*BranchPlan(
+    sequences.Item(@typeInfo(@TypeOf(source)).pointer.child),
+    @TypeOf(cases),
+) {
+    const Item = sequences.Item(@typeInfo(@TypeOf(source)).pointer.child);
+    const Cases = @TypeOf(cases);
+    const Plan = BranchPlan(Item, Cases);
+    const terminal = comptime branching.Terminates(Item, Cases);
+    const upstream = try resolve(scope, source);
+    const input = try upstream.acquire(scope.allocator);
+    try scope.reserve();
+    const plan = try scope.allocator.create(Plan);
+    plan.* = .{
+        .node = .{
+            .context = plan,
+            .finalize = Plan.finalize,
+            .stop = Plan.stop,
+            .destroy = Plan.destroy,
+            .stop_before_dependents = true,
+        },
+        .router = .{ .io = scope.io, .input = input, .cases = cases },
+        .scoped_http = upstream.scoped_http,
+    };
+    scope.nodes.appendAssumeCapacity(&plan.node);
+    inline for (0..cases.len) |i| {
+        try scope.reserve();
+        const outlet = blk: {
+            const owner = try scope.allocator.create(streams.Stream(Item));
+            errdefer scope.allocator.destroy(owner);
+            owner.* = try plan.router.outlet(scope.allocator, i);
+            errdefer owner.deinit();
+            owner.setCompletion(upstream.owner.completionOwner());
+            break :blk try Runtime(Item).create(scope.allocator, owner, 1, .{});
+        };
+        outlet.scoped_http = upstream.scoped_http;
+        const Retire = struct {
+            fn close(context: *anyopaque) void {
+                const router: *@TypeOf(plan.router) = @ptrCast(@alignCast(context));
+                router.retire(i);
+            }
+        };
+        outlet.on_retire = .{ .context = &plan.router, .close = Retire.close };
+        plan.router.outlets[i] = outlet.owner;
+        plan.router.active[i] = true;
+        scope.nodes.appendAssumeCapacity(&outlet.node);
+        // Ownership transferred to the node. Later failures are unwound by Scope.
+        const declaration: branching.Input(Item) = .{ .node = outlet };
+        plan.pipelines[i] = if (@hasDecl(@TypeOf(cases[i]), "bound_case"))
+            try cases[i].build(declaration)
+        else
+            @import("../pipe.zig").pipe(declaration, cases[i].operators);
+        plan.constructed += 1;
+        if (terminal) {
+            try plan.pipelines[i].prepare(scope);
+            if (!sameCompletion(input.completionOwner(), plan.pipelines[i].completionOwner()))
+                return error.UnsupportedHttpComposition;
+        }
+    }
+    return plan;
+}
+
+/// Internal terminal representation for all-terminating branch cases.
+pub fn BranchFlow(comptime Input: type, comptime Cases: type) type {
+    const Plan = BranchPlan(sequences.Item(Input), Cases);
+    return struct {
+        pub const flow_tag = FlowTag;
+        source: Input,
+        cases: Cases,
+        plan: ?*Plan = null,
+        execution: ?Execution = null,
+        group: std.Io.Group = .init,
+
+        pub fn prepare(self: *@This(), scope: *Scope) !void {
+            self.plan = try prepareBranch(scope, &self.source, self.cases);
+            const count = @typeInfo(Cases).@"struct".field_types.len;
+            self.execution = .{ .allocator = scope.allocator, .io = scope.io, .remaining = count };
+            // Case workers are prepared behind their own gate before service/
+            // listener acquisition, just like the outer terminal workers.
+            inline for (0..count) |i| {
+                const Worker = struct {
+                    fn work(control: *Execution, flow: *@TypeOf(self.plan.?.pipelines[i])) void {
+                        const result = executeCase(control, flow);
+                        control.finish(result);
+                    }
+                    fn executeCase(control: *Execution, flow: *@TypeOf(self.plan.?.pipelines[i])) !void {
+                        try control.armed.wait(control.io);
+                        try flow.execute(control.allocator, control.io);
+                    }
+                };
+                try self.group.concurrent(scope.io, Worker.work, .{ &self.execution.?, &self.plan.?.pipelines[i] });
+            }
+        }
+        pub fn execute(self: *@This(), _: std.mem.Allocator, io: std.Io) !void {
+            const execution = &self.execution.?;
+            defer self.group.cancel(io);
+            defer self.plan.?.router.stop();
+            errdefer if (self.plan.?.router.input.completionOwner()) |owner| owner.abort();
+            try io.checkCancel();
+            execution.armed.set(io);
+            execution.done.wait(io) catch |err| return execution.failure() orelse err;
+            if (execution.failure()) |err| return err;
+            try self.group.await(io);
+        }
+        pub fn deinit(self: *@This(), _: std.mem.Allocator) void {
+            if (self.execution) |*execution| self.group.cancel(execution.io);
+        }
+        pub fn completionOwner(self: *@This()) ?completion.Owner {
+            return self.plan.?.router.input.completionOwner();
         }
     };
 }
@@ -67,7 +226,8 @@ pub fn Flow(comptime Input: type, comptime Consumer: type) type {
 ///
 /// Run owns queues/readers/workers, terminal buffers, and signal caches. It joins
 /// consumers before freeing buffers, stops state updaters before transport,
-/// stops derived workers before producers, and frees caches after samplers join.
+/// and frees caches after samplers join. Dispatcher/I/O work is interrupted
+/// before dependent joins; ordinary derived workers stop before producers.
 /// Preparation/consumer/state-worker startup failure activates no producer or
 /// initial maps. Merge's local startup happens after activation: peers may have
 /// worked. First observed failure cancels peers without rollback; cleanup
@@ -130,6 +290,7 @@ pub fn runPreparedObserved(allocator: std.mem.Allocator, io: std.Io, flows: anyt
     var execution: Execution = .{ .allocator = allocator, .io = io, .remaining = count };
     var group: std.Io.Group = .init;
     defer group.cancel(io);
+    defer scope.interrupt();
     inline for (0..count) |i| {
         const Worker = struct {
             fn start(control: *Execution, flow: *@TypeOf(definitions[i])) void {
@@ -226,6 +387,7 @@ const Node = struct {
     finalize: *const fn (*anyopaque) void,
     stop: *const fn (*anyopaque) void,
     destroy: *const fn (*anyopaque, std.mem.Allocator) void,
+    stop_before_dependents: bool = false,
 };
 
 const Scope = struct {
@@ -236,6 +398,7 @@ const Scope = struct {
     nodes: std.ArrayList(*Node) = .empty,
     signal_index: std.AutoHashMapUnmanaged(Key, *state.Entry) = .{},
     families: std.ArrayList(*state.Family) = .empty,
+    interrupted: bool = false,
 
     pub fn reserve(self: *@This()) !void {
         try self.index.ensureUnusedCapacity(self.allocator, 1);
@@ -247,7 +410,22 @@ const Scope = struct {
         self.nodes.appendAssumeCapacity(node);
     }
 
+    fn interrupt(self: *@This()) void {
+        if (self.interrupted) return;
+        self.interrupted = true;
+        // Interrupt connected I/O before joins. Handles/storage still survive
+        // until all tasks have joined; shutdown is not resource destruction.
+        self.resources.interruptAll();
+        // An HTTP source can be blocked accepting without any input edge to
+        // retire. Cancel its actual future before joining dependent forwarders;
+        // canceling only a dependent may leave a nested accept uninterruptible.
+        for (self.nodes.items) |node| {
+            if (node.stop_before_dependents) node.stop(node.context);
+        }
+    }
+
     fn deinit(self: *@This()) void {
+        self.interrupt();
         // State updaters publish into stream nodes; samplers read their caches.
         // Stop updaters first, join all stream workers, then dispose caches.
         var family_index = self.families.items.len;
@@ -288,6 +466,8 @@ pub fn Runtime(comptime T: type) type {
         inputs: []Edge,
         used: usize = 0,
         clones: std.ArrayList(*streams.Stream(T).Reader) = .empty,
+        scoped_http: bool = false,
+        on_retire: ?Edge = null,
 
         pub fn create(gpa: std.mem.Allocator, owner: *streams.Stream(T), capacity: usize, inputs: anytype) !*Self {
             const self = try gpa.create(Self);
@@ -317,6 +497,9 @@ pub fn Runtime(comptime T: type) type {
         }
 
         pub fn acquire(self: *Self, gpa: std.mem.Allocator) !*streams.Stream(T).Reader {
+            // HTTP request scopes cannot be recycled while an independent
+            // observer still holds a shallow snapshot of their storage.
+            if (self.scoped_http and self.used != 0) return error.UnsupportedHttpFanout;
             if (self.used < 2) {
                 self.used += 1;
                 return if (self.used == 1) &self.split.left else &self.split.right;
@@ -349,6 +532,7 @@ pub fn Runtime(comptime T: type) type {
         }
         fn unused(context: *anyopaque) void {
             retireInputs(context);
+            if (cast(context).on_retire) |edge| edge.close(edge.context);
             streams.stopProducer(cast(context).owner);
         }
         fn destroy(context: *anyopaque, gpa: std.mem.Allocator) void {
@@ -400,7 +584,29 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     };
     if (scope.index.get(key)) |node| return @ptrCast(@alignCast(node.context));
 
-    if (comptime line_io.isSource(Definition)) {
+    if (comptime branching.isInput(Definition)) {
+        return @ptrCast(@alignCast(reference.node));
+    } else if (comptime branching.isBranch(Definition)) {
+        const plan = try prepareBranch(scope, &reference.source, reference.cases);
+        const count = @typeInfo(@TypeOf(reference.cases)).@"struct".field_types.len;
+        var readers: [count]*streams.Stream(Element).Reader = undefined;
+        inline for (0..count) |i| {
+            const output = try resolve(scope, &plan.pipelines[i]);
+            if (!sameCompletion(plan.router.input.completionOwner(), output.owner.completionOwner()))
+                return error.UnsupportedHttpComposition;
+            readers[i] = try output.acquire(scope.allocator);
+        }
+        try scope.reserve();
+        const owner = try scope.allocator.create(streams.Stream(Element));
+        errdefer scope.allocator.destroy(owner);
+        owner.* = try streams.merge(scope.allocator, scope.io, 1, readers);
+        errdefer owner.deinit();
+        owner.setCompletion(plan.router.input.completionOwner());
+        const runtime = try Runtime(Element).create(scope.allocator, owner, 1, readers);
+        runtime.scoped_http = plan.scoped_http;
+        scope.insert(key, &runtime.node);
+        return runtime;
+    } else if (comptime line_io.isSource(Definition) or http_io.isSource(Definition)) {
         if (reference.capacity == 0) return error.UnsupportedCapacity;
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
@@ -408,6 +614,8 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         owner.* = try reference.instantiate(&scope.resources);
         errdefer owner.deinit();
         const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity, .{});
+        runtime.scoped_http = comptime http_io.isSource(Definition);
+        runtime.node.stop_before_dependents = runtime.scoped_http;
         scope.insert(key, &runtime.node);
         return runtime;
     } else if (root) {
@@ -436,6 +644,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     } else if (comptime signal_kind.isSample(Definition)) {
         const cell = try resolveSignal(scope, &reference.signal);
         const upstream = try resolve(scope, &reference.source);
+        if (upstream.scoped_http) return error.UnsupportedHttpComposition;
         const reader = try upstream.acquire(scope.allocator);
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
@@ -450,6 +659,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         var readers: [count]*streams.Stream(Element).Reader = undefined;
         inline for (0..count) |i| {
             const upstream = try resolve(scope, &reference.inputs[i]);
+            if (upstream.scoped_http) return error.UnsupportedHttpComposition;
             readers[i] = try upstream.acquire(scope.allocator);
         }
         try scope.reserve();
@@ -466,6 +676,9 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         return runtime;
     } else if (comptime @typeInfo(Definition) == .@"struct" and @hasDecl(Definition, "declaration_source")) {
         const upstream = try resolve(scope, &reference.source);
+        if (upstream.scoped_http and Definition.declaration_kind != .mapped and
+            Definition.declaration_kind != .filtered and Definition.declaration_kind != .taken)
+            return error.UnsupportedHttpComposition;
         const reader = try upstream.acquire(scope.allocator);
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
@@ -490,7 +703,9 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
             break :block try streams.share(scope.allocator, scope.io, upstream.capacity, view);
         };
         errdefer owner.deinit();
+        owner.setCompletion(upstream.owner.completionOwner());
         const runtime = try Runtime(Element).create(scope.allocator, owner, upstream.capacity, .{reader});
+        runtime.scoped_http = upstream.scoped_http;
         scope.insert(key, &runtime.node);
         return runtime;
     } else {
@@ -508,6 +723,11 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     }
 }
 
+fn sameCompletion(a: ?completion.Owner, b: ?completion.Owner) bool {
+    if (a) |left| return if (b) |right| left.context == right.context else false;
+    return b == null;
+}
+
 fn resolveSignal(scope: *Scope, value: anytype) anyerror!*state.Cell(signal_kind.Value(@typeInfo(@TypeOf(value)).pointer.child)) {
     const Input = @typeInfo(@TypeOf(value)).pointer.child;
     if (@typeInfo(Input) == .pointer and @typeInfo(Input).pointer.size == .one)
@@ -522,6 +742,7 @@ fn resolveSignalReference(scope: *Scope, reference: anytype) anyerror!*state.Cel
     if (scope.signal_index.get(key)) |entry| return state.Cell(T).cast(entry);
     if (Definition.signal_kind == .root) {
         const upstream = try resolve(scope, &reference.source);
+        if (upstream.scoped_http) return error.UnsupportedHttpComposition;
         const reader = try upstream.acquire(scope.allocator);
         try scope.signal_index.ensureUnusedCapacity(scope.allocator, 1);
         try scope.families.ensureUnusedCapacity(scope.allocator, 1);

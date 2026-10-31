@@ -213,3 +213,51 @@ relabeled as evidence for this combined revision.
 
 Next review: approve the combined declaration/resource model and migrated scan
 before porting either sibling feature or beginning the performance roadmap.
+
+## Subsequent sibling integration
+
+The user approved committing and continuing after that review. The foundation
+was committed as `f7fb745`; track 5 was archived afterward.
+
+Track 1's whole worktree was captured at
+`c6459990-436a-4cbe-a0bb-17b3d8f6ebc1.864970`. It contained only the approved
+retry design, not a runtime implementation. The [design](proposals/durable_workflows.md)
+was reconciled with declaration inputs, typed injection and the removal of eager/
+`With` APIs, then committed as `8748664`; track 1 was archived. Its unresolved
+inner-operation boundary and application-owned idempotency remain explicit.
+
+Track 3's whole worktree was then captured at
+`02210388-baa9-4a17-95cb-44864b43bf1e.892443`, onto `8748664`. The transfer
+reported conflicts in canonical guidance, the root README, build wiring,
+`src/internal/graph_run.zig`, the I/O guide and public exports. These were
+reconciled without restoring the old public model.
+
+- HTTP retains its bounded, serial request scope, standard body reader,
+  response-only terminal, cancellation/deadline behavior and completion credits.
+  Dropped requests close safely rather than inventing protocol responses.
+- Branches retain ordered first-match routing into persistent case substreams,
+  value merging or all-terminal composition, case-local state and edge retirement.
+  Predicates, transformations and effects use the same typed dependency planner.
+- Bound cases reuse the graph coordinator and typed regions; public descriptions
+  remain cold. Terminal case workers now prepare behind a gate before managed
+  service/listener acquisition. Startup failure is tested to leave services cold.
+- Current examples/tests/cross fixtures use `run(bindings, flows)`. No alternate
+  public eager/`With` surface was added. Generic recovery, partition, pipeEach,
+  retries, concurrent HTTP sessions and persistent connections were not implemented.
+
+The current native suites include 15 branch tests and 25 HTTP tests, preserving
+the source track's lifecycle/fault coverage and adding DI, persistent scan cases
+and pre-acquisition startup checks. The unchanged kernel comparisons remain
+private regression evidence. Historical performance data remains historical;
+this HTTP/branch port did not collect a new timing baseline.
+
+Destination validation used exactly Zig 0.17.0, native Darwin ARM64:
+`zig build test`, `zig build test -Doptimize=ReleaseFast`, `zig build check`,
+focused branch/HTTP/lifecycle/measurement suites, formatting, and
+`zig build example io-examples http-example`. The installed HTTP entry point
+served GET `/health`, POST `/echo` and GET `/missing` with exact expected
+statuses/bodies, then exited after its three-connection budget. The installed
+file copier also passed a finite LF fixture with exact `cmp` equality.
+Markdown links/anchors, instruction symlinks and whitespace passed.
+Cross builds are not foreign execution; no race detector, public deployment
+hardening claim or new performance result is implied.
