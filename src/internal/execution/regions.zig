@@ -8,10 +8,8 @@ const signals = @import("../signal_kind.zig");
 // Request-scoped HTTP values must not cross retention/stateful region stages.
 pub fn httpSafe(comptime T: type) bool {
     if (comptime !inlineNode(T)) return true;
-    if (@hasDecl(T, "node_kind")) {
-        if (T.node_kind != .map and T.node_kind != .filter and T.node_kind != .tap)
-            return false;
-    } else if (T.declaration_kind != .taken) return false;
+    if (T.node_kind != .map and T.node_kind != .filter and T.node_kind != .tap and T.node_kind != .take)
+        return false;
     return httpSafe(@FieldType(T, "source"));
 }
 
@@ -21,7 +19,7 @@ pub fn inlineNode(comptime T: type) bool {
     if (@hasDecl(T, "node_kind"))
         return T.node_kind == .map or T.node_kind == .filter or T.node_kind == .tap or T.node_kind == .fold or T.node_kind == .scan or
             T.node_kind == .take or T.node_kind == .bounded;
-    return @hasDecl(T, "declaration_kind") and (T.declaration_kind == .taken or T.declaration_kind == .bounded);
+    return false;
 }
 
 pub fn Base(comptime T: type) type {
@@ -49,8 +47,7 @@ pub fn Rebased(comptime Original: type, comptime Boundary: type) type {
     return struct {
         pub const sequence_tag = seq.SequenceTag;
         pub const Item = seq.Item(Original);
-        pub const node_kind = if (@hasDecl(Original, "node_kind")) Original.node_kind else if (Original.declaration_kind == .taken) .take else .bounded;
-        pub const declaration_kind = if (@hasDecl(Original, "declaration_kind")) Original.declaration_kind else {};
+        pub const node_kind = Original.node_kind;
         pub const functions = if (@hasDecl(Original, "functions")) Original.functions else .{};
         pub const callback = if (@hasDecl(Original, "callback")) Original.callback else {};
         source: Source,

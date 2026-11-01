@@ -84,7 +84,7 @@ fn Terminal(comptime mode: Mode, comptime effect: anytype) type {
     };
 }
 
-/// Adapt the standard line terminal without adding a second I/O implementation.
+/// Bind a built-in I/O terminal without adding a second I/O implementation.
 pub fn external(operator: anytype) External(@TypeOf(operator)) {
     return .{ .operator = operator };
 }
@@ -92,8 +92,8 @@ fn External(comptime Operator: type) type {
     return struct {
         operator: Operator,
         pub fn Output(comptime Source: type) type {
-            const OldFlow = Operator.Output(Source);
-            const C = @FieldType(OldFlow, "consumer");
+            const TransportFlow = Operator.Output(Source);
+            const C = @FieldType(TransportFlow, "consumer");
             const Consumer = struct {
                 pub const http_scoped_supported = !@hasDecl(C, "http_scoped_supported") or C.http_scoped_supported;
                 inner: C,

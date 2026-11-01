@@ -29,11 +29,11 @@ pub fn collectThen(comptime effect: anytype) @TypeOf(effects.terminal(.collect, 
 pub fn batchThen(size: usize, comptime effect: anytype) @TypeOf(effects.terminal(.batch, size, effect)) {
     return effects.terminal(.batch, size, effect);
 }
-pub fn fromIterator(iterator: anytype) @TypeOf(decl.borrowed(@import("data/iterators.zig").fromIterator(iterator), true)) {
-    return decl.borrowed(@import("data/iterators.zig").fromIterator(iterator), true);
+pub fn fromIterator(iterator: anytype) @TypeOf(decl.borrowed(@import("data/iterators.zig").fromIterator(iterator))) {
+    return decl.borrowed(@import("data/iterators.zig").fromIterator(iterator));
 }
-pub fn readFrom(queue: anytype) @TypeOf(decl.borrowed(@import("io/readFrom.zig").readFrom(queue), false)) {
-    return decl.borrowed(@import("io/readFrom.zig").readFrom(queue), false);
+pub fn readFrom(queue: anytype) @TypeOf(@import("io/readFrom.zig").readFrom(queue)) {
+    return @import("io/readFrom.zig").readFrom(queue);
 }
 pub fn stdoutLines() @TypeOf(effects.external(@import("io/lines.zig").stdoutLines())) {
     return effects.external(@import("io/lines.zig").stdoutLines());

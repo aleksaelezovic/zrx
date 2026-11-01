@@ -30,7 +30,7 @@ pub fn Router(comptime Item: type, comptime Cases: type) type {
                     if (router.failure) |err| return err;
                 }
             };
-            return streams.Stream(Item).fromProducerWith(allocator, self.io, 1, Producer.produce, self);
+            return streams.Stream(Item).initProducer(allocator, self.io, 1, Producer.produce, self);
         }
 
         fn start(self: *Self) !void {

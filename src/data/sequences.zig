@@ -20,7 +20,7 @@ pub fn isGraph(comptime Input: type) bool {
         Input;
     if (@typeInfo(T) != .@"struct") return false;
     if (@hasDecl(T, "graph_tag") and T.graph_tag == GraphTag) return true;
-    return @hasDecl(T, "declaration_source") and isGraph(T.declaration_source);
+    return false;
 }
 
 fn ViewType(comptime Source: type) ?type {

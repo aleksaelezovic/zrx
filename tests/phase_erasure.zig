@@ -1,7 +1,7 @@
-//! Native LLVM inspection fixture. No equality rule added to the codegen catalog.
+//! Native runtime-input inspection fixture for ordinary and empty-observer calls.
 const std = @import("std");
 const api = @import("api");
-const zrx = api.current;
+const zrx = api.zrx;
 const Empty = struct {
     pub fn mark(_: @This(), comptime _: api.Phase) void {}
 };

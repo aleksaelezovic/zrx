@@ -18,8 +18,7 @@ to this file; edit `AGENTS.md`, not copies.
   Selected roots must end with terminal effects returning void or E!void.
 - The package is `zrx`, not a separate "world" framework. Do not reintroduce
   public eager value executors, `With` variants, or parallel old/new APIs.
-  `src/legacy_test_api.zig` and `tests/legacy_examples/` are private regression
-  evidence, not public examples or a compatibility promise.
+  Keep one implementation and test the current API, not a compatibility facade.
 - Explicit execution-boundary operators, worker/queue primitives, writable refs,
   multi-parent state, time windows and dynamic subscriptions are future work.
   Do not introduce them as incidental helpers.
@@ -154,15 +153,15 @@ to this file; edit `AGENTS.md`, not copies.
 - Exactly Zig 0.17.0, pinned by .zigversion and the build. Format with that compiler.
   Run `zig build test`, ReleaseFast tests, and `zig build check` before completion.
   Report the actual compiler, target, commands, results and limitations.
-- Keep current public API tests/examples separate from archived kernel/transport
-  tests. Preserve lifecycle/fault regressions when removing public ownership APIs.
+- Public examples, behavior/contract tests and cross fixtures use the current API.
+  Private transport tests may inspect join/retirement schedules without exposing
+  another declaration surface. Preserve current lifecycle/fault coverage.
   Compile-fail tests must match the intended diagnostic, not just any failure.
 - Maintain one target/case catalog. Export runtime-input fixtures that instantiate
   actual APIs. Foreign object compilation is not foreign execution.
-- Original scoped direct/grouped/separate kernel comparisons use pinned LLVM
-  ReleaseFast and narrow IR/AArch64 assembly normalization. Preserve aliases,
-  instructions, operands, registers and order; never weaken comparisons to pass.
-  They do not prove the new executor or all graphs zero-cost.
+- Cross compilation and runtime-input inspection are not equality/performance
+  proofs. Add scoped codegen comparisons only for actual current APIs; do not
+  revive a retired executor to manufacture comparison evidence.
 - Measurements are opt-in and include correctness checks, compiler/backend/target,
   workload, capacities, warmups/trials and exclusions. Separate measured time,
   allocator bytes, occupancy and structural task/queue estimates. Instrumentation

@@ -172,7 +172,7 @@ test "concurrent users serialize a non-thread-safe backing allocator and counter
 test "real graph allocation pass preserves results and frees all tracked storage" {
     inline for (.{ workloads.Shape.linear, workloads.Shape.fanout }) |shape| {
         const expected = try workloads.execute(shape, .direct, allocator, io, 32, 4);
-        inline for (.{ workloads.Variant.direct, workloads.Variant.graph, workloads.Variant.current }) |variant| {
+        inline for (.{ workloads.Variant.direct, workloads.Variant.pipeline }) |variant| {
             var meter: Meter = .init(allocator, io);
             const result = try workloads.execute(shape, variant, meter.allocator(), io, 32, 4);
             try workloads.verify(shape, 32, expected, result);
@@ -194,15 +194,11 @@ fn failedRun(gpa: std.mem.Allocator, comptime variant: workloads.Variant) !void 
     try std.testing.expectEqual(stats.fresh_bytes + stats.growth_bytes, stats.released_bytes);
     _ = try result;
 }
-fn failedLegacy(gpa: std.mem.Allocator) !void {
-    try failedRun(gpa, .graph);
-}
-fn failedCurrent(gpa: std.mem.Allocator) !void {
-    try failedRun(gpa, .current);
+fn failedPipeline(gpa: std.mem.Allocator) !void {
+    try failedRun(gpa, .pipeline);
 }
 test "failed graph preparation leaves balanced accounting at every allocation failure" {
-    try std.testing.checkAllAllocationFailures(allocator, failedLegacy, .{});
-    try std.testing.checkAllAllocationFailures(allocator, failedCurrent, .{});
+    try std.testing.checkAllAllocationFailures(allocator, failedPipeline, .{});
 }
 
 test "callback checkpoint spans partition elapsed time without timing thresholds" {

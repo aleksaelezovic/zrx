@@ -4,7 +4,7 @@ A declarative functional/reactive library for Zig. Describe inputs,
 transformations, decisions and terminal effects as named standalone stages;
 execute them together with `run(bindings, flows)`.
 
-**Experimental, breaking API migration:** one declaration-only public model,
+**Experimental:** one declaration-only public model,
 type-keyed dependency injection, managed resources, finite inputs, producer-backed
 streams, streaming accumulation, replacement/derived signals, bounded line I/O
 and serial HTTP servers.
@@ -25,7 +25,7 @@ zig build example
 ```
 
 See the **[documentation index](docs/README.md)** for contracts, lifecycle,
-migration details, and the opt-in [file program](examples/io_file.zig).
+and the opt-in [file program](examples/io_file.zig).
 
 ## Toolchain and checks
 
@@ -40,10 +40,10 @@ zig build check
 ```
 
 `zig build declarative-test` focuses on the current public API. `check` includes
-native tests, formatting, catalog cross builds, and scoped kernel codegen checks.
+native tests, formatting, and catalog cross builds.
 Cross compilation is not foreign execution or performance proof.
 
-`zig build benchmark` is an opt-in direct/legacy/current graph comparison with
+`zig build benchmark` is an opt-in direct/pipeline workload comparison with
 correctness checks, never a default timing threshold. See
 [measurement scope and next investigations](docs/performance.md).
 

@@ -127,7 +127,7 @@ const Source = struct {
             .config = self.config,
             .allocator = scope.allocator,
         }, null);
-        var stream = try streams.Stream(Item).fromProducerWith(scope.allocator, scope.io, 1, runtime.Server.produce, slot);
+        var stream = try streams.Stream(Item).initProducer(scope.allocator, scope.io, 1, runtime.Server.produce, slot);
         stream.setCompletion(slot.completionOwner());
         return stream;
     }

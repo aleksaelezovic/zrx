@@ -1,42 +1,33 @@
 # Validation suites
 
-- `world.zig`, `world_loop.zig`, and `declarative_graphs.zig` exercise the current
-  public `zrx` module: typed dependencies/resources, declaration-only execution,
-  synchronous regions, sharing, state, reduction, cancellation, and actual I/O.
-- `declarative_scan.zig` covers the migrated recurrence, injected dependencies,
-  managed lifetimes, prefix probes/retirement, snapshots and failures.
-  `scan_example.zig` tests the public two-pipe monitor. Original `scan.zig`
-  remains private transport/kernel regression evidence.
-- `branch.zig` tests current exclusive value/terminal cases, persistent state,
-  injected predicates/effects, retirement, allocation/startup failures and cancellation.
-- `http.zig` runs the actual current echo graph with finite loopback peers, including
-  body framing/limits, completion credits, routing/drops, cancellation and cleanup.
-- `lifecycle_hardening.zig` forces runtime-selected aliases, completed-prefix/
-  peer-result ordering, and state failure after observation retirement with an
-  idle sampler, including managed-service release checks.
-- `join_retirement.zig` uses the private runtime facade and a test-local Io shim
-  to force both producer-await/last-reader-retirement join orders. It observes
-  the exact result-mutex wait and preserves real backend futures/results.
-- `measurement.zig` validates benchmark-local accounting and checkpoint tools,
-  including concurrent calls over a non-thread-safe backing allocator and graph
-  allocation-failure cleanup. It never asserts a timing threshold.
-- Its `phase_observation.zig` suite checks private coordinator markers on finite
-  and graph success/error/cancellation paths. `phase_erasure.zig` provides native
-  runtime-input LLVM inspection fixtures; it is not a new target/equality catalog.
-- `compile_fail/world_*.zig` checks current public contracts, including rejection
-  of raw eager inputs and malformed dependency/resource declarations.
-  `compile_fail/declarative_scan_*.zig` checks current scan typing and requirements.
-- Earlier composition/graph suites are intentionally retained as kernel and
-  lifecycle regressions. Build wiring gives them `src/legacy_test_api.zig` or
-  `src/runtime_test_api.zig`, not the package's public root. Their local import
-  alias can still be named `zrx`; it does not establish a supported old API.
-- `legacy_examples/` contains archived regression programs, not current examples.
-  Current programs live under `examples/`.
-- `codegen/catalog.zig` is the one target/case catalog. Original strict body
-  comparisons cover the internal composition kernel. Entries marked `public_api`
-  instantiate the current module for cross-object coverage, not equality claims.
+All public behavior/contract suites import the one `zrx` package module:
 
-`zig build declarative-test` focuses on the current public API.
-`zig build lifecycle-test` runs the focused public and private hardening schedules.
-`zig build test` retains all suites; `zig build check` additionally checks
-formatting, cross builds, and the unchanged scoped kernel comparisons.
+- `world.zig` and `world_loop.zig`: typed dependencies/resources, cold execution,
+  coercions, finite lowering, callback failures and reverse release.
+- `declarative_graphs.zig`: producer/shared regions, merge, signals, prefix
+  retirement, allocation/startup failure, cancellation and actual file output.
+- `declarative_scan.zig` and `scan_example.zig`: recurrence, injected requirements,
+  snapshots, prefixes, errors-as-data, held state and the two-pipe monitor.
+- `operators.zig`: bounds, suffix retention, collection/batching success/failure,
+  allocation cleanup, queue binding, whole-item vectors, line framing and TCP prefixes.
+- `branch.zig`: persistent case substreams, DI, retirement, state, all-terminal
+  composition and gated startup.
+- `http.zig`: actual echo graph with finite loopback peers, body framing/limits,
+  request completion, routing/drops, cancellation, deadlines and cleanup.
+- `lifecycle_hardening.zig`: runtime-selected aliases, first-result handling and
+  state errors after observation retirement.
+- `join_retirement.zig`: two forced producer-join schedules through a test-only
+  transport shim; no alternative declaration API or executor.
+- `measurement.zig` and `phase_observation.zig`: concurrency-safe allocator/
+  checkpoint tools, current graph failure cleanup and phase ordering.
+  `phase_erasure.zig` supplies native runtime-input inspection fixtures.
+
+[`contracts.zig`](contracts.zig) is the expected-diagnostic catalog for
+`compile_fail/`. [`targets.zig`](targets.zig) is the only cross-target/case catalog;
+every `cross/` fixture instantiates the current API. Foreign compilation is not
+foreign execution or imperative codegen equality.
+
+`zig build test` runs these suites and finite example entry points.
+`zig build check` additionally checks formatting and cross-object builds.
+Use `declarative-test`, `lifecycle-test`, `measurement-test`, `test-branch` or
+`test-http` for focused loops. See [validation](../docs/validation.md).

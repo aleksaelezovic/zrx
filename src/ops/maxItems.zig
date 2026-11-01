@@ -1,4 +1,5 @@
 const sequences = @import("../data/sequences.zig");
+const declarations = @import("../data/declarations.zig");
 
 /// Validate the output count at this position, per cursor/run. Forward up to
 /// limit items; consume but never forward the first excess item, then fail with
@@ -25,28 +26,15 @@ const MaxItems = struct {
 };
 
 fn Bounded(comptime Source: type) type {
+    declarations.requireSource(Source);
     const Element = sequences.Item(Source);
     return struct {
         source: Source,
         limit: usize,
         pub const sequence_tag = sequences.SequenceTag;
+        pub const graph_tag = sequences.GraphTag;
         pub const Item = Element;
-        pub const declaration_source = Source;
-        pub const declaration_kind = .bounded;
-        pub const Iterator = struct {
-            input: sequences.Cursor(Source),
-            remaining: usize,
-
-            pub fn next(self: *@This()) (sequences.Errors(Source) || error{TooManyItems})!?Element {
-                const value = (if (comptime sequences.isFallible(Source)) try self.input.next() else self.input.next()) orelse return null;
-                if (self.remaining == 0) return error.TooManyItems;
-                self.remaining -= 1;
-                return @as(?Element, value);
-            }
-        };
-
-        pub fn iterator(self: @This()) Iterator {
-            return .{ .input = sequences.cursor(self.source), .remaining = self.limit };
-        }
+        pub const node_kind = .bounded;
+        pub const Requirements = declarations.concat(declarations.requirements(Source), &.{});
     };
 }

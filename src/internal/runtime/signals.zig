@@ -181,5 +181,5 @@ pub fn sample(
             }
         }
     };
-    return streams.Stream(Pair).fromProducerWith(allocator, io, 1, Forward.produce, Context{ .input = input, .cell = cell, .io = io });
+    return streams.Stream(Pair).initProducer(allocator, io, 1, Forward.produce, Context{ .input = input, .cell = cell, .io = io });
 }

@@ -24,11 +24,8 @@ Live invocations are opt-in. File output must not already exist. Line copying
 frames records and adds LF; it is not byte-exact for unterminated input.
 Successful completion includes flush, not fsync, rollback or atomic publication.
 
-Default tests never wait for human input or a public network. Archived terminal
-and loopback TCP regression programs remain in
-[tests/legacy_examples](../../tests/legacy_examples/README.md) and exercise the
-same internal transport/resource implementation, not the old public API.
-HTTP tests use finite loopback peers and ephemeral ports.
+Default tests never wait for human input or a public network. File tests use
+temporary directories; HTTP tests use finite loopback peers and ephemeral ports.
 
 Preparation and gated worker startup precede resource acquisition. Empty selected
 outputs still create files; failures release earlier resources without undoing

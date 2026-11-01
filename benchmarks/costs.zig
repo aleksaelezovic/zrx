@@ -7,26 +7,20 @@ const Meter = @import("meter");
 const Spans = @import("spans");
 const Phases = @import("phases");
 const api = @import("api");
-const legacy = api.legacy;
-const current = api.current;
+const zrx = api.zrx;
 const Shape = workloads.Shape;
 const Variant = workloads.Variant;
 const Mode = enum { allocations, activity, phases };
-const legacyPipe = legacy.pipe;
-const legacyEach = legacy.each;
-const legacyFilter = legacy.filter;
-const legacyForEach = legacy.forEachWith;
-const legacyRun = legacy.run;
-const pipe = current.pipe;
-const each = current.each;
-const filter = current.filter;
-const forEach = current.forEach;
-const run = current.run;
+const pipe = zrx.pipe;
+const each = zrx.each;
+const filter = zrx.filter;
+const forEach = zrx.forEach;
+const run = zrx.run;
 
 const PhaseProducer = struct { work: workloads.Producer, trace: *Spans };
 const Left = struct { sink: *workloads.Sink, trace: *Spans, expected: usize };
 const Right = struct { sink: *workloads.Sink, trace: *Spans, expected: usize };
-fn produce(state: *PhaseProducer, output: *current.Emitter(workloads.Packet)) !void {
+fn produce(state: *PhaseProducer, output: *zrx.Emitter(workloads.Packet)) !void {
     state.trace.sourceEnter();
     defer state.trace.sourceExit();
     try workloads.produce(&state.work, output);
@@ -43,33 +37,14 @@ fn acceptRight(output: Right, value: u64) void {
     output.sink.accept(value);
     if (output.sink.count == output.expected) output.trace.sinkExit();
 }
-fn legacyLeft(output: *Left, value: u64) void {
-    acceptLeft(output.*, value);
-}
-fn legacyRight(output: *Right, value: u64) void {
-    acceptRight(output.*, value);
-}
-
 fn executeActivity(comptime shape: Shape, comptime variant: Variant, allocator: std.mem.Allocator, io: std.Io, items: usize, capacity: usize, trace: *Spans) !workloads.Result {
     var state: PhaseProducer = .{ .work = .{ .items = items }, .trace = trace };
     var left: workloads.Sink = .{};
     var right: workloads.Sink = .{};
-    var left_context: Left = .{ .sink = &left, .trace = trace, .expected = items / 2 };
-    var right_context: Right = .{ .sink = &right, .trace = trace, .expected = items };
-    if (variant == .graph) {
-        const source = legacy.Stream(workloads.Packet).fromProducerWith(capacity, produce, &state);
-        const mixed = legacyPipe(&source, .{legacyEach(workloads.mix)});
-        const left_flow = legacyPipe(&mixed, .{
-            legacyFilter(workloads.keepEven), legacyEach(workloads.finish), legacyForEach(&left_context, legacyLeft),
-        });
-        if (shape == .linear) {
-            try legacyRun(allocator, io, .{left_flow});
-        } else {
-            const right_flow = legacyPipe(&mixed, .{ legacyEach(workloads.otherFinish), legacyForEach(&right_context, legacyRight) });
-            try legacyRun(allocator, io, .{ left_flow, right_flow });
-        }
-    } else if (variant == .current) {
-        const source = current.Stream(workloads.Packet).fromProducer(capacity, produce);
+    const left_context: Left = .{ .sink = &left, .trace = trace, .expected = items / 2 };
+    const right_context: Right = .{ .sink = &right, .trace = trace, .expected = items };
+    if (variant == .pipeline) {
+        const source = zrx.Stream(workloads.Packet).fromProducer(capacity, produce);
         const mixed = pipe(&source, .{each(workloads.mix)});
         const left_flow = pipe(&mixed, .{ filter(workloads.keepEven), each(workloads.finish), forEach(acceptLeft) });
         const bindings = .{ allocator, io, &state, left_context, right_context };
@@ -174,17 +149,17 @@ pub fn main(init: std.process.Init) !void {
         const expected = try workloads.execute(shape, .direct, backing, io, items, capacity);
         for (0..warmups) |_| {
             if (mode == .allocations) {
-                inline for (.{ Variant.direct, Variant.graph, Variant.current }) |variant|
+                inline for (.{ Variant.direct, Variant.pipeline }) |variant|
                     try workloads.verify(shape, items, expected, try workloads.execute(shape, variant, backing, io, items, capacity));
             } else if (mode == .activity) {
-                inline for (.{ Variant.graph, Variant.current }) |variant| {
+                inline for (.{Variant.pipeline}) |variant| {
                     var trace: Spans = .init(io);
                     const result = try executeActivity(shape, variant, backing, io, items, capacity, &trace);
                     _ = try trace.finish();
                     try workloads.verify(shape, items, expected, result);
                 }
             } else {
-                inline for (.{ Variant.graph, Variant.current }) |variant| {
+                inline for (.{Variant.pipeline}) |variant| {
                     var trace: Phases = .init(io);
                     const result = try workloads.executeObserved(shape, variant, backing, io, items, capacity, &trace);
                     _ = try trace.finish();
@@ -194,25 +169,12 @@ pub fn main(init: std.process.Init) !void {
         }
         for (0..trials) |trial| {
             if (mode == .allocations) {
-                inline for (.{ Variant.direct, Variant.graph, Variant.current }) |variant|
+                inline for (.{ Variant.direct, Variant.pipeline }) |variant|
                     try allocations(shape, variant, backing, io, items, capacity, trial, expected);
             } else if (mode == .activity) {
-                // Rotate order without adding direct's nonexistent producer checkpoint.
-                if (trial % 2 == 0) {
-                    try activity(shape, .graph, backing, io, items, capacity, trial, expected);
-                    try activity(shape, .current, backing, io, items, capacity, trial, expected);
-                } else {
-                    try activity(shape, .current, backing, io, items, capacity, trial, expected);
-                    try activity(shape, .graph, backing, io, items, capacity, trial, expected);
-                }
+                try activity(shape, .pipeline, backing, io, items, capacity, trial, expected);
             } else {
-                if (trial % 2 == 0) {
-                    try phases(shape, .graph, backing, io, items, capacity, trial, expected);
-                    try phases(shape, .current, backing, io, items, capacity, trial, expected);
-                } else {
-                    try phases(shape, .current, backing, io, items, capacity, trial, expected);
-                    try phases(shape, .graph, backing, io, items, capacity, trial, expected);
-                }
+                try phases(shape, .pipeline, backing, io, items, capacity, trial, expected);
             }
         }
     }

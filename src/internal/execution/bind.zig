@@ -6,7 +6,7 @@ const seq = @import("../../data/sequences.zig");
 const signals = @import("../signal_kind.zig");
 const cb = @import("../callbacks.zig");
 const graph = @import("../graph_run.zig");
-const streams = @import("../../data/streams.zig");
+const producer = @import("../producer.zig");
 const transport = @import("../runtime/streams.zig");
 const regions = @import("regions.zig");
 const branching = @import("../../ops/branch.zig");
@@ -121,15 +121,11 @@ pub fn Scope(comptime Env: type) type {
                 if (T.node_kind == .slice) return .{ .input = input, .env = self.env };
                 if (T.node_kind == .value) return .{ .input = input, .env = self.env };
                 if (T.node_kind == .producer) {
-                    const Forward = struct {
-                        fn produce(env: *Env, emitter: *streams.Emitter(T.Item)) !void {
-                            const result = cb.invoke(T.callback, env, .{emitter});
-                            if (@typeInfo(@TypeOf(result)) == .error_union) try result;
-                        }
-                    };
-                    return streams.Stream(T.Item).fromProducerWith(input.capacity, Forward.produce, self.env);
+                    return .{ .capacity = input.capacity, .env = self.env };
                 }
-                if (T.node_kind == .borrowed or T.node_kind == .iterator) return input.source;
+                if (T.node_kind == .retained) return .{ .source = try self.lower(input.source), .limit = input.limit };
+                if (T.node_kind == .queue) return @import("../../io/readFrom.zig").bind(input, self.env.io());
+                if (T.node_kind == .iterator) return input.source;
                 if (comptime signals.isSignal(T)) return .{ .source = try self.lower(input.source), .env = self.env };
                 return .{ .plan = try makePlan(self, input) };
             }
@@ -162,8 +158,10 @@ pub fn Lowered(comptime T: type, comptime Env: type) type {
     if (@hasDecl(T, "node_kind")) {
         if (T.node_kind == .slice) return regions.View(T, Env);
         if (T.node_kind == .value) return regions.View(T, Env);
-        if (T.node_kind == .producer) return streams.Stream(T.Item);
-        if (T.node_kind == .borrowed or T.node_kind == .iterator) return @FieldType(T, "source");
+        if (T.node_kind == .producer) return producer.Bound(T.Item, Env, T.callback);
+        if (T.node_kind == .retained) return Retained(Lowered(@FieldType(T, "source"), Env));
+        if (T.node_kind == .queue) return @TypeOf(@import("../../io/readFrom.zig").bind(@as(T, undefined), @as(std.Io, undefined)));
+        if (T.node_kind == .iterator) return @FieldType(T, "source");
         if (signals.isSignal(T)) return BoundSignal(T, Env);
         return BoundRegion(T, Env);
     }
@@ -171,7 +169,7 @@ pub fn Lowered(comptime T: type, comptime Env: type) type {
         const Inputs = @typeInfo(@FieldType(T, "inputs")).@"struct".field_types;
         var lowered: [Inputs.len]type = undefined;
         for (Inputs, 0..) |I, i| lowered[i] = Lowered(I, Env);
-        return @TypeOf(@import("../../ops/merge.zig").merge(@as(@Tuple(&lowered), undefined)));
+        return @import("../../ops/merge.zig").Description(@Tuple(&lowered));
     }
     if (signals.isValues(T)) return @TypeOf(@import("../../ops/values.zig").values(@as(Lowered(@FieldType(T, "signal"), Env), undefined)));
     if (signals.isSample(T)) {
@@ -184,11 +182,19 @@ pub fn Lowered(comptime T: type, comptime Env: type) type {
             const op = @import("../../ops/hold.zig").hold(@as(T.Value, undefined));
             return @TypeOf(op).Output(S);
         }
-        if (T.declaration_kind == .taken) return @TypeOf(@import("../../ops/take.zig").take(0)).Output(S);
-        if (T.declaration_kind == .bounded) return @TypeOf(@import("../../ops/maxItems.zig").maxItems(0)).Output(S);
-        if (T.declaration_kind == .retained) return @TypeOf(@import("../../ops/takeLast.zig").takeLast(0)).Output(S);
     }
     return T;
+}
+
+fn Retained(comptime Source: type) type {
+    return struct {
+        pub const graph_tag = seq.GraphTag;
+        pub const sequence_tag = seq.SequenceTag;
+        pub const retention_source = true;
+        pub const Item = seq.Item(Source);
+        source: Source,
+        limit: usize,
+    };
 }
 
 fn BoundRegion(comptime T: type, comptime Env: type) type {

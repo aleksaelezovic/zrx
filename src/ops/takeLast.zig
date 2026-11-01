@@ -1,4 +1,5 @@
 const sequences = @import("../data/sequences.zig");
+const declarations = @import("../data/declarations.zig");
 
 /// Describe final-suffix retention; even finite inputs require run rather than
 /// direct iteration. Run preallocates a limit-item ring before activation,
@@ -14,7 +15,7 @@ const sequences = @import("../data/sequences.zig");
 ///
 /// maxItems before this guards total input; afterward it counts the suffix.
 /// After merge this retains the chosen interleaving, not per-input suffixes.
-/// Not a live drop-oldest policy. See examples/retention.zig.
+/// Not a live drop-oldest policy.
 pub fn takeLast(limit: usize) TakeLast {
     return .{ .limit = limit };
 }
@@ -23,6 +24,7 @@ const TakeLast = struct {
     limit: usize,
 
     pub fn Output(comptime Input: type) type {
+        declarations.requireSource(Input);
         const Element = sequences.Item(Input);
         return struct {
             source: Input,
@@ -30,8 +32,8 @@ const TakeLast = struct {
             pub const sequence_tag = sequences.SequenceTag;
             pub const graph_tag = sequences.GraphTag;
             pub const Item = Element;
-            pub const declaration_source = Input;
-            pub const declaration_kind = .retained;
+            pub const node_kind = .retained;
+            pub const Requirements = declarations.concat(declarations.requirements(Input), &.{});
         };
     }
 

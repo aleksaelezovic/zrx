@@ -1,23 +1,17 @@
 //! Opt-in complete-run timings, not an optimization or timing-threshold test.
-//! Protocol, exclusions, and structural estimates: docs/measurements/elapsed.md.
+//! Protocol and exclusions: docs/performance.md.
 const std = @import("std");
 const builtin = @import("builtin");
-const zrx = @import("api").legacy;
-const current = @import("api").current;
-const currentPipe = current.pipe;
-const currentEach = current.each;
-const currentFilter = current.filter;
-const currentForEach = current.forEach;
-const Stream = zrx.Stream;
+const zrx = @import("api").zrx;
 const Emitter = zrx.Emitter;
 const pipe = zrx.pipe;
 const each = zrx.each;
 const filter = zrx.filter;
-const forEachWith = zrx.forEachWith;
+const forEach = zrx.forEach;
 const api = @import("api");
 
 pub const Shape = enum { linear, fanout };
-pub const Variant = enum { direct, graph, current };
+pub const Variant = enum { direct, pipeline };
 pub const Packet = struct { value: u64, evaluations: *usize };
 pub const Producer = struct {
     items: usize,
@@ -109,35 +103,18 @@ pub fn executeObserved(
             if (keepEven(value)) left.accept(finish(value));
             if (shape == .fanout) right.accept(otherFinish(value));
         }
-    } else if (variant == .graph) {
-        const source: Stream(Packet) = .fromProducerWith(capacity, produce, &state);
+    } else {
+        const source = zrx.Stream(Packet).fromProducer(capacity, produce);
         const mixed = pipe(&source, .{each(mix)});
         const left_flow = pipe(&mixed, .{
-            filter(keepEven),
-            each(finish),
-            forEachWith(&left, Sink.accept),
-        });
-        if (shape == .linear) {
-            if (@TypeOf(observer) == api.Noop) try zrx.run(allocator, io, .{left_flow}) else try api.legacyRunObserved(allocator, io, .{left_flow}, observer);
-        } else {
-            const right_flow = pipe(&mixed, .{
-                each(otherFinish),
-                forEachWith(&right, Sink.accept),
-            });
-            if (@TypeOf(observer) == api.Noop) try zrx.run(allocator, io, .{ left_flow, right_flow }) else try api.legacyRunObserved(allocator, io, .{ left_flow, right_flow }, observer);
-        }
-    } else {
-        const source = current.Stream(Packet).fromProducer(capacity, produce);
-        const mixed = currentPipe(&source, .{currentEach(mix)});
-        const left_flow = currentPipe(&mixed, .{
-            currentFilter(keepEven), currentEach(finish), currentForEach(acceptLeft),
+            filter(keepEven), each(finish), forEach(acceptLeft),
         });
         const bindings = .{ allocator, io, &state, LeftSink{ .value = &left }, RightSink{ .value = &right } };
         if (shape == .linear) {
-            if (@TypeOf(observer) == api.Noop) try current.run(bindings, .{left_flow}) else try api.runObserved(bindings, .{left_flow}, observer);
+            if (@TypeOf(observer) == api.Noop) try zrx.run(bindings, .{left_flow}) else try api.runObserved(bindings, .{left_flow}, observer);
         } else {
-            const right_flow = currentPipe(&mixed, .{ currentEach(otherFinish), currentForEach(acceptRight) });
-            if (@TypeOf(observer) == api.Noop) try current.run(bindings, .{ left_flow, right_flow }) else try api.runObserved(bindings, .{ left_flow, right_flow }, observer);
+            const right_flow = pipe(&mixed, .{ each(otherFinish), forEach(acceptRight) });
+            if (@TypeOf(observer) == api.Noop) try zrx.run(bindings, .{ left_flow, right_flow }) else try api.runObserved(bindings, .{ left_flow, right_flow }, observer);
         }
     }
     return .{
@@ -177,7 +154,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "# zig={s} backend={s} optimize={s} arch={s} os={s} abi={s} cpu={s}\n" ++
             "# io=std.Io.Threaded async=nothing concurrent=unlimited allocator=smp_allocator clock=awake\n" ++
-            "# graph=legacy-materialized current=declarative-fused\n" ++
             "# items={d} warmups={d} trials={d} capacity={d} packet_bytes={d} value_bytes={d}\n",
         .{
             builtin.zig_version_string,
@@ -201,22 +177,20 @@ pub fn main(init: std.process.Init) !void {
         // Empty/odd/even fixture checks are outside the measured interval.
         for ([_]usize{ 0, 1, 7, 32 }) |n| {
             const expected = try execute(shape, .direct, allocator, io, n, capacity);
-            try verify(shape, n, expected, try execute(shape, .graph, allocator, io, n, capacity));
-            try verify(shape, n, expected, try execute(shape, .current, allocator, io, n, capacity));
+            try verify(shape, n, expected, try execute(shape, .pipeline, allocator, io, n, capacity));
         }
         const expected = try execute(shape, .direct, allocator, io, items, capacity);
         for (0..warmups) |_| {
-            inline for (.{ Variant.direct, Variant.graph, Variant.current }) |variant| {
+            inline for (.{ Variant.direct, Variant.pipeline }) |variant| {
                 try verify(shape, items, expected, try execute(shape, variant, allocator, io, items, capacity));
             }
         }
-        // Rotate all three variants, avoiding a fixed first position.
+        // Alternate order, avoiding a fixed first position.
         for (0..trials) |trial| {
-            inline for (0..3) |slot| {
-                switch ((trial + slot) % 3) {
+            inline for (0..2) |slot| {
+                switch ((trial + slot) % 2) {
                     0 => try measure(shape, .direct, allocator, io, items, capacity, trial, expected),
-                    1 => try measure(shape, .graph, allocator, io, items, capacity, trial, expected),
-                    2 => try measure(shape, .current, allocator, io, items, capacity, trial, expected),
+                    1 => try measure(shape, .pipeline, allocator, io, items, capacity, trial, expected),
                     else => unreachable,
                 }
             }

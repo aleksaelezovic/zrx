@@ -20,6 +20,7 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 |---|---|
 | Declaration composition and callbacks | [`pipe`, `map`/`each`, `filter`, `tap`](../src/compose.zig) |
 | Finite inputs, producers, deferred reduction | [`fromSlice`, `fromValue`, `Stream`, `fold`](../src/data/declarations.zig) |
+| Borrowed consuming inputs | [`fromIterator`](../src/compose.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Accumulated updates | [`scan`](../src/ops/scan.zig) |
 | Exclusive cases | [`branch`, `when`, `otherwise`](../src/ops/branch.zig) |
 | Resource recipes and nominal roles | [`resource`, `deriveResource`](../src/internal/world/resources.zig) |
@@ -31,7 +32,7 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Owned record values and I/O | [`Line`](../src/data/lines.zig), [line sources and resource glue](../src/io/lines.zig) |
 | Serial HTTP server | [Request scopes, bodies and responses](../src/io/http.zig) |
 
-No public `With` variants, eager value executor, `tryPipe`, or `tryFold` remain.
+Only `run` executes declarations.
 Leading callback parameters are exact-type service requests; trailing parameters
 are the operator's ordinary data. Callback error unions fail execution, except
 signal map results, which remain current-state data.
@@ -57,16 +58,9 @@ smoke-check their entry points and import reusable compositions.
 - [HTTP echo server](../examples/http_echo.zig): `zig build http-example` builds
   the opt-in executable. Default checks run finite loopback tests, not a live server.
 
-## Evidence and integration
+## Planned work
 
 - [Approved retry direction](proposals/durable_workflows.md): not implemented;
   application-owned idempotency, explicit retry decisions and run-supplied Io.
-- [Measurement records](measurements/README.md): elapsed, allocator/callback and
-  executor-phase evidence, with original source baselines.
-- [Implementation history](history/README.md): migration and lifecycle audit.
-- [Declaration-runtime integration handoff](integration.md): transfer checklist,
-  breaking changes, sibling reconciliation and validation limits.
-
-`src/legacy_test_api.zig` and `tests/legacy_examples/` retain internal regression
-and narrowly scoped codegen evidence. They are not alternate public APIs or
-current usage examples.
+- [Performance experiments](performance.md): opt-in tools and one-mechanism-at-a-time
+  investigation, with no default timing thresholds.

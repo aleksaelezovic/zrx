@@ -8,12 +8,9 @@ const composition = @import("../composition.zig");
 
 pub fn finite(comptime Input: type) bool {
     const T = decl.Child(Input);
-    if (!@hasDecl(T, "node_kind") and !@hasDecl(T, "declaration_kind")) return false;
-    if (@hasDecl(T, "node_kind")) {
-        if (T.node_kind == .slice or T.node_kind == .value) return true;
-        if (T.node_kind == .iterator) return true;
-        if (T.node_kind == .producer or T.node_kind == .borrowed) return false;
-    } else if (T.declaration_kind != .taken and T.declaration_kind != .bounded) return false;
+    if (!@hasDecl(T, "node_kind")) return false;
+    if (T.node_kind == .slice or T.node_kind == .value or T.node_kind == .iterator) return true;
+    if (T.node_kind == .producer or T.node_kind == .queue or T.node_kind == .retained) return false;
     return finite(@FieldType(T, "source"));
 }
 
@@ -51,7 +48,7 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
         };
     }
     // Reader/view boundary: reuse the audited borrowed iterator conventions.
-    if (!@hasDecl(T, "node_kind") and !@hasDecl(T, "declaration_kind")) {
+    if (!@hasDecl(T, "node_kind")) {
         return struct {
             input: seq.Cursor(Input),
             env: *Env,
@@ -120,19 +117,6 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
                 }
                 self.done = true;
                 return null;
-            } else {
-                if (T.declaration_kind == .taken and self.count == self.source.limit) {
-                    self.done = true;
-                    return null;
-                }
-                const value = (try self.input.next()) orelse {
-                    self.done = true;
-                    return null;
-                };
-                if (T.declaration_kind == .bounded and self.count == self.source.limit)
-                    return error.TooManyItems;
-                self.count += 1;
-                return @as(?Item, value);
             }
         }
     };
@@ -146,7 +130,7 @@ pub fn init(input: anytype, env: anytype) Cursor(@TypeOf(input), @typeInfo(@Type
         return .{ .input = seq.cursor(value.source), .env = env };
     if (comptime @hasDecl(T, "node_kind") and (T.node_kind == .slice or T.node_kind == .value))
         return .{ .source = value, .env = env };
-    if (comptime !@hasDecl(T, "node_kind") and !@hasDecl(T, "declaration_kind"))
+    if (comptime !@hasDecl(T, "node_kind"))
         return .{ .input = seq.cursor(input), .env = env };
     return .{
         .source = value,

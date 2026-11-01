@@ -1,6 +1,7 @@
 const std = @import("std");
 const composition = @import("../internal/composition.zig");
 const sequences = @import("../data/sequences.zig");
+const declarations = @import("../data/declarations.zig");
 const Tag = opaque {};
 
 /// Describe concurrent fan-in. Run supplies all transport, Io, and allocation.
@@ -27,9 +28,11 @@ const Tag = opaque {};
 /// already have effects; no rollback. Errors/optionals inside items remain data.
 /// collectThen after merge waits for all inputs; takeLast/batches follow the
 /// chosen interleaving (apply retention before merge for per-input suffixes).
-/// See examples/merge.zig; no dynamic inputs, zip, or combine-latest is implied.
-pub fn merge(inputs: anytype) Merged(@TypeOf(inputs)) {
-    var result: Merged(@TypeOf(inputs)) = undefined;
+/// No dynamic inputs, zip, or combine-latest is implied.
+pub fn merge(inputs: anytype) Description(@TypeOf(inputs)) {
+    inline for (@typeInfo(@TypeOf(inputs)).@"struct".field_types) |Input|
+        declarations.requireSource(Input);
+    var result: Description(@TypeOf(inputs)) = undefined;
     inline for (0..inputs.len) |i| result.inputs[i] = inputs[i];
     return result;
 }
@@ -38,7 +41,8 @@ pub fn isMerge(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "merge_tag") and T.merge_tag == Tag;
 }
 
-fn Merged(comptime Inputs: type) type {
+// Also used by typed lowering after declaration inputs become bound cursors.
+pub fn Description(comptime Inputs: type) type {
     if (comptime !composition.isTuple(Inputs))
         @compileError("merge: expected a nonempty flat tuple of inputs");
     const fields = @typeInfo(Inputs).@"struct".field_types;

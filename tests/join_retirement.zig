@@ -102,7 +102,7 @@ fn scenario(schedule: Schedule, fail_source: bool) !void {
     table.futexWait = Hooks.wait;
     table.futexWaitUncancelable = Hooks.waitUncancelable;
     const observed: std.Io = .{ .userdata = io.userdata, .vtable = &table };
-    var source = try Stream.fromProducerWith(allocator, observed, 1, produce, &probe);
+    var source = try Stream.initProducer(allocator, observed, 1, produce, &probe);
     defer source.deinit();
     probe.source = &source;
     probe.result_word = @ptrCast(&source.state.result_mutex.state.raw);

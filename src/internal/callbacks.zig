@@ -38,6 +38,10 @@ pub fn invoke(comptime callback: anytype, env: anytype, inputs: anytype) Info(ca
 pub fn functions(comptime input: anytype, comptime trailing: usize) if (@typeInfo(@TypeOf(input)) == .@"struct" and @typeInfo(@TypeOf(input)).@"struct".is_tuple) @TypeOf(input) else @TypeOf(.{input}) {
     const result = if (@typeInfo(@TypeOf(input)) == .@"struct" and @typeInfo(@TypeOf(input)).@"struct".is_tuple) input else .{input};
     if (result.len == 0) @compileError("callback tuple must not be empty");
-    for (result) |callback| _ = Info(callback, trailing);
+    for (result) |callback| {
+        if (@typeInfo(@TypeOf(callback)) == .@"struct" and @typeInfo(@TypeOf(callback)).@"struct".is_tuple)
+            @compileError("callback tuple must be flat; use a named helper");
+        _ = Info(callback, trailing);
+    }
     return result;
 }

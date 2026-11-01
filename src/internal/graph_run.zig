@@ -3,17 +3,11 @@ const std = @import("std");
 const composition = @import("composition.zig");
 const sequences = @import("../data/sequences.zig");
 const streams = @import("runtime/streams.zig");
-const sources = @import("../data/streams.zig");
 const merging = @import("../ops/merge.zig");
-const each = @import("../ops/each.zig").each;
-const filter = @import("../ops/filter.zig").filter;
-const maxItems = @import("../ops/maxItems.zig").maxItems;
-const take = @import("../ops/take.zig").take;
 const signal_kind = @import("signal_kind.zig");
 const state = @import("runtime/signals.zig");
 const resources = @import("resources.zig");
 const line_io = @import("../io/lines.zig");
-const observation = @import("execution/observation.zig");
 const http_io = @import("../io/http.zig");
 const branching = @import("branch.zig");
 const branch_runtime = @import("runtime/branch.zig");
@@ -26,8 +20,7 @@ pub fn isFlowType(comptime T: type) bool {
 }
 
 fn isSource(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "graph_tag") and
-        T.graph_tag == sequences.GraphTag and T == sources.Stream(T.Item);
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "producer_source");
 }
 
 pub fn Flow(comptime Input: type, comptime Consumer: type) type {
@@ -144,10 +137,7 @@ fn prepareBranch(scope: *Scope, source: anytype, cases: anytype) !*BranchPlan(
         scope.nodes.appendAssumeCapacity(&outlet.node);
         // Ownership transferred to the node. Later failures are unwound by Scope.
         const declaration: branching.Input(Item) = .{ .node = outlet };
-        plan.pipelines[i] = if (@hasDecl(@TypeOf(cases[i]), "bound_case"))
-            try cases[i].build(declaration)
-        else
-            @import("../pipe.zig").pipe(declaration, cases[i].operators);
+        plan.pipelines[i] = try cases[i].build(declaration);
         plan.constructed += 1;
         if (terminal) {
             try plan.pipelines[i].prepare(scope);
@@ -244,24 +234,8 @@ pub fn BranchFlow(comptime Input: type, comptime Cases: type) type {
 /// non-returning non-cancelable code cannot be forcibly stopped. Shallow item
 /// referents and caller-supplied capabilities remain borrowed, not run-owned.
 /// See docs/execution.md and examples/streams.zig for the cross-operator lifecycle.
-pub fn run(allocator: std.mem.Allocator, io: std.Io, flows: anytype) anyerror!void {
-    return runObserved(allocator, io, flows, observation.Noop{});
-}
-
-// Private benchmark counterpart, with no public runtime observer registry.
-pub fn runObserved(allocator: std.mem.Allocator, io: std.Io, flows: anytype, observer: anytype) anyerror!void {
-    const Activation = struct {
-        fn start(_: @This()) !void {}
-    };
-    return runPreparedObserved(allocator, io, flows, Activation{}, observer);
-}
-
-// The public executor supplies a typed resource activation hook. It runs only
-// after graph preparation/gated startup, before I/O acquisition and callbacks.
-pub fn runPrepared(allocator: std.mem.Allocator, io: std.Io, flows: anytype, activation: anytype) anyerror!void {
-    return runPreparedObserved(allocator, io, flows, activation, observation.Noop{});
-}
-
+/// The public executor supplies a typed resource activation hook. It runs only
+/// after graph preparation/gated startup, before I/O acquisition and callbacks.
 pub fn runPreparedObserved(allocator: std.mem.Allocator, io: std.Io, flows: anytype, activation: anytype, observer: anytype) anyerror!void {
     const Flows = @TypeOf(flows);
     if (comptime !composition.isTuple(Flows))
@@ -623,7 +597,7 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
         errdefer scope.allocator.destroy(owner);
-        owner.* = try sources.instantiate(reference.*, scope.allocator, scope.io);
+        owner.* = try reference.instantiate(scope.allocator, scope.io);
         errdefer owner.deinit();
         const runtime = try Runtime(Element).create(scope.allocator, owner, reference.capacity, .{});
         scope.insert(key, &runtime.node);
@@ -674,34 +648,14 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
         const runtime = try reference.materialize(scope);
         scope.insert(key, &runtime.node);
         return runtime;
-    } else if (comptime @typeInfo(Definition) == .@"struct" and @hasDecl(Definition, "declaration_source")) {
+    } else if (comptime @typeInfo(Definition) == .@"struct" and @hasDecl(Definition, "retention_source")) {
         const upstream = try resolve(scope, &reference.source);
-        if (upstream.scoped_http and Definition.declaration_kind != .mapped and
-            Definition.declaration_kind != .filtered and Definition.declaration_kind != .taken)
-            return error.UnsupportedHttpComposition;
+        if (upstream.scoped_http) return error.UnsupportedHttpComposition;
         const reader = try upstream.acquire(scope.allocator);
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
         errdefer scope.allocator.destroy(owner);
-        owner.* = if (Definition.declaration_kind == .retained)
-            try streams.takeLast(scope.allocator, scope.io, upstream.capacity, reader, reference.limit)
-        else if (Definition.declaration_kind == .scanned)
-            try streams.scan(scope.allocator, scope.io, upstream.capacity, reader, reference.initial, Definition.declaration_reducer)
-        else block: {
-            const view = if (@hasDecl(Definition, "bound_region"))
-                reference.view(reader)
-            else if (Definition.declaration_kind == .mapped)
-                each(Definition.declaration_functions).apply(reader)
-            else if (Definition.declaration_kind == .filtered)
-                filter(Definition.declaration_predicate).apply(reader)
-            else if (Definition.declaration_kind == .bounded)
-                maxItems(reference.limit).apply(reader)
-            else if (Definition.declaration_kind == .taken)
-                take(reference.limit).apply(reader)
-            else
-                @compileError("run: unsupported declaration kind");
-            break :block try streams.share(scope.allocator, scope.io, upstream.capacity, view);
-        };
+        owner.* = try streams.takeLast(scope.allocator, scope.io, upstream.capacity, reader, reference.limit);
         errdefer owner.deinit();
         owner.setCompletion(upstream.owner.completionOwner());
         const runtime = try Runtime(Element).create(scope.allocator, owner, upstream.capacity, .{reader});
@@ -769,14 +723,11 @@ fn resolveSignalReference(scope: *Scope, reference: anytype) anyerror!*state.Cel
             fn candidate(entry: *state.Entry) void {
                 const target = state.Cell(T).cast(entry);
                 const input = state.Cell(P).cast(entry.parent.?);
-                if (@hasDecl(Definition, "bound_signal"))
-                    target.candidate = Definition.compute(target.binding.?, input.candidate)
-                else
-                    target.candidate = composition.compose(input.candidate, Definition.signal_functions, 0);
+                target.candidate = Definition.compute(target.binding.?, input.candidate);
             }
         };
         cell.entry.parent = &parent.entry;
-        if (@hasDecl(Definition, "bound_signal")) cell.binding = reference.env;
+        cell.binding = reference.env;
         cell.entry.compute = Compute.candidate;
         parent.family.entries.appendAssumeCapacity(&cell.entry);
         scope.signal_index.putAssumeCapacity(key, &cell.entry);

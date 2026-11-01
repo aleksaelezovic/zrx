@@ -79,8 +79,8 @@ form for permanent errors, unsafe unknown outcomes, or error-dependent delays.
 
 Declaring this flow allocates/starts nothing. Retry waits use run-supplied Io and
 finish/join before managed services release. A retry boundary does not imply an
-extra worker/queue. Application capabilities remain borrowed. No removed eager
-executor or `With` variant is restored.
+extra worker/queue. Application capabilities remain borrowed. Retry belongs to
+the same declaration-only execution model.
 
 The final operation error is an explicit exception to ordinary stream callback
 failure: the retry boundary captures it as item data; source failures and errors

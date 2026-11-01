@@ -40,7 +40,7 @@ jobs:
       - name: Verify Zig version
         run: test "$(zig version)" = "$(cat .zigversion)"
 
-      # The build owns the cross-target catalog and scoped codegen comparisons.
+      # The build owns the current API tests and single cross-target catalog.
       # Only native tests execute here; cross builds do not run foreign binaries.
       - name: Run full validation
         run: zig build check

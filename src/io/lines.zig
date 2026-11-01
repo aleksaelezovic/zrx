@@ -79,7 +79,7 @@ fn Source(comptime maxBytes: usize) type {
                     }
                 }
             };
-            return runtime.Stream(Item).fromProducerWith(scope.allocator, scope.io, self.capacity, Producer.produce, slot);
+            return runtime.Stream(Item).initProducer(scope.allocator, scope.io, self.capacity, Producer.produce, slot);
         }
     };
 }

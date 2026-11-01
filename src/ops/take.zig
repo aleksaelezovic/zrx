@@ -1,4 +1,5 @@
 const sequences = @import("../data/sequences.zig");
+const declarations = @import("../data/declarations.zig");
 
 /// Forward at most limit items in order, then end successfully without another
 /// input probe. Short input ends normally; zero never calls the input cursor.
@@ -6,9 +7,8 @@ const sequences = @import("../data/sequences.zig");
 /// input. Optional/error-valued elements stay data. Observed cursor errors
 /// propagate; errors beyond the prefix are not probed for.
 ///
-/// Finite borrowed inputs produce a lazy view without allocation. Slice views
-/// replay; adapted consuming iterators resume their position. Stream/graph
-/// inputs remain declarations executed by run, not directly iterable.
+/// All inputs are cold declarations executed by run. Finite storage declared
+/// with fromSlice replays; borrowed consuming iterators resume their position.
 ///
 /// In run, completing a prefix detaches only its input edge. Shared siblings
 /// continue; nodes without remaining stream demand stop and retire their own
@@ -37,31 +37,15 @@ const Take = struct {
 };
 
 fn Prefix(comptime Source: type) type {
+    declarations.requireSource(Source);
     const Element = sequences.Item(Source);
     return struct {
         source: Source,
         limit: usize,
         pub const sequence_tag = sequences.SequenceTag;
+        pub const graph_tag = sequences.GraphTag;
         pub const Item = Element;
-        pub const declaration_source = Source;
-        pub const declaration_kind = .taken;
-        pub const Iterator = struct {
-            input: sequences.Cursor(Source),
-            remaining: usize,
-
-            pub fn next(self: *@This()) (if (sequences.isFallible(Source)) sequences.Errors(Source)!?Element else ?Element) {
-                if (self.remaining == 0) return null;
-                const value = (if (comptime sequences.isFallible(Source)) try self.input.next() else self.input.next()) orelse {
-                    self.remaining = 0;
-                    return null;
-                };
-                self.remaining -= 1;
-                return @as(?Element, value);
-            }
-        };
-
-        pub fn iterator(self: @This()) Iterator {
-            return .{ .input = sequences.cursor(self.source), .remaining = self.limit };
-        }
+        pub const node_kind = .take;
+        pub const Requirements = declarations.concat(declarations.requirements(Source), &.{});
     };
 }

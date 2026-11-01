@@ -1,6 +1,6 @@
 const std = @import("std");
 const api = @import("api");
-const zrx = api.current;
+const zrx = api.zrx;
 const Phases = @import("phases");
 const workloads = @import("workloads");
 const io = std.testing.io;
@@ -29,7 +29,7 @@ test "real graph phase samples preserve empty odd and even workload results" {
     inline for (.{ workloads.Shape.linear, workloads.Shape.fanout }) |shape| {
         for ([_]usize{ 0, 1, 32 }) |n| {
             const expected = try workloads.execute(shape, .direct, allocator, io, n, 4);
-            inline for (.{ workloads.Variant.graph, workloads.Variant.current }) |variant| {
+            inline for (.{workloads.Variant.pipeline}) |variant| {
                 var trace: Phases = .init(io);
                 const result = try workloads.executeObserved(shape, variant, allocator, io, n, 4, &trace);
                 try workloads.verify(shape, n, expected, result);
@@ -166,7 +166,7 @@ test "external cancellation preserves a complete active-run phase trace" {
 
 fn failedObserved(gpa: std.mem.Allocator) !void {
     var trace: Phases = .init(io);
-    const result = workloads.executeObserved(.fanout, .current, gpa, io, 7, 2, &trace);
+    const result = workloads.executeObserved(.fanout, .pipeline, gpa, io, 7, 2, &trace);
     _ = try result; // Failure traces may be incomplete; storage must still unwind.
     try partition(try trace.finish());
 }

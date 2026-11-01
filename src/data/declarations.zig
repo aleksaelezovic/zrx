@@ -85,7 +85,7 @@ fn Value(comptime T: type) type {
     };
 }
 
-pub const Operation = enum { map, filter, tap, fold };
+pub const Operation = enum { map, filter, tap };
 
 pub fn transform(comptime operation: Operation, comptime input: anytype) Transform(operation, cb.functions(input, 1)) {
     return .{};
@@ -123,7 +123,6 @@ fn Transform(comptime operation: Operation, comptime fns: anytype) type {
                     .map => .map,
                     .filter => .filter,
                     .tap => .tap,
-                    .fold => .fold,
                 };
                 pub const Item = T;
                 pub const Requirements = concat(requirements(Source), services(fns, 1, 0));
@@ -141,21 +140,21 @@ fn Transform(comptime operation: Operation, comptime fns: anytype) type {
     };
 }
 
-pub fn borrowed(input: anytype, comptime synchronous: bool) Borrowed(@TypeOf(input), synchronous) {
+pub fn borrowed(input: anytype) Borrowed(@TypeOf(input)) {
     return .{ .source = input };
 }
-fn Borrowed(comptime Input: type, comptime synchronous: bool) type {
+fn Borrowed(comptime Input: type) type {
     return struct {
         pub const graph_tag = seq.GraphTag;
         pub const sequence_tag = seq.SequenceTag;
-        pub const node_kind = if (synchronous) .iterator else .borrowed;
+        pub const node_kind = .iterator;
         pub const Item = seq.Item(Input);
         pub const Requirements: [0]type = .{};
         source: Input,
     };
 }
 
-/// Deferred eager-at-run left reduction. Reducer: (services..., A, T) A/E!A.
+/// Deferred left reduction. Reducer: (services..., A, T) A/E!A.
 pub fn fold(seed: anytype, comptime reducer: anytype) Fold(Accumulator(reducer), reducer) {
     return .{ .seed = seed };
 }

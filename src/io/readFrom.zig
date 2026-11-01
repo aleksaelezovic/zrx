@@ -2,16 +2,34 @@ const std = @import("std");
 const sequences = @import("../data/sequences.zig");
 const queueNext = @import("../internal/queue.zig").next;
 
-/// Borrow a mutable std.Io.Queue(T) with explicit waiting capability. The queue
-/// and captured Io must outlive traversal and be compatible with run's Io.
+/// Declare a borrowed mutable std.Io.Queue(T). Waiting uses run-supplied Io;
+/// construction never captures Io or starts traversal. Keep the queue alive
+/// until run's users have joined.
 /// Empty open input waits; closed-and-drained input ends normally; cancellation
 /// is an outer cursor error. Optional/error-valued items remain data.
 ///
 /// Copies compete for the same input, never broadcast or rewind. Reference one
 /// stable adapter by pointer for run-owned sharing. No new queue storage is
 /// allocated here; the standard queue retains its borrowed fixed-capacity buffer.
-pub fn readFrom(io: std.Io, source: anytype) sequences.PullView(QueueCursor(QueueItem(@TypeOf(source)))) {
-    return .{ .input = .{ .io = io, .queue = source } };
+pub fn readFrom(source: anytype) Queue(@TypeOf(source)) {
+    return .{ .queue = source };
+}
+
+fn Queue(comptime Pointer: type) type {
+    const T = QueueItem(Pointer);
+    return struct {
+        pub const graph_tag = sequences.GraphTag;
+        pub const sequence_tag = sequences.SequenceTag;
+        pub const node_kind = .queue;
+        pub const Item = T;
+        pub const Requirements: [0]type = .{};
+        queue: Pointer,
+    };
+}
+
+// Bind the bootstrap Io only during run preparation.
+pub fn bind(source: anytype, io: std.Io) sequences.PullView(QueueCursor(@TypeOf(source).Item)) {
+    return .{ .input = .{ .io = io, .queue = source.queue } };
 }
 
 fn QueueItem(comptime Pointer: type) type {

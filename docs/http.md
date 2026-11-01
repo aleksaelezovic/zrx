@@ -98,7 +98,6 @@ connections, concurrent clients and streaming response bodies are unsupported.
 Parsing inherits the pinned standard library's behavior; this experimental
 milestone is not a public-deployment hardening claim.
 
-Generic recovery remains separate, unimplemented work; older `With` sketches
-do not override the current dependency-injection model. HTTP does not require it.
+Generic recovery remains separate, unimplemented work. HTTP does not require it.
 Public partition/pipeEach operators and predicate
 combinators are also outside this milestone.

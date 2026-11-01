@@ -1,5 +1,4 @@
 const std = @import("std");
-const composition = @import("../composition.zig");
 const sequences = @import("../../data/sequences.zig");
 const broadcast = @import("broadcast.zig");
 const queueNext = @import("../queue.zig").next;
@@ -56,54 +55,20 @@ pub fn Stream(comptime T: type) type {
             return .{ .state = state };
         }
 
-        /// Save a comptime-known producer. Only the first next starts its task.
-        /// Returning closes the stream; accepted items drain before its error/end.
-        pub fn fromProducer(
-            allocator: std.mem.Allocator,
-            io: std.Io,
-            capacity: usize,
-            comptime producer: anytype,
-        ) std.mem.Allocator.Error!Self {
-            return producerStream(allocator, io, capacity, producer, {}, false);
-        }
-
-        /// As fromProducer, copying an explicit capability passed before output.
-        /// Constructor order is producer, capability; referenced resources stay borrowed.
-        pub fn fromProducerWith(
+        /// Private transport constructor. Store typed callback arguments shallowly;
+        /// the first read starts producer(arguments, output), and return closes it.
+        pub fn initProducer(
             allocator: std.mem.Allocator,
             io: std.Io,
             capacity: usize,
             comptime producer: anytype,
             capability: anytype,
         ) std.mem.Allocator.Error!Self {
-            return producerStream(allocator, io, capacity, producer, capability, true);
-        }
-
-        fn producerStream(
-            allocator: std.mem.Allocator,
-            io: std.Io,
-            capacity: usize,
-            comptime producer: anytype,
-            capability: anytype,
-            comptime with_capability: bool,
-        ) std.mem.Allocator.Error!Self {
-            const name = if (with_capability) "Stream.fromProducerWith" else "Stream.fromProducer";
-            const info = composition.callbackInfo(producer, name ++ ": producer", if (with_capability) 2 else 1);
-            if (info.param_types[if (with_capability) 1 else 0] != *Self)
-                @compileError(name ++ ": producer must accept " ++
-                    (if (with_capability) "a capability followed by *Stream(T)" else "*Stream(T)"));
-            const Return = info.return_type.?;
-            if (Return != void and
-                (@typeInfo(Return) != .error_union or composition.Payload(Return) != void))
-                @compileError(name ++ ": producer must return void or E!void");
-            const Capability = if (with_capability) info.param_types[0].? else void;
+            const Capability = @TypeOf(capability);
             const Invoke = struct {
                 fn call(context: ?*anyopaque, output: *Self) anyerror!void {
-                    const result = if (with_capability)
-                        producer(@as(*Capability, @ptrCast(@alignCast(context.?))).*, output)
-                    else
-                        producer(output);
-                    if (Return != void) try result;
+                    const result = producer(@as(*Capability, @ptrCast(@alignCast(context.?))).*, output);
+                    if (@typeInfo(@TypeOf(result)) == .error_union) try result;
                 }
 
                 fn free(gpa: std.mem.Allocator, context: *anyopaque) void {
@@ -112,12 +77,10 @@ pub fn Stream(comptime T: type) type {
             };
             var self = try init(allocator, io, capacity);
             errdefer self.deinit();
-            if (with_capability) {
-                const stored = try allocator.create(Capability);
-                stored.* = capability;
-                self.state.capability = @ptrCast(stored);
-                self.state.free_capability = Invoke.free;
-            }
+            const stored = try allocator.create(Capability);
+            stored.* = capability;
+            self.state.capability = @ptrCast(stored);
+            self.state.free_capability = Invoke.free;
             self.state.producer = Invoke.call;
             return self;
         }
@@ -329,41 +292,7 @@ pub fn share(
             }
         }
     };
-    return Stream(Element).fromProducerWith(allocator, io, capacity, Forward.produce, Context{ .input = input, .io = io });
-}
-
-/// Run-owned recurrence, never exposed as a mutable public cursor. Output slots
-/// receive shallow values, not references into the worker's accumulator.
-pub fn scan(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    capacity: usize,
-    input: anytype,
-    initial: anytype,
-    comptime reducer: anytype,
-) (std.mem.Allocator.Error || error{UnsupportedCapacity})!Stream(@TypeOf(initial)) {
-    if (capacity == 0) return error.UnsupportedCapacity;
-    const Input = @TypeOf(input);
-    const State = @TypeOf(initial);
-    const Context = struct { input: Input, initial: State, io: std.Io };
-    const Forward = struct {
-        fn produce(context: Context, output: *Stream(State)) anyerror!void {
-            var cursor = sequences.cursor(context.input);
-            var state = context.initial;
-            while (true) {
-                try context.io.checkCancel();
-                const value = (if (comptime sequences.isFallible(Input)) try cursor.next() else cursor.next()) orelse return;
-                state = reducer(state, value);
-                try context.io.checkCancel();
-                try output.push(state);
-            }
-        }
-    };
-    return Stream(State).fromProducerWith(allocator, io, capacity, Forward.produce, Context{
-        .input = input,
-        .initial = initial,
-        .io = io,
-    });
+    return Stream(Element).initProducer(allocator, io, capacity, Forward.produce, Context{ .input = input, .io = io });
 }
 
 /// Run-owned retention. Allocate the ring during graph preparation, not on pull.
@@ -409,7 +338,7 @@ pub fn takeLast(
     };
     const storage = try allocator.alloc(Element, limit);
     errdefer allocator.free(storage);
-    const owner = try Stream(Element).fromProducerWith(allocator, io, capacity, Forward.produce, Context{
+    const owner = try Stream(Element).initProducer(allocator, io, capacity, Forward.produce, Context{
         .input = input,
         .io = io,
         .storage = storage,
@@ -466,7 +395,7 @@ pub fn merge(
             }
         }
     };
-    return Stream(Element).fromProducerWith(allocator, io, capacity, Forward.produce, Context{ .inputs = inputs, .io = io });
+    return Stream(Element).initProducer(allocator, io, capacity, Forward.produce, Context{ .inputs = inputs, .io = io });
 }
 
 const MergeExecution = struct {

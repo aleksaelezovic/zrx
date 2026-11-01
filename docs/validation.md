@@ -3,8 +3,9 @@
 [Documentation index](README.md)
 
 Use exactly Zig **0.17.0**, pinned in [`.zigversion`](../.zigversion) and enforced
-by [the build](../build.zig). The package exports the `zrx` module; its source
-entry point remains [`src/root.zig`](../src/root.zig).
+by [the build](../build.zig). Every public test, example and cross fixture imports
+the same [`zrx` module](../src/root.zig). There is no alternate executor or
+compatibility test surface.
 
 ```sh
 zig version
@@ -14,97 +15,49 @@ zig build test -Doptimize=ReleaseFast
 zig build check
 ```
 
-- `test`: native behavior, compile-fail fixtures, codegen-parser/fixture tests,
-  and executable example coverage. Invalid contracts must fail with their expected
-  diagnostic; unrelated errors or successful compilation fail the check. I/O
-  entry points compile, their actual graphs run with finite files/loopback peers,
-  and the CLI executable receives scripted stdin with exact stdout/stderr checks.
-  [External example tests](../tests/io_examples.zig) import the same composition
-  functions used by the entry points, keeping fixtures/assertions out of examples.
-- `check`: formatting, native tests, cross builds, and scoped codegen comparisons.
-- `declarative-test`: current public API, service/resource contracts, direct
-  regions, producer sharing, signals, merge/reduction, scan, cancellation and I/O.
-- `test-branch` and `test-http`: current public routing and bounded HTTP
-  request-scope tests. They include DI, persistent case state, startup/allocation
-  failures, completion credits, deadlines and finite loopback peers.
-- `lifecycle-test`: forced runtime alias/completion schedules and both
-  producer-await/retirement join orders, using test-local Io observation.
-- `measurement-test`: concurrent raw allocator accounting, fault cleanup and
-  callback/coordinator checkpoint invariants, without performance thresholds.
-- `benchmark-costs` / `benchmark-spans`: opt-in run-allocator and instrumented
-  activity reports, kept separate from uninstrumented `benchmark` timings.
-- `benchmark-phases`: opt-in private coordinator checkpoints, separating
-  preparation, acquisition/initialization, active execution and return cleanup.
-  [Definitions, native data and erasure evidence](measurements/phases.md)
-  distinguish elapsed intervals from CPU time.
-- `fmt`, `cross`, `codegen`: focused build steps using the same configuration.
-- `example`: finite noninteractive demos; the [index](README.md#executable-examples)
-  lists focused commands. `io-examples` builds/installs live-I/O executables
-  without running them or waiting for external input. `http-example` separately
-  builds/installs the opt-in echo server; `example-cases` runs terminal routing.
+- `test`: current behavior, expected-diagnostic compile failures, finite example
+  entry points and actual I/O graphs using temporary files/finite loopback peers.
+- `declarative-test`: public dependency/resource, graph, operator, scan, branch
+  and HTTP suites.
+- `lifecycle-test`: forced alias/completion schedules and producer join/retirement
+  orders. The small transport shim exposes no declaration operators/executor.
+- `measurement-test`: concurrent allocator accounting, failure cleanup and
+  callback/coordinator checkpoint invariants, with no timing thresholds.
+- `test-branch`, `test-http`: focused routing and HTTP scopes, including startup/
+  allocation failure, completion credits, deadlines, cancellation and cleanup.
+- `example`: finite public demos. Each also has an `example-NAME` step.
+  `io-examples` and `http-example` build/install opt-in executables without
+  starting live services.
+- `fmt`, `cross`: focused formatting and current-API object builds.
+- `check`: formatting, all native tests and cross builds.
 
-Native coverage includes ordering, coercions/type transitions, single/tuple
-equivalence, errors-as-data, fail-fast boundaries, caller ownership, graph
-preparation/startup failure, cancellation/join order, sharing/backpressure,
-retention, batching, merge, and signal coherence/completion. Private transport/
-cursor helpers preserve low-level tests without re-exposing retired public
-ownership APIs. Neither tests nor comptime checks prove arbitrary callback
-purity, termination, lifetime safety, or thread safety.
+The [diagnostic catalog](../tests/contracts.zig) requires the intended error,
+not merely any compilation failure. [Test suites](../tests/README.md) cover
+ordinary argument coercions, tuple composition, errors-as-data, fail-fast callback
+boundaries, borrowed referents, sharing, prefix retirement, retention, batching,
+signal coherence, and join-before-release behavior. Tests and comptime checks do
+not prove arbitrary callback purity, termination, lifetime safety or thread safety.
 
-Current public streaming accumulation tests cover rerun/reset, injected reducer
-requirements, managed lifetimes, ordinary suffix arguments, exclusive lowering,
-sharing/prefix retirement, boxed error data, held state and source failure.
-The original scan fixtures remain private regression evidence for shallow
-snapshots, bounded slow-reader delivery and cancellation. The migrated two-pipe
-transfer monitor has external integration tests and an executable smoke run.
+## Cross-target scope
 
-Line-I/O coverage includes framing across short reads, record ownership,
-resource acquisition/cleanup, startup/allocation failures, write failure,
-exclusive file creation, rerun, and cancellation of a blocked TCP read.
-
-## Cross-target and codegen scope
-
-The single [catalog](../tests/codegen/catalog.zig) covers Linux x86-64/ARM64,
+One [target/fixture catalog](../tests/targets.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly. Exported
-runtime-input fixtures actually instantiate APIs, including graph execution.
-Scan/hold/sampling are covered as graph cross-builds, not direct-loop codegen
-equality.
-OS-backed line I/O is hosted-only (five targets); the catalog records that
-restriction. Inline line-value composition is checked on all six targets.
-Current branch graphs compile on all six; HTTP graphs compile on the five
-hosted targets. Their entries import the current public module, not a legacy facade.
-Object compilation exercises target code/object writers; it is **not foreign
-runtime execution**, support for all Zig targets, or a graph benchmark.
+runtime-input fixtures instantiate current declarations, resources, producers,
+signals, scan, branching, bounds/retention/batching, line I/O and HTTP.
+Queue prefixes and whole-item vectors are also instantiated.
+OS-backed I/O fixtures are restricted to the five hosted targets.
 
-Selected direct imperative functions are compared with grouped/separate
-composition-kernel fixtures using pinned LLVM ReleaseFast output:
+These checks emit objects. They do **not** execute foreign targets, establish
+support for every Zig target, or assert imperative/declarative body equality.
+There is no automatic codegen-comparison step. The pre-declaration executor and
+its comparison fixtures were deleted, not retargeted or weakened to pass.
+[Native inspection fixtures](../tests/phase_erasure.zig) exercise actual current
+calls but do not establish an optimizer guarantee.
 
-- Resolve aliases and narrowly normalize function-scoped LLVM IR.
-- Compare selected AArch64 loop assembly without erasing instructions,
-  registers, operands, or order.
-- Keep behavior/cross-only cases explicit, rather than weakening comparisons
-  until they pass.
+Normal compiler optimization may inline/fuse/vectorize when types, aliasing and
+callback semantics permit. Whole-item vector callbacks work; no specialized SIMD
+mode or universal zero-overhead guarantee is implied.
 
-The infallible `each`/`fold` sum loops have scoped assembly comparisons on the
-three catalog AArch64 targets. Optional recovery after `keepIf`, fallible
-`tryPipe` flow, and `tryFold` are behavior/cross-only where IR differs.
-Native fixture comparisons also exercise short inputs, tails, wrapping arithmetic,
-and explicit vectors. Matching selected bodies is not whole-binary equality,
-a universal zero-cost/inlining proof, or a signal/run performance claim.
-
-The eager kernel used by those original fixtures is now an internal regression
-facade, not an exported API. Its comparisons were not weakened or reinterpreted
-as checks of the new executor. The same catalog also includes current public
-declarative finite/producer fixtures; those have object-only coverage, not
-body-equality claims. Current native tests and executable examples import the
-actual `zrx` module; archived lifecycle fixtures use explicit private facades.
-
-Ordinary optimization may inline/fuse/auto-vectorize when callback semantics,
-aliasing, and targets permit. Explicit `@Vector` callbacks already work with
-whole-value `map`; there is no specialized SIMD mode or guaranteed vector width.
-The codegen checker depends on the pinned LLVM backend; a future backend change
-requires revisiting that check, not weakening semantic tests.
-
-[GitHub Actions](../.github/workflows/validation.yml) is a thin Linux wrapper
-around `zig build check` and ReleaseFast native tests. Local validation does not
-require CI, an emulator, or duplicated target matrices.
+[GitHub Actions](../.github/workflows/validation.yml) runs `zig build check` and
+ReleaseFast native tests on Linux. Local validation does not require CI, emulators,
+or another target matrix.
