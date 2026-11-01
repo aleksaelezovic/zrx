@@ -7,6 +7,7 @@ services, owns resource lifetimes, and executes selected terminal effects.
 
 - [Execution, dependencies, sharing, and ownership](execution.md)
 - [Signal lifecycle](state.md)
+- [Retries and application-owned idempotency](retries.md)
 - [Toolchain and validation scope](validation.md)
 - [Performance investigation roadmap](performance.md)
 - [Bounded line I/O](../src/io/README.md)
@@ -22,6 +23,7 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Finite inputs, producers, deferred reduction | [`fromSlice`, `fromValue`, `Stream`, `fold`](../src/data/declarations.zig) |
 | Borrowed consuming inputs | [`fromIterator`](../src/compose.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Accumulated updates | [`scan`](../src/ops/scan.zig) |
+| Per-item retry boundaries | [`retryPipe`, `RetryDecision`, `RetryOptions`](../src/ops/retryPipe.zig) |
 | Exclusive cases | [`branch`, `when`, `otherwise`](../src/ops/branch.zig) |
 | Resource recipes and nominal roles | [`resource`, `deriveResource`](../src/internal/world/resources.zig) |
 | Dependency planning | [Typed run-local service storage](../src/internal/world/dependencies.zig) |
@@ -50,6 +52,8 @@ smoke-check their entry points and import reusable compositions.
 - [Transfer monitor](../examples/scan.zig): scan updates, held progress and
   independently sampled reports, with distinct injected writer roles.
   `zig build example-scan` runs it separately.
+- [Checkout retries](../examples/checkout.zig): typed policies and application-owned
+  duplicate safety, without a persistence framework. `zig build example-checkout`.
 - [Path-owned file copy](../examples/io_file.zig): `zig build io-examples`, then
   `zig-out/bin/copy-lines INPUT OUTPUT`. Output must not exist. No live waits
   occur in default checks.
@@ -57,10 +61,3 @@ smoke-check their entry points and import reusable compositions.
   terminate, so the branch is itself a terminal root.
 - [HTTP echo server](../examples/http_echo.zig): `zig build http-example` builds
   the opt-in executable. Default checks run finite loopback tests, not a live server.
-
-## Planned work
-
-- [Approved retry direction](proposals/durable_workflows.md): not implemented;
-  application-owned idempotency, explicit retry decisions and run-supplied Io.
-- [Performance experiments](performance.md): opt-in tools and one-mechanism-at-a-time
-  investigation, with no default timing thresholds.

@@ -111,6 +111,8 @@ fn resultItem(comptime operation: Operation, comptime Source: type, comptime fun
 
 fn Transform(comptime operation: Operation, comptime fns: anytype) type {
     return struct {
+        pub const transform_tag = Tag;
+        pub const callback_operation = operation;
         pub fn Output(comptime Source: type) type {
             requireSource(Source);
             if (kind.isSignal(Source) and operation != .map)

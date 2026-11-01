@@ -11,6 +11,7 @@ const transport = @import("../runtime/streams.zig");
 const regions = @import("regions.zig");
 const branching = @import("../../ops/branch.zig");
 const branch_plan = @import("../branch.zig");
+const configuration = @import("configuration.zig");
 const Key = struct { address: usize, type_id: usize };
 const Allocation = struct { ptr: *anyopaque, free: *const fn (std.mem.Allocator, *anyopaque) void };
 
@@ -246,6 +247,7 @@ fn Plan(comptime Input: type, comptime Env: type) type {
     };
 }
 fn makePlan(scope: anytype, input: anytype) anyerror!Plan(@TypeOf(input), @typeInfo(@TypeOf(scope.env)).pointer.child) {
+    try configuration.validate(input);
     if (comptime regions.expandable(@TypeOf(input))) {
         if (!scope.shared(regions.base(input)))
             return .{ .upstream = try makePlan(scope, regions.expand(input)) };
@@ -342,6 +344,7 @@ pub fn Flow(comptime F: type, comptime Env: type) type {
     };
 }
 pub fn flow(scope: anytype, definition: anytype) !Flow(@TypeOf(definition), @typeInfo(@TypeOf(scope.env)).pointer.child) {
+    try configuration.validate(definition);
     if (comptime @hasDecl(@TypeOf(definition), "branch_terminal") and @TypeOf(definition).branch_terminal)
         return .{ .source = try scope.lower(definition.source), .cases = boundCases(scope, definition) };
     if (comptime regions.expandable(@FieldType(@TypeOf(definition), "source"))) {

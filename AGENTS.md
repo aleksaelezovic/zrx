@@ -22,7 +22,7 @@ to this file; edit `AGENTS.md`, not copies.
 - Explicit execution-boundary operators, worker/queue primitives, writable refs,
   multi-parent state, time windows and dynamic subscriptions are future work.
   Do not introduce them as incidental helpers.
-- Durability, idempotency, retries and crash recovery require separate designs;
+- Durability, idempotency and crash recovery require separate designs;
   a repeatable run does not imply exactly-once effects or durable recovery.
 - Formatting/linting/canonicalization tools are separate future work.
 
@@ -83,6 +83,14 @@ to this file; edit `AGENTS.md`, not copies.
 - Stream callback outer errors fail run. Optional/error-valued input items
   remain data until callbacks interpret them. Signal map error/optional results
   remain current-state data. No automatic rollback or intermediate destruction.
+- `retryPipe` is a cold per-item map/each/tap attempt boundary. Each retry uses
+  the original shallow item; stop/exhaustion emits the last operation error as
+  E!T data. Function policies return RetryDecision with ordinary error/count
+  suffixes and normal injected prefixes; fixed policy zero attempts fails cold.
+  Use run-supplied Io for delays and poll zero-delay retries. Cancellation never
+  reaches policy/item data; source/downstream errors still fail run. Stateful,
+  filtering, branching and terminal operators stay outside attempts. No automatic
+  idempotency, rollback, checkpointing or durable recovery is implied.
 - Ordinary synchronous stages form typed direct-call regions. Naming an
   exclusive stage by pointer must not introduce a queue/worker. Resolve runtime
   aliasing before processing; do not add per-stage hot-loop interpreters.

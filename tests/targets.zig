@@ -12,6 +12,7 @@ const Fixture = struct { name: []const u8, path: []const u8, requires_hosted: bo
 pub const fixtures = [_]Fixture{
     .{ .name = "declarations", .path = "tests/cross/declarative.zig" },
     .{ .name = "scan", .path = "tests/cross/declarative_scan.zig" },
+    .{ .name = "retry", .path = "tests/cross/retry.zig" },
     .{ .name = "operators", .path = "tests/cross/operators.zig" },
     .{ .name = "branch", .path = "tests/cross/branch.zig" },
     .{ .name = "line-io", .path = "tests/cross/declarative_io.zig", .requires_hosted = true },

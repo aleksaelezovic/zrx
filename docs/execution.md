@@ -119,6 +119,12 @@ data; signal-map optional/error results remain state. `fold` is a run-executed
 left reduction starting from a shallow seed copy and stopping on reducer error.
 There is no separate eager or `try` executor.
 
+[`retryPipe`](retries.md) explicitly captures errors from its map/tap attempt:
+it retries the original item using run-supplied Io and emits its final `E!T`
+outcome as data. Cancellation and errors outside that boundary still fail run.
+It adds no implicit worker, does not reset stateful stream operators and supplies
+no idempotency or durability guarantee.
+
 [`scan`](../src/ops/scan.zig) instead emits every accumulated value, without seed
 or an extra final result. Its pure reducer uses the same injected prefix and
 ordinary state/item suffix, but cannot return an outer error union. Each run

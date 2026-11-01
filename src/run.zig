@@ -7,6 +7,7 @@ const regions = @import("internal/execution/regions.zig");
 const binding = @import("internal/execution/bind.zig");
 const graph = @import("internal/graph_run.zig");
 const observation = @import("internal/execution/observation.zig");
+const configuration = @import("internal/execution/configuration.zig");
 
 /// Inject exact-type values or resource recipes. Allocator and Io must be supplied
 /// directly. Only selected terminal roots execute. Errors fail the run without
@@ -20,6 +21,7 @@ pub fn runObserved(bindings: anytype, flows: anytype, observer: anytype) anyerro
     const Env = dependencies.World(@TypeOf(bindings), @TypeOf(flows));
     var env: Env = .init(bindings);
     defer env.stop();
+    inline for (flows) |flow| try configuration.validate(flow);
     const types = @typeInfo(@TypeOf(flows)).@"struct".field_types;
     const direct = comptime block: {
         for (types) |F| {

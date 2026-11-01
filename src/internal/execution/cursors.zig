@@ -4,7 +4,7 @@ const std = @import("std");
 const decl = @import("../../data/declarations.zig");
 const seq = @import("../../data/sequences.zig");
 const cb = @import("../callbacks.zig");
-const composition = @import("../composition.zig");
+const transforms = @import("../transforms.zig");
 
 pub fn finite(comptime Input: type) bool {
     const T = decl.Child(Input);
@@ -102,17 +102,22 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
                     self.state = cb.invoke(T.callback, self.env, .{ self.state, value });
                     return @as(?Item, self.state);
                 }
+                if (T.node_kind == .retry) {
+                    const value = (try self.input.next()) orelse {
+                        self.done = true;
+                        return null;
+                    };
+                    var result: Item = undefined;
+                    try T.retry_meta.run(self.source.operators, self.source.policy, self.env, value, &result);
+                    return @as(?Item, result);
+                }
                 while (try self.input.next()) |value| {
                     if (T.node_kind == .map)
-                        return @as(?Item, try compose(T.functions, self.env, value, 0));
+                        return @as(?Item, try transforms.map(T.functions, self.env, value, 0));
                     if (T.node_kind == .filter) {
                         if (try predicates(T.functions, self.env, value)) return @as(?Item, value);
                     } else if (T.node_kind == .tap) {
-                        inline for (T.functions) |effect| {
-                            const result = cb.invoke(effect, self.env, .{value});
-                            if (@typeInfo(@TypeOf(result)) == .error_union) try result;
-                        }
-                        return @as(?Item, value);
+                        return @as(?Item, try transforms.tap(T.functions, self.env, value));
                     }
                 }
                 self.done = true;
@@ -138,18 +143,6 @@ pub fn init(input: anytype, env: anytype) Cursor(@TypeOf(input), @typeInfo(@Type
         .input = init(value.source, env),
         .state = if (comptime @hasDecl(T, "node_kind") and T.node_kind == .scan) value.seed else {},
     };
-}
-
-fn Output(comptime functions: anytype, comptime Input: type, comptime index: usize) type {
-    cb.validate(functions[index], &.{Input});
-    const Next = composition.Payload(cb.Info(functions[index], 1).Return);
-    return if (index + 1 == functions.len) Next else Output(functions, Next, index + 1);
-}
-
-fn compose(comptime functions: anytype, env: anytype, value: anytype, comptime index: usize) anyerror!Output(functions, @TypeOf(value), index) {
-    const result = cb.invoke(functions[index], env, .{value});
-    const next = if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
-    return if (index + 1 == functions.len) next else try compose(functions, env, next, index + 1);
 }
 
 fn predicates(comptime functions: anytype, env: anytype, value: anytype) !bool {

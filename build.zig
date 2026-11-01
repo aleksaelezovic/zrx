@@ -23,8 +23,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(measurement);
     test_step.dependOn(examples);
 
-    var demos: [5]*std.Build.Step.Compile = undefined;
-    inline for (.{ "resources", "streams", "signals", "scan", "cases" }, 0..) |name, i| {
+    var demos: [6]*std.Build.Step.Compile = undefined;
+    inline for (.{ "resources", "streams", "signals", "scan", "cases", "checkout" }, 0..) |name, i| {
         const exe = b.addExecutable(.{
             .name = name,
             .root_module = b.createModule(.{
@@ -44,6 +44,8 @@ pub fn build(b: *std.Build) void {
             run.expectStdErrEqual("Signal state: 21\nSignal state: 24\nSignal state: 19\n");
         if (comptime std.mem.eql(u8, name, "cases"))
             run.expectStdOutEqual("negative=2 nonnegative=3\n");
+        if (comptime std.mem.eql(u8, name, "checkout"))
+            run.expectStdErrEqual("Checkout 42: shipment 99; payment calls=3 charges=1 order calls=3 orders=1 shipping calls=3 shipments=1\n");
         examples.dependOn(&run.step);
         b.step("example-" ++ name, "Run the " ++ name ++ " example").dependOn(&run.step);
     }
@@ -73,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .{ "resources", "tests/world.zig" },
         .{ "graphs", "tests/declarative_graphs.zig" },
         .{ "scan", "tests/declarative_scan.zig" },
+        .{ "retry", "tests/retryPipe.zig" },
         .{ "scan-example", "tests/scan_example.zig" },
         .{ "operators", "tests/operators.zig" },
         .{ "branch", "tests/branch.zig" },
@@ -90,6 +93,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "world_example", .module = demos[0].root_module },
                 .{ .name = "scan_example", .module = demos[3].root_module },
                 .{ .name = "cases_example", .module = demos[4].root_module },
+                .{ .name = "checkout_example", .module = demos[5].root_module },
                 .{ .name = "io_example", .module = file.root_module },
                 .{ .name = "http_echo", .module = http.root_module },
                 .{ .name = "runtime", .module = transport },
@@ -109,7 +113,7 @@ pub fn build(b: *std.Build) void {
             public_tests.dependOn(&run.step);
             if (comptime std.mem.eql(u8, item[0], "lifecycle")) lifecycle.dependOn(&run.step);
         }
-        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http"))
+        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http") or std.mem.eql(u8, item[0], "retry"))
             b.step("test-" ++ item[0], "Run the " ++ item[0] ++ " suite").dependOn(&run.step);
     }
     inline for (contracts.failures) |failure| {

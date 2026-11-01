@@ -8,6 +8,8 @@ All public behavior/contract suites import the one `zrx` package module:
   retirement, allocation/startup failure, cancellation and actual file output.
 - `declarative_scan.zig` and `scan_example.zig`: recurrence, injected requirements,
   snapshots, prefixes, errors-as-data, held state and the two-pipe monitor.
+- `retryPipe.zig`: serial attempts, typed policy services, exact delay/count rules,
+  error-valued outcomes, cancellation, cold validation, sharing and checkout effects.
 - `operators.zig`: bounds, suffix retention, collection/batching success/failure,
   allocation cleanup, queue binding, whole-item vectors, line framing and TCP prefixes.
 - `branch.zig`: persistent case substreams, DI, retirement, state, all-terminal

@@ -18,7 +18,7 @@ pub fn inlineNode(comptime T: type) bool {
     if (signals.isSignal(T)) return false;
     if (@hasDecl(T, "node_kind"))
         return T.node_kind == .map or T.node_kind == .filter or T.node_kind == .tap or T.node_kind == .fold or T.node_kind == .scan or
-            T.node_kind == .take or T.node_kind == .bounded;
+            T.node_kind == .take or T.node_kind == .bounded or T.node_kind == .retry;
     return false;
 }
 
@@ -50,9 +50,12 @@ pub fn Rebased(comptime Original: type, comptime Boundary: type) type {
         pub const node_kind = Original.node_kind;
         pub const functions = if (@hasDecl(Original, "functions")) Original.functions else .{};
         pub const callback = if (@hasDecl(Original, "callback")) Original.callback else {};
+        pub const retry_meta = if (@hasDecl(Original, "retry_meta")) Original.retry_meta else void;
         source: Source,
         seed: if (@hasField(Original, "seed")) @FieldType(Original, "seed") else void,
         limit: usize,
+        operators: if (@hasField(Original, "operators")) @FieldType(Original, "operators") else void,
+        policy: if (@hasField(Original, "policy")) @FieldType(Original, "policy") else void,
     };
 }
 
@@ -62,6 +65,8 @@ pub fn rebase(original: anytype, boundary: anytype) Rebased(@TypeOf(original), @
         .source = rebase(original.source, boundary),
         .seed = if (comptime @hasField(@TypeOf(original), "seed")) original.seed else {},
         .limit = if (comptime @hasField(@TypeOf(original), "limit")) original.limit else 0,
+        .operators = if (comptime @hasField(@TypeOf(original), "operators")) original.operators else {},
+        .policy = if (comptime @hasField(@TypeOf(original), "policy")) original.policy else {},
     };
 }
 

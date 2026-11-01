@@ -25,6 +25,8 @@ zig build check
   callback/coordinator checkpoint invariants, with no timing thresholds.
 - `test-branch`, `test-http`: focused routing and HTTP scopes, including startup/
   allocation failure, completion credits, deadlines, cancellation and cleanup.
+- `test-retry`: retry policies/DI, exact waits, error-valued outcomes, cancellation,
+  shared execution, cold validation and the executable checkout composition.
 - `example`: finite public demos. Each also has an `example-NAME` step.
   `io-examples` and `http-example` build/install opt-in executables without
   starting live services.
@@ -43,7 +45,7 @@ not prove arbitrary callback purity, termination, lifetime safety or thread safe
 One [target/fixture catalog](../tests/targets.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly. Exported
 runtime-input fixtures instantiate current declarations, resources, producers,
-signals, scan, branching, bounds/retention/batching, line I/O and HTTP.
+signals, scan, retries, branching, bounds/retention/batching, line I/O and HTTP.
 Queue prefixes and whole-item vectors are also instantiated.
 OS-backed I/O fixtures are restricted to the five hosted targets.
 

@@ -2,6 +2,9 @@
 //! See docs/README.md for guides and executable examples.
 
 pub const pipe = @import("compose.zig").pipe;
+pub const retryPipe = @import("ops/retryPipe.zig").retryPipe;
+pub const RetryDecision = @import("ops/retryPipe.zig").RetryDecision;
+pub const RetryOptions = @import("ops/retryPipe.zig").RetryOptions;
 pub const run = @import("run.zig").run;
 
 pub const resource = @import("internal/world/resources.zig").resource;
