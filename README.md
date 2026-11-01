@@ -25,7 +25,8 @@ zig build example
 ```
 
 See the **[documentation index](docs/README.md)** for contracts, lifecycle,
-and the opt-in [file program](examples/io_file.zig).
+and the opt-in [file program](examples/io_file.zig). Larger, independently built
+applications follow the [standalone app conventions](examples/apps/README.md).
 
 ## Toolchain and checks
 

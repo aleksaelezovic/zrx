@@ -180,6 +180,13 @@ to this file; edit `AGENTS.md`, not copies.
   Private transport tests may inspect join/retirement schedules without exposing
   another declaration surface. Preserve current lifecycle/fault coverage.
   Compile-fail tests must match the intended diagnostic, not just any failure.
+- Keep delivery-receipt assertions and forced internal schedules in private
+  lifecycle tests. Public behavior tests assert results, errors and lifetimes,
+  not private receipt fields. Error acceptance/retirement is first-decision-wins.
+- Small examples remain library-built API demonstrations. Real applications
+  belong in `examples/apps/` as independent Zig projects using the local zrx
+  package. App-only dependencies stay out of the library manifest/build.
+  Follow `examples/apps/README.md`; add apps/CI integration only when authorized.
 - Maintain one target/case catalog. Export runtime-input fixtures that instantiate
   actual APIs. Foreign object compilation is not foreign execution.
 - Cross compilation and runtime-input inspection are not equality/performance

@@ -22,7 +22,6 @@ pub fn Router(comptime Item: type, comptime Cases: type) type {
         pub fn CaseItem(comptime index: usize) type {
             return Fields[index].Input;
         }
-        pub const PendingItem = Pending;
         io: std.Io,
         input: *streams.Stream(Item).Reader,
         cases: Cases,
@@ -155,7 +154,7 @@ pub fn Router(comptime Item: type, comptime Cases: type) type {
         pub fn retire(self: *Self, index: usize) void {
             self.mutex.lockUncancelable(self.io);
             self.active[index] = false;
-            if (self.waiting_case == index) self.receipt.wake();
+            if (self.waiting_case == index) self.receipt.retire();
             var any = false;
             for (self.active) |active| any = any or active;
             self.mutex.unlock(self.io);

@@ -12,24 +12,29 @@ pub const Receipt = struct {
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Event = .unset,
     generation: usize = 0,
-    handled: bool = false,
+    decision: enum { pending, accepted, retired } = .pending,
 
     pub fn begin(self: *@This()) Token {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         self.generation += 1;
-        self.handled = false;
+        self.decision = .pending;
         self.ready.reset();
         return .{ .receipt = self, .generation = self.generation };
     }
-    pub fn wake(self: *@This()) void {
+    /// Seal an unaccepted delivery before waking its waiter. A late callback
+    /// must not turn an already-retired error into a handled one.
+    pub fn retire(self: *@This()) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.decision == .pending) self.decision = .retired;
         self.ready.set(self.io);
     }
     pub fn wait(self: *@This()) std.Io.Cancelable!bool {
         try self.ready.wait(self.io);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return self.handled;
+        return self.decision == .accepted;
     }
 };
 pub const Token = struct {
@@ -39,8 +44,8 @@ pub const Token = struct {
         const receipt = self.receipt;
         receipt.mutex.lockUncancelable(receipt.io);
         defer receipt.mutex.unlock(receipt.io);
-        if (receipt.generation == self.generation) {
-            receipt.handled = true;
+        if (receipt.generation == self.generation and receipt.decision == .pending) {
+            receipt.decision = .accepted;
             receipt.ready.set(receipt.io);
         }
     }

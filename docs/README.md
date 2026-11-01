@@ -66,3 +66,10 @@ smoke-check their entry points and import reusable compositions.
   terminate, so the branch is itself a terminal root.
 - [HTTP echo server](../examples/http_echo.zig): `zig build http-example` builds
   the opt-in executable. Default checks run finite loopback tests, not a live server.
+
+## Standalone applications
+
+[App project and testing conventions](../examples/apps/README.md) define the
+separate `examples/apps/` area. It currently has no implemented apps. Future apps
+own their dependencies and finite simulations; the library build does not build
+them or resolve their app-only dependencies.

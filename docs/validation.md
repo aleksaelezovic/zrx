@@ -20,7 +20,8 @@ zig build check
 - `declarative-test`: public dependency/resource, graph, operator, scan, branch
   and HTTP suites.
 - `lifecycle-test`: forced alias/completion schedules and producer join/retirement
-  orders. The small transport shim exposes no declaration operators/executor.
+  orders, plus blocked reporting/cancellation and join-before-release checks.
+  The small transport shim exposes no declaration operators/executor.
 - `measurement-test`: concurrent allocator accounting, failure cleanup and
   callback/coordinator checkpoint invariants, with no timing thresholds.
 - `test-branch`, `test-http`: focused routing and HTTP scopes, including startup/
@@ -30,11 +31,17 @@ zig build check
 - `test-errors`: selective recovery, persistent error lanes, shared/merge/sample
   transport, retirement-before-acceptance, reporting failures, allocation cleanup,
   stateful boundaries, and the stdout/stderr program with swapped file sinks.
+- `test-error-lifecycle`: private forced receipt/dispatcher schedules, including
+  late acknowledgement after retirement, stale generations, unrelated lane
+  retirement and cancellation while waiting for error acceptance.
 - `example`: finite public demos. Each also has an `example-NAME` step.
   `io-examples` and `http-example` build/install opt-in executables without
   starting live services.
 - `fmt`, `cross`: focused formatting and current-API object builds.
 - `check`: formatting, all native tests and cross builds.
+
+Future [standalone apps](../examples/apps/README.md) have separate project-local
+checks and dependencies. They are not part of these library build/CI steps.
 
 The [diagnostic catalog](../tests/contracts.zig) requires the intended error,
 not merely any compilation failure. [Test suites](../tests/README.md) cover

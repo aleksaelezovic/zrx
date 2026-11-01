@@ -48,7 +48,10 @@ preserved; no order between stdout and stderr is promised.
 
 An error lane accepts responsibility at a callback or terminal, not when a
 report merely enters its queue. If a selected lane retires before acceptance,
-the original error remains unhandled. Raw Failure records cannot be silently
+the original error remains unhandled, even if a late/in-flight callback tries to
+acknowledge it afterward. Acceptance and retirement use a first-decision-wins
+receipt; an unrelated lane's retirement cannot settle that receipt.
+Raw Failure records cannot be silently
 filtered, prefixed, suffix-retained, nested-routed or used as signal state/events:
 first handle them with a map, effect/reduction, or explicit discard.
 Batch/collection terminals accept records into their run-owned storage and

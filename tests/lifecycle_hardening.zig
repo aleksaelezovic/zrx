@@ -291,3 +291,97 @@ test "state failure after observation retirement fails an idle sampler before re
     try std.testing.expect(!probe.sampled.load(.acquire) and !probe.late.load(.acquire));
     try std.testing.expect(probe.released and !probe.early and !probe.live.load(.acquire));
 }
+
+const ErrorSchedule = enum { report_failure, peer_failure, external_cancel };
+const ErrorProbe = struct {
+    schedule: ErrorSchedule,
+    reporter_entered: std.Io.Event = .unset,
+    peer_entered: std.Io.Event = .unset,
+    never: std.Io.Event = .unset,
+    done: std.Io.Event = .unset,
+    live: std.atomic.Value(bool) = .init(false),
+    source_stopped: std.atomic.Value(bool) = .init(false),
+    reporter_stopped: std.atomic.Value(bool) = .init(false),
+    peer_stopped: std.atomic.Value(bool) = .init(false),
+    acquired: usize = 0,
+    released: usize = 0,
+    released_early: bool = false,
+};
+const ErrorOwner = struct { probe: *ErrorProbe };
+fn acquireErrorOwner(probe: *ErrorProbe, _: void) ErrorOwner {
+    probe.acquired += 1;
+    probe.live.store(true, .release);
+    return .{ .probe = probe };
+}
+fn releaseErrorOwner(owner: ErrorOwner) void {
+    const probe = owner.probe;
+    probe.released_early = !probe.source_stopped.load(.acquire) or
+        !probe.reporter_stopped.load(.acquire) or !probe.peer_stopped.load(.acquire);
+    probe.live.store(false, .release);
+    probe.released += 1;
+}
+fn errorInput(owner: ErrorOwner, resource_io: std.Io, output: *zrx.Emitter(u32)) !void {
+    defer owner.probe.source_stopped.store(true, .release);
+    try output.push(0);
+    try owner.probe.never.wait(resource_io);
+}
+fn operationError(_: u32) error{Bad}!u32 {
+    return error.Bad;
+}
+fn reportError(owner: ErrorOwner, resource_io: std.Io, failure: zrx.Failure(error{Bad})) !void {
+    const probe = owner.probe;
+    std.debug.assert(probe.live.load(.acquire) and failure.err == error.Bad);
+    defer probe.reporter_stopped.store(true, .release);
+    probe.reporter_entered.set(resource_io);
+    if (probe.schedule == .report_failure) {
+        try probe.peer_entered.wait(resource_io);
+        return error.ReportFailed;
+    }
+    try probe.never.wait(resource_io);
+}
+fn errorPeer(owner: ErrorOwner, resource_io: std.Io, _: *zrx.Emitter(u32)) !void {
+    const probe = owner.probe;
+    defer probe.peer_stopped.store(true, .release);
+    try probe.reporter_entered.wait(resource_io);
+    probe.peer_entered.set(resource_io);
+    if (probe.schedule == .peer_failure) return error.PeerFailed;
+    try probe.never.wait(resource_io);
+}
+fn executeErrorSchedule(probe: *ErrorProbe) !void {
+    defer probe.done.set(io);
+    const source = zrx.Stream(u32).fromProducer(1, errorInput);
+    const peer_source = zrx.Stream(u32).fromProducer(1, errorPeer);
+    try run(.{ allocator, io, probe, resource({}, acquireErrorOwner, releaseErrorOwner) }, .{
+        pipe(&source, .{ each(operationError), zrx.branch(.{
+            zrx.whenError(error{Bad}, forEach(reportError)), zrx.otherwise(zrx.discard()),
+        }) }),
+        pipe(&peer_source, .{zrx.discard()}),
+    });
+}
+fn errorSchedule(schedule: ErrorSchedule) !void {
+    var probe: ErrorProbe = .{ .schedule = schedule };
+    var task = try io.concurrent(executeErrorSchedule, .{&probe});
+    defer task.cancel(io) catch {};
+    if (schedule == .external_cancel) {
+        // Peer enters only after the reporting callback has accepted the error.
+        // No timing delay or assumption about worker startup order is needed.
+        try probe.peer_entered.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+        try std.testing.expectError(error.Canceled, task.cancel(io));
+    } else {
+        try probe.done.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } });
+        try std.testing.expectError(if (schedule == .report_failure) error.ReportFailed else error.PeerFailed, task.await(io));
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.acquired);
+    try std.testing.expectEqual(@as(usize, 1), probe.released);
+    try std.testing.expect(!probe.released_early and !probe.live.load(.acquire));
+}
+
+test "reporting failure survives cleanup cancellation and joins all resource users" {
+    try errorSchedule(.report_failure);
+}
+test "peer failure cancels a blocked error reporter before releasing its resource" {
+    try errorSchedule(.peer_failure);
+}
+test "external cancellation joins reporting and source users before resource release" {
+    try errorSchedule(.external_cancel);
+}

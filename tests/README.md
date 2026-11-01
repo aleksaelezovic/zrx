@@ -19,9 +19,13 @@ All public behavior/contract suites import the one `zrx` package module:
 - `http.zig`: actual echo graph with finite loopback peers, body framing/limits,
   request completion, routing/drops, cancellation, deadlines and cleanup.
 - `lifecycle_hardening.zig`: runtime-selected aliases, first-result handling and
-  state errors after observation retirement.
+  state errors after observation retirement; reporting/peer failure and external
+  cancellation join resource users before release.
 - `join_retirement.zig`: two forced producer-join schedules through a test-only
   transport shim; no alternative declaration API or executor.
+- `error_lifecycle.zig`: private receipt decisions, stripped terminal data, stale
+  generations and forced dispatcher acceptance/retirement/cancellation schedules.
+  Test-local Io observes exact waits, not elapsed timing.
 - `measurement.zig` and `phase_observation.zig`: concurrency-safe allocator/
   checkpoint tools, current graph failure cleanup and phase ordering.
   `phase_erasure.zig` supplies native runtime-input inspection fixtures.
@@ -34,5 +38,5 @@ foreign execution or imperative codegen equality.
 `zig build test` runs these suites and finite example entry points.
 `zig build check` additionally checks formatting and cross-object builds.
 Use `declarative-test`, `lifecycle-test`, `measurement-test`, `test-branch`,
-`test-errors`, `test-retry` or `test-http` for focused loops. See
+`test-errors`, `test-error-lifecycle`, `test-retry` or `test-http` for focused loops. See
 [validation](../docs/validation.md).

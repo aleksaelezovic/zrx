@@ -236,7 +236,7 @@ test "fallible error sink fails normally and releases its managed reporting reso
             reporter.probe.released += 1;
         }
         fn report(reporter: Reporter, failure: zrx.Failure(E)) error{ReportFailed}!void {
-            std.debug.assert(failure._receipt == null);
+            std.debug.assert(failure.err == error.Bad);
             std.debug.assert(reporter.probe.released == 0);
             reporter.probe.reports += 1;
             return error.ReportFailed;
@@ -288,7 +288,7 @@ test "persistent error lane batches accept reports without per error singleton e
         fn batch(reports: *Reports, items: []const zrx.Failure(E)) void {
             reports.calls += 1;
             reports.count += items.len;
-            for (items) |item| std.debug.assert(item._receipt == null);
+            for (items) |item| std.debug.assert(item.err == error.Bad or item.err == error.Other);
         }
     };
     var reports: Reports = .{};
