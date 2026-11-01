@@ -8,7 +8,7 @@ const signals = @import("../signal_kind.zig");
 // Request-scoped HTTP values must not cross retention/stateful region stages.
 pub fn httpSafe(comptime T: type) bool {
     if (comptime !inlineNode(T)) return true;
-    if (T.node_kind != .map and T.node_kind != .filter and T.node_kind != .tap and T.node_kind != .take)
+    if (T.node_kind != .map and T.node_kind != .filter and T.node_kind != .tap and T.node_kind != .take and T.node_kind != .recover)
         return false;
     return httpSafe(@FieldType(T, "source"));
 }
@@ -18,7 +18,7 @@ pub fn inlineNode(comptime T: type) bool {
     if (signals.isSignal(T)) return false;
     if (@hasDecl(T, "node_kind"))
         return T.node_kind == .map or T.node_kind == .filter or T.node_kind == .tap or T.node_kind == .fold or T.node_kind == .scan or
-            T.node_kind == .take or T.node_kind == .bounded or T.node_kind == .retry;
+            T.node_kind == .take or T.node_kind == .bounded or T.node_kind == .retry or T.node_kind == .recover;
     return false;
 }
 
@@ -50,6 +50,7 @@ pub fn Rebased(comptime Original: type, comptime Boundary: type) type {
         pub const node_kind = Original.node_kind;
         pub const functions = if (@hasDecl(Original, "functions")) Original.functions else .{};
         pub const callback = if (@hasDecl(Original, "callback")) Original.callback else {};
+        pub const ErrorSet = if (@hasDecl(Original, "ErrorSet")) Original.ErrorSet else void;
         pub const retry_meta = if (@hasDecl(Original, "retry_meta")) Original.retry_meta else void;
         source: Source,
         seed: if (@hasField(Original, "seed")) @FieldType(Original, "seed") else void,

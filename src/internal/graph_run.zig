@@ -110,19 +110,20 @@ fn prepareBranch(scope: *Scope, source: anytype, cases: anytype) !*BranchPlan(
             .destroy = Plan.destroy,
             .stop_before_dependents = true,
         },
-        .router = .{ .io = scope.io, .input = input, .cases = cases },
+        .router = .{ .io = scope.io, .input = input, .cases = cases, .receipt = .{ .io = scope.io } },
         .scoped_http = upstream.scoped_http,
     };
     scope.nodes.appendAssumeCapacity(&plan.node);
     inline for (0..cases.len) |i| {
+        const CaseItem = @TypeOf(plan.router).CaseItem(i);
         try scope.reserve();
         const outlet = blk: {
-            const owner = try scope.allocator.create(streams.Stream(Item));
+            const owner = try scope.allocator.create(streams.Stream(CaseItem));
             errdefer scope.allocator.destroy(owner);
             owner.* = try plan.router.outlet(scope.allocator, i);
             errdefer owner.deinit();
             owner.setCompletion(upstream.owner.completionOwner());
-            break :blk try Runtime(Item).create(scope.allocator, owner, 1, .{});
+            break :blk try Runtime(CaseItem).create(scope.allocator, owner, 1, .{});
         };
         outlet.scoped_http = upstream.scoped_http;
         const Retire = struct {
@@ -136,7 +137,7 @@ fn prepareBranch(scope: *Scope, source: anytype, cases: anytype) !*BranchPlan(
         plan.router.active[i] = true;
         scope.nodes.appendAssumeCapacity(&outlet.node);
         // Ownership transferred to the node. Later failures are unwound by Scope.
-        const declaration: branching.Input(Item) = .{ .node = outlet };
+        const declaration: branching.Input(CaseItem) = .{ .node = outlet };
         plan.pipelines[i] = try cases[i].build(declaration);
         plan.constructed += 1;
         if (terminal) {
@@ -563,13 +564,26 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     } else if (comptime branching.isBranch(Definition)) {
         const plan = try prepareBranch(scope, &reference.source, reference.cases);
         const count = @typeInfo(@TypeOf(reference.cases)).@"struct".field_types.len;
-        var readers: [count]*streams.Stream(Element).Reader = undefined;
+        var readers: [count + 1]*streams.Stream(Element).Reader = undefined;
         inline for (0..count) |i| {
             const output = try resolve(scope, &plan.pipelines[i]);
             if (!sameCompletion(plan.router.input.completionOwner(), output.owner.completionOwner()))
                 return error.UnsupportedHttpComposition;
             readers[i] = try output.acquire(scope.allocator);
         }
+        // Pending errors bypass success cases and remain available downstream.
+        try scope.reserve();
+        const pending_runtime = block: {
+            const owner = try scope.allocator.create(streams.Stream(Element));
+            errdefer scope.allocator.destroy(owner);
+            owner.* = try plan.router.pendingOutlet(scope.allocator);
+            errdefer owner.deinit();
+            owner.setCompletion(plan.router.input.completionOwner());
+            break :block try Runtime(Element).create(scope.allocator, owner, 1, .{});
+        };
+        scope.nodes.appendAssumeCapacity(&pending_runtime.node);
+        plan.router.pending = pending_runtime.owner;
+        readers[count] = try pending_runtime.acquire(scope.allocator);
         try scope.reserve();
         const owner = try scope.allocator.create(streams.Stream(Element));
         errdefer scope.allocator.destroy(owner);

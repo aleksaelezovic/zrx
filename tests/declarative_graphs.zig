@@ -293,11 +293,11 @@ test "take zero is cold and successful end flushes batches and retained suffixes
     try std.testing.expectEqualSlices(u32, &.{ 3, 4, 5 }, suffix.items[0..suffix.len]);
 }
 
-test "signal error unions remain state data while callback errors fail stream maps" {
+test "signal map error union results remain state data rather than stream operation failures" {
     const E = error{Bad};
     const Helpers = struct {
-        fn recover(value: E!u32) E!u64 {
-            return @as(u64, try value) * 2;
+        fn derive(value: u32) E!u64 {
+            return if (value == 0) error.Bad else @as(u64, value) * 2;
         }
         fn inspect(state: *State, items: []const (E!u64)) !void {
             try std.testing.expectEqual(@as(usize, 2), items.len);
@@ -306,8 +306,8 @@ test "signal error unions remain state data while callback errors fail stream ma
         }
     };
     var state: State = .{};
-    const source = fromSlice(&[_](E!u32){1});
-    const current = pipe(&source, .{ hold(@as(E!u32, error.Bad)), map(Helpers.recover) });
+    const source = fromSlice(&[_]u32{1});
+    const current = pipe(&source, .{ hold(@as(u32, 0)), map(Helpers.derive) });
     try run(.{ allocator, io, &state }, .{
         pipe(values(&current), .{collectThen(Helpers.inspect)}),
     });

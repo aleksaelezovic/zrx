@@ -3,6 +3,9 @@
 
 pub const pipe = @import("compose.zig").pipe;
 pub const retryPipe = @import("ops/retryPipe.zig").retryPipe;
+pub const recover = @import("ops/recover.zig").recover;
+pub const Failure = @import("data/failures.zig").Failure;
+pub const discard = @import("ops/effects.zig").discard;
 pub const RetryDecision = @import("ops/retryPipe.zig").RetryDecision;
 pub const RetryOptions = @import("ops/retryPipe.zig").RetryOptions;
 pub const run = @import("run.zig").run;
@@ -40,6 +43,7 @@ pub const scan = @import("ops/scan.zig").scan;
 pub const tap = @import("compose.zig").tap;
 pub const branch = @import("ops/branch.zig").branch;
 pub const when = @import("ops/branch.zig").when;
+pub const whenError = @import("ops/branch.zig").whenError;
 pub const otherwise = @import("ops/branch.zig").otherwise;
 pub const maxItems = @import("ops/maxItems.zig").maxItems;
 pub const take = @import("ops/take.zig").take;

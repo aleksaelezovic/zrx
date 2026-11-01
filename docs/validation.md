@@ -25,8 +25,11 @@ zig build check
   callback/coordinator checkpoint invariants, with no timing thresholds.
 - `test-branch`, `test-http`: focused routing and HTTP scopes, including startup/
   allocation failure, completion credits, deadlines, cancellation and cleanup.
-- `test-retry`: retry policies/DI, exact waits, error-valued outcomes, cancellation,
+- `test-retry`: retry policies/DI, exact waits, pending outcomes, cancellation,
   shared execution, cold validation and the executable checkout composition.
+- `test-errors`: selective recovery, persistent error lanes, shared/merge/sample
+  transport, retirement-before-acceptance, reporting failures, allocation cleanup,
+  stateful boundaries, and the stdout/stderr program with swapped file sinks.
 - `example`: finite public demos. Each also has an `example-NAME` step.
   `io-examples` and `http-example` build/install opt-in executables without
   starting live services.
@@ -35,8 +38,8 @@ zig build check
 
 The [diagnostic catalog](../tests/contracts.zig) requires the intended error,
 not merely any compilation failure. [Test suites](../tests/README.md) cover
-ordinary argument coercions, tuple composition, errors-as-data, fail-fast callback
-boundaries, borrowed referents, sharing, prefix retirement, retention, batching,
+ordinary argument coercions, tuple composition, boxed error data, pending operation
+outcomes, borrowed referents, sharing, prefix retirement, retention, batching,
 signal coherence, and join-before-release behavior. Tests and comptime checks do
 not prove arbitrary callback purity, termination, lifetime safety or thread safety.
 
@@ -45,7 +48,7 @@ not prove arbitrary callback purity, termination, lifetime safety or thread safe
 One [target/fixture catalog](../tests/targets.zig) covers Linux x86-64/ARM64,
 macOS ARM64, Windows x86-64/ARM64, and freestanding WebAssembly. Exported
 runtime-input fixtures instantiate current declarations, resources, producers,
-signals, scan, retries, branching, bounds/retention/batching, line I/O and HTTP.
+signals, scan, retries, recovery/error lanes, branching, bounds/retention/batching, line I/O and HTTP.
 Queue prefixes and whole-item vectors are also instantiated.
 OS-backed I/O fixtures are restricted to the five hosted targets.
 

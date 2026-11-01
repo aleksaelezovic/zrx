@@ -174,7 +174,14 @@ pub fn sample(
             var cursor = sequences.cursor(context.input);
             while (true) {
                 try context.io.checkCancel();
-                const event = (try cursor.next()) orelse return;
+                const item = (try cursor.nextOutcome()) orelse return;
+                const event = switch (item) {
+                    .value => |event| event,
+                    .failure => |err| {
+                        try output.pushOutcome(.{ .failure = err });
+                        continue;
+                    },
+                };
                 const snapshot = try context.cell.snapshot();
                 try context.io.checkCancel();
                 try output.push(.{ event, snapshot.value });

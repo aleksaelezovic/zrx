@@ -67,11 +67,7 @@ fn checkoutRetryPolicy(err: CheckoutError, retries: usize) zrx.RetryDecision {
 pub fn checkout(requests: anytype) @TypeOf(retryPipe(requests, .{map(.{ pay, createOrder, ship })}, checkoutRetryPolicy)) {
     return retryPipe(requests, .{map(.{ pay, createOrder, ship })}, checkoutRetryPolicy);
 }
-fn show(store: *Store, outcome: CheckoutError!Shipment) void {
-    const shipment = outcome catch |err| {
-        std.debug.print("Checkout failed: {s}\n", .{@errorName(err)});
-        return;
-    };
+fn show(store: *Store, shipment: Shipment) void {
     std.debug.print("Checkout {d}: shipment {d}; payment calls={d} charges={d} order calls={d} orders={d} shipping calls={d} shipments={d}\n", .{
         shipment.checkout_id, shipment.tracking, store.payment_calls,  store.charges,
         store.order_calls,    store.orders,      store.shipping_calls, store.shipments,

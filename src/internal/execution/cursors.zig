@@ -5,6 +5,7 @@ const decl = @import("../../data/declarations.zig");
 const seq = @import("../../data/sequences.zig");
 const cb = @import("../callbacks.zig");
 const transforms = @import("../transforms.zig");
+const outcomes = @import("../outcomes.zig");
 
 pub fn finite(comptime Input: type) bool {
     const T = decl.Child(Input);
@@ -22,8 +23,11 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
             input: seq.Cursor(Inner),
             env: *Env,
             pub fn next(self: *@This()) anyerror!?T.Item {
+                return outcomes.unwrap(T.Item, try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(T.Item) {
                 try self.env.io().checkCancel();
-                return if (comptime seq.isFallible(Inner)) try self.input.next() else self.input.next();
+                return outcomes.next(T.Item, &self.input);
             }
         };
     }
@@ -33,16 +37,19 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
             env: *Env,
             index: usize = 0,
             pub fn next(self: *@This()) anyerror!?T.Item {
+                return outcomes.unwrap(T.Item, try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(T.Item) {
                 try self.env.io().checkCancel();
                 if (comptime T.node_kind == .slice) {
                     if (self.index == self.source.items.len) return null;
                     const value = self.source.items[self.index];
                     self.index += 1;
-                    return @as(?T.Item, value);
+                    return .{ .value = value };
                 } else {
                     if (self.index != 0) return null;
                     self.index = 1;
-                    return @as(?T.Item, self.source.value);
+                    return .{ .value = self.source.value };
                 }
             }
         };
@@ -53,8 +60,11 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
             input: seq.Cursor(Input),
             env: *Env,
             pub fn next(self: *@This()) anyerror!?seq.Item(Input) {
+                return outcomes.unwrap(seq.Item(Input), try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(seq.Item(Input)) {
                 try self.env.io().checkCancel();
-                return if (comptime seq.isFallible(Input)) try self.input.next() else self.input.next();
+                return outcomes.next(seq.Item(Input), &self.input);
             }
         };
     }
@@ -70,6 +80,9 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
         done: bool = false,
         state: if (scanned) Item else void,
         pub fn next(self: *@This()) anyerror!?Item {
+            return outcomes.unwrap(Item, try self.nextOutcome());
+        }
+        pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(Item) {
             if (self.done) return null;
             if (comptime @hasDecl(T, "node_kind")) {
                 if (T.node_kind == .take or T.node_kind == .bounded) {
@@ -77,47 +90,84 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
                         self.done = true;
                         return null;
                     }
-                    const value = (try self.input.next()) orelse {
+                    const item = (try self.input.nextOutcome()) orelse {
                         self.done = true;
                         return null;
                     };
-                    if (T.node_kind == .bounded and self.count == self.source.limit) return error.TooManyItems;
+                    const value = switch (item) {
+                        .failure => |err| return .{ .failure = err },
+                        .value => |value| value,
+                    };
+                    if (T.node_kind == .bounded and self.count == self.source.limit) {
+                        self.done = true;
+                        return .{ .failure = error.TooManyItems };
+                    }
                     self.count += 1;
-                    return @as(?Item, value);
+                    return .{ .value = value };
                 }
                 if (T.node_kind == .fold) {
                     var state = self.source.seed;
-                    while (try self.input.next()) |value| {
+                    while (try self.input.nextOutcome()) |item| {
+                        const value = switch (item) {
+                            .failure => |err| {
+                                self.done = true;
+                                return .{ .failure = err };
+                            },
+                            .value => |value| value,
+                        };
                         const result = cb.invoke(T.callback, self.env, .{ state, value });
-                        state = if (@typeInfo(@TypeOf(result)) == .error_union) try result else result;
+                        state = if (@typeInfo(@TypeOf(result)) == .error_union) result catch |err| {
+                            self.done = true;
+                            return try outcomes.failed(Item, err);
+                        } else result;
                     }
                     self.done = true;
-                    return @as(?Item, state);
+                    return .{ .value = state };
                 }
                 if (T.node_kind == .scan) {
-                    const value = (try self.input.next()) orelse {
+                    const item = (try self.input.nextOutcome()) orelse {
                         self.done = true;
                         return null;
+                    };
+                    const value = switch (item) {
+                        .failure => |err| return .{ .failure = err },
+                        .value => |value| value,
                     };
                     self.state = cb.invoke(T.callback, self.env, .{ self.state, value });
-                    return @as(?Item, self.state);
+                    return .{ .value = self.state };
                 }
                 if (T.node_kind == .retry) {
-                    const value = (try self.input.next()) orelse {
+                    const item = (try self.input.nextOutcome()) orelse {
                         self.done = true;
                         return null;
                     };
-                    var result: Item = undefined;
+                    const value = switch (item) {
+                        .failure => |err| return .{ .failure = err },
+                        .value => |value| value,
+                    };
+                    var result: outcomes.Outcome(Item) = undefined;
                     try T.retry_meta.run(self.source.operators, self.source.policy, self.env, value, &result);
-                    return @as(?Item, result);
+                    return result;
                 }
-                while (try self.input.next()) |value| {
+                while (try self.input.nextOutcome()) |item| {
+                    const value = switch (item) {
+                        .failure => |err| {
+                            if (comptime T.node_kind == .recover) {
+                                if (outcomes.matches(T.ErrorSet, err))
+                                    return .{ .value = cb.invoke(T.callback, self.env, .{@as(T.ErrorSet, @errorCast(err))}) };
+                            }
+                            return .{ .failure = err };
+                        },
+                        .value => |value| value,
+                    };
+                    if (comptime T.node_kind == .recover) return .{ .value = value };
                     if (T.node_kind == .map)
-                        return @as(?Item, try transforms.map(T.functions, self.env, value, 0));
+                        return .{ .value = transforms.map(T.functions, self.env, value, 0) catch |err| return try outcomes.failed(Item, err) };
                     if (T.node_kind == .filter) {
-                        if (try predicates(T.functions, self.env, value)) return @as(?Item, value);
+                        if (predicates(T.functions, self.env, value) catch |err| return try outcomes.failed(Item, err))
+                            return .{ .value = value };
                     } else if (T.node_kind == .tap) {
-                        return @as(?Item, try transforms.tap(T.functions, self.env, value));
+                        return .{ .value = transforms.tap(T.functions, self.env, value) catch |err| return try outcomes.failed(Item, err) };
                     }
                 }
                 self.done = true;

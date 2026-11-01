@@ -1,4 +1,4 @@
-//! Current retry API with runtime configuration and typed result-valued items.
+//! Current retry API with runtime configuration and pending operation errors.
 const std = @import("std");
 const zrx = @import("zrx");
 const E = error{Failed};
@@ -9,8 +9,8 @@ fn step(item: u32) E!u64 {
 fn double(item: u64) u64 {
     return item *% 2;
 }
-fn save(output: *u64, outcome: E!u64) void {
-    output.* +%= outcome catch 0;
+fn save(output: *u64, value: u64) void {
+    output.* +%= value;
 }
 fn decide(budget: Budget, _: E, retries: usize) zrx.RetryDecision {
     return if (retries < budget.retries) .{ .retry_after_ms = budget.delay } else .stop;

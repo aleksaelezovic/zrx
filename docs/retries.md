@@ -29,11 +29,11 @@ terminals belong outside this boundary. They are rejected inside it, rather
 than being reinterpreted as singleton pipelines. This first milestone does not
 support request-scoped HTTP lanes.
 
-The output item is `E!T`: success contains the final payload; exhaustion or a stop
-decision contains the last operation error. A following typed callback can handle
-that value explicitly. Failure of one item's attempts does not drop the item or
-prevent later input items from being processed. Optional/error-valued inputs
-remain ordinary data until an attempt callback interprets them.
+The success item type is `T`. Exhaustion or a stop decision forwards the last
+operation error as pending, just like a failed map/tap outside retry. Use
+`recover` or `whenError` after the boundary; unhandled errors fail at terminals.
+Following source items continue if that failure is handled. There is no separate
+`E!T` item-recovery mode. See [explicit error handling](errors.md).
 
 ## Policy and lifetime
 
@@ -53,8 +53,8 @@ counters, not a rewind of borrowed application state.
 
 `run`'s Io performs waits on the awake clock. Zero delay still polls cancellation.
 Cancellation is neither retried, passed to the policy, nor emitted as data.
-Source/acquisition/downstream failures stay outside the retry boundary and retain
-normal run failure behavior. Infinite retries backpressure following items;
+Source/acquisition failures stay fatal control flow. Downstream operations
+can recover normally, but are never retried here. Infinite retries backpressure following items;
 no extra queue/worker is implied, and non-cooperative callbacks can prevent joining.
 
 Zero fixed attempts fails cold before acquisition/activation, including behind

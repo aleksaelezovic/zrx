@@ -1,5 +1,13 @@
 //! Invalid current public contracts must fail with the intended diagnostic.
 pub const failures = .{
+    .{ "error_map_handler", "success operator: use recover or whenError for errors; wrap intentional error data in a record" },
+    .{ "error_recover_fallible", "recover: handler must return exactly the success item type, without an error union" },
+    .{ "error_recover_type", "recover: handler must return exactly the success item type, without an error union" },
+    .{ "error_recover_input", "recover: handler input must be an error set" },
+    .{ "error_case_type", "Failure: expected an error set" },
+    .{ "error_lane_filter", "error lane: handle Failure records with map/effects or explicit discard before dropping items" },
+    .{ "error_lane_take", "error lane: handle Failure records with map/effects or explicit discard before dropping items" },
+    .{ "error_recover_missing_service", "world: missing dependency error_recover_missing_service.Replacement" },
     .{ "retry_filter", "retryPipe: attempts support only map/each and tap" },
     .{ "retry_custom_operator", "retryPipe: attempts support only map/each and tap" },
     .{ "retry_fold", "retryPipe: attempts support only map/each and tap" },

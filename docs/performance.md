@@ -30,6 +30,11 @@ the direct oracle. Empty/short inputs are checked outside elapsed measurement.
 The direct loop does not reproduce graph cancellation/scheduling/backpressure;
 elapsed differences are not a declarative-notation overhead proof.
 
+Transport now stores tagged success/pending-error outcomes, and value-producing
+branches include an unhandled-error bypass edge. Error lanes also acknowledge
+callback/terminal acceptance. Do not reuse allocation/throughput assumptions from
+before that error-model change; fresh measurements must identify this revision.
+
 - `benchmark`: uninstrumented complete invocation elapsed time; alternates
   direct/pipeline trial order. Compilation, report printing and oracle calculation
   are excluded from that interval.

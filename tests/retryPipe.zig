@@ -24,9 +24,16 @@ fn flaky(state: *State, item: u32) E!u32 {
     if (item == 1 and state.attempts[item] < 3) return error.Transient;
     return item + 10;
 }
-fn save(state: *State, outcome: E!u32) void {
-    state.values[state.len] = outcome;
+fn save(state: *State, value: u32) void {
+    state.values[state.len] = switch (value) {
+        100 => error.Permanent,
+        101 => error.Transient,
+        else => value,
+    };
     state.len += 1;
+}
+fn replacement(err: E) u32 {
+    return if (err == error.Permanent) 100 else 101;
 }
 fn policy(state: *State, err: E, retries: usize) zrx.RetryDecision {
     state.policy_counts[state.policy_calls] = retries;
@@ -37,7 +44,7 @@ fn policy(state: *State, err: E, retries: usize) zrx.RetryDecision {
 fn visited(state: *State, _: u32) void {
     state.taps += 1;
 }
-fn observedOutcome(state: *State, _: E!u32) void {
+fn observedOutcome(state: *State, _: u32) void {
     state.taps += 1;
 }
 
@@ -55,7 +62,7 @@ test "fixed retry options are cold and restart from the original item" {
 test "typed function policy receives injected services error and zero based retry count" {
     var state: State = .{};
     const retried = retryPipe(zrx.fromSlice(&[_]u32{ 0, 1, 2 }), .{map(flaky)}, policy);
-    try run(.{ allocator, io, &state, @as(usize, 999) }, .{pipe(&retried, .{forEach(save)})});
+    try run(.{ allocator, io, &state, @as(usize, 999) }, .{pipe(&retried, .{ zrx.recover(replacement), forEach(save) })});
     try std.testing.expectEqualSlices(usize, &.{ 1, 3, 1 }, &state.attempts);
     try std.testing.expectEqualSlices(usize, &.{ 0, 0, 1 }, state.policy_counts[0..state.policy_calls]);
     try std.testing.expectError(error.Permanent, state.values[0]);
@@ -63,10 +70,10 @@ test "typed function policy receives injected services error and zero based retr
     try std.testing.expectEqual(@as(u32, 12), try state.values[2]);
 }
 
-test "exhausted retries emit error data and do not stop following source items" {
+test "exhausted retries remain pending until explicit recovery and following items continue" {
     var state: State = .{};
     const retried = retryPipe(zrx.fromSlice(&[_]u32{ 0, 1, 2 }), .{map(flaky)}, .{ .max_attempts = 2 });
-    try run(.{ allocator, io, &state }, .{pipe(&retried, .{forEach(save)})});
+    try run(.{ allocator, io, &state }, .{pipe(&retried, .{ zrx.recover(replacement), forEach(save) })});
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 1 }, &state.attempts);
     try std.testing.expectError(error.Permanent, state.values[0]);
     try std.testing.expectError(error.Transient, state.values[1]);
@@ -163,7 +170,7 @@ fn useOwned(owned: Owned, item: u32) E!u32 {
     std.debug.assert(owned.lifetime.opened == 1 and owned.lifetime.released == 0);
     return flaky(&owned.lifetime.state, item);
 }
-fn discard(_: E!u32) void {}
+fn discard(_: u32) void {}
 test "managed attempt dependencies acquire once and release after all retries" {
     var lifetime: Lifetime = .{};
     const retried = retryPipe(zrx.fromValue(@as(u32, 1)), .{map(useOwned)}, .{ .max_attempts = 3 });
@@ -201,11 +208,11 @@ test "zero attempts fail before acquisition even behind take zero or a case help
 const Saved = struct { value: ?u32 = null };
 const Left = struct { saved: *Saved };
 const Right = struct { saved: *Saved };
-fn saveLeft(output: Left, outcome: E!u32) !void {
-    output.saved.value = try outcome;
+fn saveLeft(output: Left, value: u32) void {
+    output.saved.value = value;
 }
-fn saveRight(output: Right, outcome: E!u32) !void {
-    output.saved.value = try outcome;
+fn saveRight(output: Right, value: u32) void {
+    output.saved.value = value;
 }
 test "stable references share the entire retry recurrence and its final result" {
     var state: State = .{};
@@ -239,7 +246,7 @@ test "retries never re-probe a consuming source and take does not probe ahead" {
 fn broken(_: *zrx.Emitter(u32)) error{SourceFailed}!void {
     return error.SourceFailed;
 }
-fn reject(_: E!u32) error{DownstreamFailed}!void {
+fn reject(_: u32) error{DownstreamFailed}!void {
     return error.DownstreamFailed;
 }
 test "source and downstream errors stay outside the retry boundary" {
@@ -256,7 +263,7 @@ test "source and downstream errors stay outside the retry boundary" {
     try std.testing.expectEqual(@as(usize, 0), state.policy_calls);
 }
 
-test "producer backed retry transports exhausted errors as items and continues" {
+test "producer backed retry transports pending errors to recovery and continues" {
     const Producer = struct {
         fn produce(output: *zrx.Emitter(u32)) !void {
             try output.push(0);
@@ -266,7 +273,7 @@ test "producer backed retry transports exhausted errors as items and continues" 
     var state: State = .{};
     const source = zrx.Stream(u32).fromProducer(1, Producer.produce);
     const outcomes = retryPipe(&source, .{map(flaky)}, .{ .max_attempts = 1 });
-    try run(.{ allocator, io, &state }, .{pipe(&outcomes, .{ tap(observedOutcome), forEach(save) })});
+    try run(.{ allocator, io, &state }, .{pipe(&outcomes, .{ zrx.recover(replacement), tap(observedOutcome), forEach(save) })});
     try std.testing.expectEqual(@as(usize, 2), state.len);
     try std.testing.expectEqual(@as(usize, 2), state.taps);
     try std.testing.expectError(error.Permanent, state.values[0]);
@@ -281,8 +288,8 @@ test "grouped callbacks preserve type transitions and stop before later stages" 
         fn widen(item: u16) u32 {
             return @as(u32, item) * 2;
         }
-        fn check(outcome: E!u32) !void {
-            try std.testing.expectEqual(@as(u32, 22), try outcome);
+        fn check(value: u32) !void {
+            try std.testing.expectEqual(@as(u32, 22), value);
         }
     };
     var state: State = .{};
@@ -301,7 +308,7 @@ test "zero-delay unlimited retries remain externally cancelable" {
             probe.entered.set(io);
             return error.Transient;
         }
-        fn sink(_: error{Transient}!u32) void {
+        fn sink(_: u32) void {
             @panic("unlimited retries must not emit before cancellation");
         }
         fn execute(probe: *Probe) !void {
@@ -317,13 +324,13 @@ test "zero-delay unlimited retries remain externally cancelable" {
     try std.testing.expect(probe.calls.load(.acquire) != 0);
 }
 
-test "empty and infallible inputs still use the same result-valued boundary" {
+test "empty and infallible inputs use the same success item type" {
     const Helpers = struct {
         fn identity(item: u32) u32 {
             return item;
         }
-        fn check(outcome: error{}!u32) !void {
-            try std.testing.expectEqual(@as(u32, 2), try outcome);
+        fn check(value: u32) !void {
+            try std.testing.expectEqual(@as(u32, 2), value);
         }
     };
     try run(.{ allocator, io }, .{
@@ -337,19 +344,17 @@ test "empty and infallible inputs still use the same result-valued boundary" {
     try std.testing.expectEqual(@as(usize, 0), state.policy_calls);
 }
 
-test "optional input remains data and final operation errors remain collection items" {
+test "optional input remains data and exhausted errors suppress collection" {
     const Helpers = struct {
         fn unwrap(item: ?u32) error{Missing}!u32 {
             return item orelse error.Missing;
         }
-        fn check(items: []const error{Missing}!u32) !void {
-            try std.testing.expectEqual(@as(usize, 2), items.len);
-            try std.testing.expectError(error.Missing, items[0]);
-            try std.testing.expectEqual(@as(u32, 2), try items[1]);
+        fn check(_: []const u32) void {
+            @panic("unhandled error must suppress collection");
         }
     };
     const outcomes = retryPipe(zrx.fromSlice(&[_]?u32{ null, 2 }), .{map(Helpers.unwrap)}, .{ .max_attempts = 1 });
-    try run(.{ allocator, io }, .{pipe(&outcomes, .{zrx.collectThen(Helpers.check)})});
+    try std.testing.expectError(error.Missing, run(.{ allocator, io }, .{pipe(&outcomes, .{zrx.collectThen(Helpers.check)})}));
 }
 
 test "managed dependencies release after canceled retry waits" {
@@ -372,8 +377,8 @@ test "actual checkout composition repeats calls without repeating application ow
     const example = @import("checkout_example");
     const Output = struct { value: ?example.Shipment = null };
     const Helpers = struct {
-        fn capture(output: *Output, outcome: example.CheckoutError!example.Shipment) !void {
-            output.value = try outcome;
+        fn capture(output: *Output, value: example.Shipment) void {
+            output.value = value;
         }
     };
     var store: example.Store = .{};
@@ -426,7 +431,7 @@ test "request scoped HTTP retries fail before listener acquisition" {
         fn handle(request: zrx.HttpRequest) error{Unavailable}!zrx.HttpResponse {
             return request.response(.{});
         }
-        fn ignore(_: error{Unavailable}!zrx.HttpResponse) void {}
+        fn ignore(_: zrx.HttpResponse) void {}
     };
     var ready: zrx.HttpReady = .{};
     const source = zrx.httpRequests(.{ .address = .{ .ip4 = .loopback(0) }, .ready = &ready, .connection_budget = 0 });
@@ -446,7 +451,7 @@ test "a peer failure cancels an unlimited retry without replacing the chosen err
             try probe.entered.wait(io);
             return error.PeerFailed;
         }
-        fn ignoreOutcome(_: error{Again}!u32) void {}
+        fn ignoreOutcome(_: u32) void {}
         fn ignore(_: u32) void {}
         fn execute(probe: *Probe) !void {
             defer probe.done.set(io);

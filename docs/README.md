@@ -10,6 +10,7 @@ services, owns resource lifetimes, and executes selected terminal effects.
 - [Retries and application-owned idempotency](retries.md)
 - [Toolchain and validation scope](validation.md)
 - [Performance investigation roadmap](performance.md)
+- [Operation errors and explicit handling](errors.md)
 - [Bounded line I/O](../src/io/README.md)
 - [HTTP request scopes and lifecycle](http.md)
 
@@ -24,11 +25,12 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Borrowed consuming inputs | [`fromIterator`](../src/compose.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Accumulated updates | [`scan`](../src/ops/scan.zig) |
 | Per-item retry boundaries | [`retryPipe`, `RetryDecision`, `RetryOptions`](../src/ops/retryPipe.zig) |
-| Exclusive cases | [`branch`, `when`, `otherwise`](../src/ops/branch.zig) |
+| Recovery and explicit error records | [`recover`](../src/ops/recover.zig), [`Failure`](../src/data/failures.zig) |
+| Exclusive cases | [`branch`, `when`, `whenError`, `otherwise`](../src/ops/branch.zig) |
 | Resource recipes and nominal roles | [`resource`, `deriveResource`](../src/internal/world/resources.zig) |
 | Dependency planning | [Typed run-local service storage](../src/internal/world/dependencies.zig) |
 | Execution | [`run`](../src/run.zig) |
-| Terminal effects | [`forEach`, `collectThen`, `batchThen`](../src/ops/effects.zig) |
+| Terminal effects | [`forEach`, `collectThen`, `batchThen`, `discard`](../src/ops/effects.zig) |
 | Prefix, limits, suffix | [`take`](../src/ops/take.zig), [`maxItems`](../src/ops/maxItems.zig), [`takeLast`](../src/ops/takeLast.zig) |
 | Merge and state | [`merge`](../src/ops/merge.zig), [`hold`](../src/ops/hold.zig), [`values`](../src/ops/values.zig), [`withLatestFrom`](../src/ops/withLatestFrom.zig) |
 | Owned record values and I/O | [`Line`](../src/data/lines.zig), [line sources and resource glue](../src/io/lines.zig) |
@@ -36,8 +38,9 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 
 Only `run` executes declarations.
 Leading callback parameters are exact-type service requests; trailing parameters
-are the operator's ordinary data. Callback error unions fail execution, except
-signal map results, which remain current-state data.
+are the operator's ordinary data. Stream operation errors skip success stages
+until handled; only unhandled terminal outcomes fail execution. See the
+[error model](errors.md); signal map results remain current-state data.
 
 ## Executable examples
 
@@ -54,6 +57,8 @@ smoke-check their entry points and import reusable compositions.
   `zig build example-scan` runs it separately.
 - [Checkout retries](../examples/checkout.zig): typed policies and application-owned
   duplicate safety, without a persistence framework. `zig build example-checkout`.
+- [Success/error sinks](../examples/errors.zig): persistent stdout/stderr lanes
+  with ordinary map failures. `zig build example-errors`.
 - [Path-owned file copy](../examples/io_file.zig): `zig build io-examples`, then
   `zig-out/bin/copy-lines INPUT OUTPUT`. Output must not exist. No live waits
   occur in default checks.

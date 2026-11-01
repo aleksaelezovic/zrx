@@ -114,14 +114,17 @@ retiring one case does not stop its live siblings.
   and flushes a nonempty partial batch only on success. Failure discards pending
   items, not previously completed effects.
 
-Stream callback outer errors fail run. Source optional/error-valued items remain
-data; signal-map optional/error results remain state. `fold` is a run-executed
-left reduction starting from a shallow seed copy and stopping on reducer error.
-There is no separate eager or `try` executor.
+Stream operation errors skip success stages until explicit recovery/routing;
+only unhandled terminal outcomes fail run. Source optional/error-valued items
+remain data; signal-map optional/error results remain state. `fold` is a
+run-executed left reduction starting from a shallow seed copy and stopping on
+reducer error. There is no separate eager or `try` executor. See the
+[error model and stateful boundaries](errors.md).
 
 [`retryPipe`](retries.md) explicitly captures errors from its map/tap attempt:
-it retries the original item using run-supplied Io and emits its final `E!T`
-outcome as data. Cancellation and errors outside that boundary still fail run.
+it retries the original item using run-supplied Io and forwards its final
+success or pending operation error through the ordinary handling model.
+Cancellation and source/acquisition failures remain execution control.
 It adds no implicit worker, does not reset stateful stream operators and supplies
 no idempotency or durability guarantee.
 

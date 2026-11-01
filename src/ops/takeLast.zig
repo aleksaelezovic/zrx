@@ -7,7 +7,9 @@ const declarations = @import("../data/declarations.zig");
 /// successful end. Short inputs publish all items. Zero still consumes/observes
 /// errors but publishes none; an endless source never publishes a final suffix.
 ///
-/// Failure/cancellation discards pending retention. Items are shallow; overwrites
+/// An observed operation error discards retention, forwards that pending error
+/// and ends the edge. Source failure/cancellation remains fatal and discards
+/// retention. Items are shallow; overwrites
 /// infer no destructors, and referents must survive eventual downstream use.
 /// The ring is freed after workers join, including preparation/startup failure.
 /// It is separate from collectThen storage: no buffer transfer or deep memory
@@ -26,6 +28,7 @@ const TakeLast = struct {
     pub fn Output(comptime Input: type) type {
         declarations.requireSource(Input);
         const Element = sequences.Item(Input);
+        @import("../data/failures.zig").requireHandledBeforeDropping(Element);
         return struct {
             source: Input,
             limit: usize,

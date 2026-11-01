@@ -21,6 +21,7 @@ fn Sample(comptime Signal: type) type {
     return struct {
         signal: Signal,
         pub fn Output(comptime Input: type) type {
+            @import("../data/failures.zig").requireHandledBeforeDropping(sequences.Item(Input));
             const Pair = @Tuple(&.{ sequences.Item(Input), T });
             return struct {
                 source: Input,

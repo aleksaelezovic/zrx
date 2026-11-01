@@ -2,9 +2,10 @@ const sequences = @import("../data/sequences.zig");
 const declarations = @import("../data/declarations.zig");
 
 /// Validate the output count at this position, per cursor/run. Forward up to
-/// limit items; consume but never forward the first excess item, then fail with
-/// TooManyItems. Exactly limit still waits for end/excess; zero allows only empty
-/// input. This is not prefix-taking, retention, or a lossy queue policy.
+/// limit successes; consume but never forward the first excess success, then
+/// emit pending TooManyItems and end. Pending upstream errors pass unchanged
+/// without spending budget. Exactly limit still waits for end/excess; zero allows
+/// no successes. This is not prefix-taking, retention, or a lossy queue policy.
 ///
 /// Before filter counts input; after it counts matches. Before collection bounds
 /// accumulated item count, not arbitrary referent memory or upstream prefetch.

@@ -9,7 +9,9 @@ All public behavior/contract suites import the one `zrx` package module:
 - `declarative_scan.zig` and `scan_example.zig`: recurrence, injected requirements,
   snapshots, prefixes, errors-as-data, held state and the two-pipe monitor.
 - `retryPipe.zig`: serial attempts, typed policy services, exact delay/count rules,
-  error-valued outcomes, cancellation, cold validation, sharing and checkout effects.
+  pending outcomes, cancellation, cold validation, sharing and checkout effects.
+- `errors.zig`: recover/whenError/discard, transport/sharing, error-lane acceptance
+  and retirement, reporting failures, stateful boundaries and swapped example sinks.
 - `operators.zig`: bounds, suffix retention, collection/batching success/failure,
   allocation cleanup, queue binding, whole-item vectors, line framing and TCP prefixes.
 - `branch.zig`: persistent case substreams, DI, retirement, state, all-terminal
@@ -31,5 +33,6 @@ foreign execution or imperative codegen equality.
 
 `zig build test` runs these suites and finite example entry points.
 `zig build check` additionally checks formatting and cross-object builds.
-Use `declarative-test`, `lifecycle-test`, `measurement-test`, `test-branch` or
-`test-http` for focused loops. See [validation](../docs/validation.md).
+Use `declarative-test`, `lifecycle-test`, `measurement-test`, `test-branch`,
+`test-errors`, `test-retry` or `test-http` for focused loops. See
+[validation](../docs/validation.md).

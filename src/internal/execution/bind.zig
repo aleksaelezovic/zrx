@@ -382,13 +382,16 @@ fn BoundCase(comptime Item: type, comptime C: type, comptime Env: type) type {
     return struct {
         pub const bound_case = true;
         pub const is_default = C.is_default;
+        pub const is_error = C.is_error;
+        pub const ErrorSet = if (C.is_error) C.ErrorSet else void;
+        pub const Input = branching.CaseItem(Item, C);
         pub const Pipeline = if (terminal) Flow(Public, Env) else Lowered(Public, Env);
         definition: C,
         binding: *Scope(Env),
         pub fn matches(self: @This(), item: Item) bool {
             return cb.invoke(C.condition, self.binding.env, .{item});
         }
-        pub fn build(self: @This(), source: branch_plan.Input(Item)) !Pipeline {
+        pub fn build(self: @This(), source: branch_plan.Input(Input)) !Pipeline {
             const pipeline = @import("../../compose.zig").pipe(source, self.definition.operators);
             return if (terminal) flow(self.binding, pipeline) else self.binding.lower(pipeline);
         }

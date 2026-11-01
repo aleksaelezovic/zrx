@@ -93,7 +93,12 @@ pub fn transform(comptime operation: Operation, comptime input: anytype) Transfo
 
 fn resultItem(comptime operation: Operation, comptime Source: type, comptime functions: anytype) type {
     var T = if (kind.isSignal(Source)) kind.Value(Source) else seq.Item(Source);
+    if (operation == .filter) @import("failures.zig").requireHandledBeforeDropping(T);
     for (functions) |function| {
+        const Meta = cb.Info(function, 1);
+        const Argument = Meta.Params[Meta.Params.len - 1];
+        if (@typeInfo(Argument) == .error_set or @typeInfo(Argument) == .error_union)
+            @compileError("success operator: use recover or whenError for errors; wrap intentional error data in a record");
         cb.validate(function, &.{T});
         const R = cb.Info(function, 1).Return;
         if (operation == .map) {
@@ -157,6 +162,9 @@ fn Borrowed(comptime Input: type) type {
 }
 
 /// Deferred left reduction. Reducer: (services..., A, T) A/E!A.
+/// The first upstream operation/reducer error discards partial state, emits a
+/// pending error of this A-valued stage, and ends without another input probe.
+/// Recover afterward can replace the missing final A; no rollback is inferred.
 pub fn fold(seed: anytype, comptime reducer: anytype) Fold(Accumulator(reducer), reducer) {
     return .{ .seed = seed };
 }

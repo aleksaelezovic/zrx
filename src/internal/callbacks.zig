@@ -31,7 +31,7 @@ pub fn invoke(comptime callback: anytype, env: anytype, inputs: anytype) Info(ca
     const Meta = Info(callback, inputs.len);
     var args: @Tuple(&Meta.Params) = undefined;
     inline for (Meta.Services, 0..) |Service, i| args[i] = env.get(Service);
-    inline for (0..inputs.len) |i| args[Meta.Services.len + i] = inputs[i];
+    inline for (0..inputs.len) |i| args[Meta.Services.len + i] = @import("error_receipt.zig").accept(inputs[i]);
     return @call(.auto, callback, args);
 }
 

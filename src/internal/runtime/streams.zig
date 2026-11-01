@@ -3,6 +3,7 @@ const sequences = @import("../../data/sequences.zig");
 const broadcast = @import("broadcast.zig");
 const queueNext = @import("../queue.zig").next;
 const completion = @import("completion.zig");
+const outcomes = @import("../outcomes.zig");
 
 // Live transport is private; the public producer description is data/streams.zig.
 /// Own a bounded queue, captured capabilities, and an optional lazy producer.
@@ -11,7 +12,8 @@ pub fn Stream(comptime T: type) type {
     if (@sizeOf(T) == 0) @compileError("Stream: zero-sized elements are not supported by std.Io.Queue");
     return struct {
         const Self = @This();
-        const Buffer = broadcast.Buffer(T);
+        const Wire = outcomes.Outcome(T);
+        const Buffer = broadcast.Buffer(Wire);
         const Retirement = struct {
             context: *anyopaque,
             inputs: *const fn (*anyopaque) void,
@@ -22,8 +24,8 @@ pub fn Stream(comptime T: type) type {
         const State = struct {
             allocator: std.mem.Allocator,
             io: std.Io,
-            buffer: []T,
-            rendezvous: std.Io.Queue(T),
+            buffer: []Wire,
+            rendezvous: std.Io.Queue(Wire),
             buffer_state: Buffer,
             producer: ?*const fn (?*anyopaque, *Self) anyerror!void = null,
             capability: ?*anyopaque = null,
@@ -43,7 +45,7 @@ pub fn Stream(comptime T: type) type {
         pub fn init(allocator: std.mem.Allocator, io: std.Io, capacity: usize) std.mem.Allocator.Error!Self {
             const state = try allocator.create(State);
             errdefer allocator.destroy(state);
-            const buffer = try allocator.alloc(T, capacity);
+            const buffer = try allocator.alloc(Wire, capacity);
             state.* = .{
                 .allocator = allocator,
                 .io = io,
@@ -99,6 +101,10 @@ pub fn Stream(comptime T: type) type {
 
         /// Accept one item, waiting for capacity. Does not run downstream pipelines.
         pub fn push(self: *Self, value: T) (std.Io.QueueClosedError || std.Io.Cancelable)!void {
+            return self.pushOutcome(.{ .value = value });
+        }
+
+        pub fn pushOutcome(self: *Self, value: Wire) (std.Io.QueueClosedError || std.Io.Cancelable)!void {
             const token = if (self.completionOwner()) |owner| owner.acquire() else null;
             errdefer if (token) |item| item.release();
             if (self.state.buffer.len == 0) {
@@ -152,18 +158,22 @@ pub fn Stream(comptime T: type) type {
             record: *Buffer.Record,
 
             pub fn next(self: *@This()) anyerror!?T {
+                return outcomes.unwrap(T, try self.nextOutcome());
+            }
+
+            pub fn nextOutcome(self: *@This()) anyerror!?Wire {
                 self.state.buffer_state.finishDelivery(self.record);
                 try self.state.buffer_state.beginRead(self.record);
                 defer self.state.buffer_state.endRead(self.record);
                 try startProducer(self.state);
                 if (self.state.buffer.len == 0) {
-                    if (try queueNext(T, self.state.io, &self.state.rendezvous)) |value|
-                        return @as(?T, value);
+                    if (try queueNext(Wire, self.state.io, &self.state.rendezvous)) |value|
+                        return value;
                     try self.awaitProducer();
                     return null;
                 }
                 if (try self.state.buffer_state.next(self.record)) |value|
-                    return @as(?T, value);
+                    return value;
                 try self.awaitProducer();
                 return null;
             }
@@ -286,9 +296,9 @@ pub fn share(
             while (true) {
                 // A ready input/output may not otherwise reach a blocking cancel point.
                 try context.io.checkCancel();
-                const value = (if (comptime sequences.isFallible(Input)) try cursor.next() else cursor.next()) orelse return;
+                const value = (try outcomes.next(Element, &cursor)) orelse return;
                 try context.io.checkCancel();
-                try output.push(value);
+                try output.pushOutcome(value);
             }
         }
     };
@@ -315,7 +325,14 @@ pub fn takeLast(
             var next: usize = 0;
             while (true) {
                 try context.io.checkCancel();
-                const value = (if (comptime sequences.isFallible(Input)) try cursor.next() else cursor.next()) orelse break;
+                const item = (try outcomes.next(Element, &cursor)) orelse break;
+                const value = switch (item) {
+                    .value => |value| value,
+                    .failure => {
+                        try output.pushOutcome(item);
+                        return;
+                    },
+                };
                 if (context.storage.len == 0) continue;
                 context.storage[next] = value;
                 next = if (next == context.storage.len - 1) 0 else next + 1;
@@ -389,9 +406,9 @@ pub fn merge(
             var cursor = reader.iterator();
             while (true) {
                 try state.io.checkCancel();
-                const value = (try cursor.next()) orelse return;
+                const value = (try cursor.nextOutcome()) orelse return;
                 try state.io.checkCancel();
-                try output.push(value);
+                try output.pushOutcome(value);
             }
         }
     };

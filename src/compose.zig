@@ -10,13 +10,20 @@ pub fn pipe(source: anytype, operators: anytype) composition.PipelineOutput(@Typ
     return composition.compose(source, operators, 0);
 }
 
+/// Success-only whole-item composition. Outer callback errors become pending
+/// operation outcomes and skip later success stages until recover/whenError.
+/// Error-set/union input arguments are not implicit handlers; wrap deliberate
+/// error data in a record. Signal mapping still transforms whole current state.
 pub fn map(comptime transforms: anytype) @TypeOf(decl.transform(.map, transforms)) {
     return decl.transform(.map, transforms);
 }
 pub const each = map;
+/// Select success items. Pending errors pass unchanged without predicate calls.
 pub fn filter(comptime predicates: anytype) @TypeOf(decl.transform(.filter, predicates)) {
     return decl.transform(.filter, predicates);
 }
+/// Run success-item effects and forward the item. Callback failure becomes a
+/// pending error, not a missing/fabricated success value; no rollback is implied.
 pub fn tap(comptime effects_tuple: anytype) @TypeOf(decl.transform(.tap, effects_tuple)) {
     return decl.transform(.tap, effects_tuple);
 }

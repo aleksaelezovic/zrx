@@ -20,6 +20,24 @@ pub fn otherwise(operators: anytype) Case({}, @TypeOf(operators), true) {
     return .{ .operators = normalize(operators) };
 }
 
+/// Route matching pending operation errors to a persistent Failure(E) substream.
+/// anyerror matches all operation errors, never cancellation or source failures.
+/// Ordinary when/otherwise cases only select successes. Unmatched errors remain
+/// pending; selecting an already retired error lane does not swallow the error.
+pub fn whenError(comptime E: type, operators: anytype) ErrorCase(E, @TypeOf(operators)) {
+    return .{ .operators = normalize(operators) };
+}
+fn ErrorCase(comptime E: type, comptime Operators: type) type {
+    _ = @import("../data/failures.zig").Failure(E);
+    return struct {
+        pub const case_tag = CaseTag;
+        pub const is_default = false;
+        pub const is_error = true;
+        pub const ErrorSet = E;
+        operators: Normalized(Operators),
+    };
+}
+
 fn Normalized(comptime T: type) type {
     return if (composition.isTuple(T)) T else @Tuple(&.{T});
 }
@@ -30,14 +48,18 @@ fn Case(comptime predicate: anytype, comptime Operators: type, comptime default:
     return struct {
         pub const case_tag = CaseTag;
         pub const is_default = default;
+        pub const is_error = false;
         pub const condition = predicate;
         operators: Normalized(Operators),
     };
 }
 
 pub fn CaseOutput(comptime Item: type, comptime C: type) type {
-    if (!C.is_default) callbacks.validate(C.condition, &.{Item});
-    return composition.PipelineOutput(input(Item), @FieldType(C, "operators"));
+    if (!C.is_default and !C.is_error) callbacks.validate(C.condition, &.{Item});
+    return composition.PipelineOutput(input(CaseItem(Item, C)), @FieldType(C, "operators"));
+}
+pub fn CaseItem(comptime Item: type, comptime C: type) type {
+    return if (C.is_error) @import("../data/failures.zig").Failure(C.ErrorSet) else Item;
 }
 fn isTerminal(comptime T: type) bool {
     return @hasDecl(T, "world_flow_tag") and T.world_flow_tag == dependencies.FlowTag;
@@ -55,7 +77,7 @@ fn requirements(comptime Item: type, comptime Cases: type, comptime index: usize
     const fields = @typeInfo(Cases).@"struct".field_types;
     if (index == fields.len) return &.{};
     const C = fields[index];
-    const predicate = if (C.is_default) &.{} else &callbacks.Info(C.condition, 1).Services;
+    const predicate = if (C.is_default or C.is_error) &.{} else &callbacks.Info(C.condition, 1).Services;
     const local = declarations.concat(predicate, declarations.requirements(CaseOutput(Item, C)));
     const rest = declarations.concat(&local, requirements(Item, Cases, index + 1));
     return &rest;
@@ -75,7 +97,16 @@ fn Result(comptime Item: type, comptime Cases: type) type {
 /// interleaving), or all terminate and this is a selected terminal root.
 /// Mixed cases fail compilation. Unmatched items and items for retired cases
 /// are dropped; prefix completion retires only its case. All cases retired
-/// stops the input edge. Source/callback errors follow ordinary run failure.
+/// stops the input edge. These drops apply only to success values. Pending
+/// errors select whenError cases, or bypass value-producing branches unchanged;
+/// an unhandled error at an all-terminal branch fails run. Error lanes wait for
+/// callback/terminal acceptance, not mere queue admission. Retiring a selected
+/// error lane before acceptance leaves the error pending. Reporting errors are
+/// new failures, not recursively routed into the same branch.
+///
+/// Raw Failure records cannot be filtered, prefixed, retained, nested-routed
+/// or used as signal state/events before explicit handling. Map them to reports,
+/// handle with effects/reduction, or use discard; error sinks may batch/collect.
 pub fn branch(cases: anytype) Branch(@TypeOf(cases)) {
     return .{ .cases = cases };
 }
@@ -95,6 +126,7 @@ fn Branch(comptime Cases: type) type {
         pub fn Output(comptime Source: type) type {
             declarations.requireSource(Source);
             const In = sequences.Item(Source);
+            @import("../data/failures.zig").requireHandledBeforeDropping(In);
             const terminal = terminates(In, Cases);
             const Out = comptime if (terminal) void else Result(In, Cases);
             if (terminal) return struct {

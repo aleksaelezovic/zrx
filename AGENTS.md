@@ -71,7 +71,8 @@ to this file; edit `AGENTS.md`, not copies.
   Tap forwards the item after effects; per-item terminal effects return void.
 - Finite reductions are deferred left folds from a shallow seed copy per run.
   Reducers return exactly A or E!A; outer error-union seeds are rejected.
-  Reducer error stops without another input probe or automatic rollback.
+  First operation/reducer error discards partial state, emits a pending error,
+  and stops without another input probe or automatic rollback.
 - `scan(seed, reducer)` is a deferred serial recurrence with a pure typed
   `fn (services..., A, T) A`, exact nonzero-sized A, no outer error-union state
   or fallible reducer. Leading dependencies follow normal injection; purity
@@ -80,15 +81,20 @@ to this file; edit `AGENTS.md`, not copies.
   none. Stable references share one recurrence. Publish values, not pointers
   into changing state; borrowed referents must stay valid and unchanged for
   older snapshots. Use `hold(seed)` for sampleable current state.
-- Stream callback outer errors fail run. Optional/error-valued input items
-  remain data until callbacks interpret them. Signal map error/optional results
-  remain current-state data. No automatic rollback or intermediate destruction.
+- Stream operation errors skip success-only stages until explicit handling;
+  only unhandled terminal outcomes fail run. `recover` takes a narrow error set
+  or anyerror and returns exactly the current success type, non-fallibly.
+  Map/filter/tap reject error-set/union item arguments; intentional error data
+  belongs in records. Cancellation, source and acquisition failures remain
+  control flow, never handler input. Signal map error/optional results remain
+  current-state data. No automatic rollback or intermediate destruction.
 - `retryPipe` is a cold per-item map/each/tap attempt boundary. Each retry uses
-  the original shallow item; stop/exhaustion emits the last operation error as
-  E!T data. Function policies return RetryDecision with ordinary error/count
+  the original shallow item; stop/exhaustion forwards the last operation error
+  through the same pending-error model. Function policies return RetryDecision with ordinary error/count
   suffixes and normal injected prefixes; fixed policy zero attempts fails cold.
   Use run-supplied Io for delays and poll zero-delay retries. Cancellation never
-  reaches policy/item data; source/downstream errors still fail run. Stateful,
+  reaches policy/item data; source failures remain fatal, downstream operations
+  can recover but are not retried by this boundary. Stateful,
   filtering, branching and terminal operators stay outside attempts. No automatic
   idempotency, rollback, checkpointing or durable recovery is implied.
 - Ordinary synchronous stages form typed direct-call regions. Naming an
@@ -116,11 +122,14 @@ to this file; edit `AGENTS.md`, not copies.
 
 - `take(n)` succeeds without an extra probe, zero reads none, selected resources
   still acquire. Prefetch may do extra upstream work. Detach only its edge;
-  unused chains retire without stopping live siblings.
-- `maxItems(n)` consumes but never forwards the first excess item, then fails;
-  exactly n needs end/excess observation. It is not prefix-taking.
+  unused chains retire without stopping live siblings. Pending errors pass
+  without spending success-item budget; unobserved errors are not probed for.
+- `maxItems(n)` consumes but never forwards the first excess success item,
+  emits pending TooManyItems, then ends. Exactly n needs end/excess observation.
+  Pending upstream errors pass without spending budget. It is not prefix-taking.
 - `takeLast(n)` preallocates a shallow n-item ring and publishes only after
-  normal end. Zero still consumes; failure discards retention.
+  normal end. Zero still consumes; first operation error discards retention,
+  forwards that pending error, and ends. Source/cancellation failures stay fatal.
 - `collectThen` lends read-only storage only during successful-end callbacks;
   failure suppresses callbacks and frees accumulation. Retention and collection
   storage are separate.
@@ -128,11 +137,17 @@ to this file; edit `AGENTS.md`, not copies.
   flushes nonempty partial batches only on success, and discards pending items
   on failure. Earlier effects remain. Zero fails before activation.
 - Merge uses separate delivery edges, preserves each edge's order, has unspecified
-  interleaving, ends after all normal ends, and fails on first observed error.
-- `branch` uses ordered first-match `when` cases and an optional final
-  `otherwise`. Cases receive persistent substreams and either all produce one
-  common item type or all terminate. Prefixes retire only their case; unmatched
-  items and items for retired cases drop. Predicate/case dependencies use normal DI.
+  interleaving and ends after all normal ends. Pending errors remain outcomes;
+  source/control failure stops the merge.
+- `branch` uses ordered first-match success `when`/final `otherwise` and explicit
+  `whenError(ErrorSet, operators)` cases receiving Failure(ErrorSet) records.
+  Cases receive persistent substreams and either all produce one common item
+  type or all terminate. Success drops/retirement never swallow observed errors.
+  Unmatched/retired error routes remain pending; queue admission is not handling.
+  Error reports become normal data at callback/terminal acceptance; reporting
+  failures are new failures, not recursive routing. Use discard to explicitly
+  ignore failures. Handle raw Failure records before lossy/state operators.
+  Predicate/case dependencies use normal DI.
 - Signals initialize before activation, commit each single-root family together,
   and publish outside cache locks. Observe initial/every replacement with values;
   sampling emits typed event/current tuples without flattening or state consumption.

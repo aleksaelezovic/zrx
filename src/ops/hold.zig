@@ -26,6 +26,7 @@ fn Hold(comptime Initial: type, comptime literal: anytype) type {
 
         pub fn Output(comptime Input: type) type {
             const T = sequences.Item(Input);
+            @import("../data/failures.zig").requireHandledBeforeDropping(T);
             if (@sizeOf(T) == 0) @compileError("hold: zero-sized state values are not supported");
             _ = @TypeOf(@as(T, if (comptime isLiteral(Initial)) literal else @as(Initial, undefined)));
             return struct {

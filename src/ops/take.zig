@@ -4,8 +4,9 @@ const declarations = @import("../data/declarations.zig");
 /// Forward at most limit items in order, then end successfully without another
 /// input probe. Short input ends normally; zero never calls the input cursor.
 /// Counts items at this position: after filter counts matches, before it counts
-/// input. Optional/error-valued elements stay data. Observed cursor errors
-/// propagate; errors beyond the prefix are not probed for.
+/// input. Pending operation errors pass without spending success-item budget;
+/// errors beyond the prefix are not probed for. Cursor/control failures remain
+/// fatal. Optional or explicitly boxed error-valued elements remain ordinary data.
 ///
 /// All inputs are cold declarations executed by run. Finite storage declared
 /// with fromSlice replays; borrowed consuming iterators resume their position.
@@ -39,6 +40,7 @@ const Take = struct {
 fn Prefix(comptime Source: type) type {
     declarations.requireSource(Source);
     const Element = sequences.Item(Source);
+    @import("../data/failures.zig").requireHandledBeforeDropping(Element);
     return struct {
         source: Source,
         limit: usize,

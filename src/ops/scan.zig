@@ -27,7 +27,8 @@ const sequences = @import("../data/sequences.zig");
 /// Exclusive synchronous regions keep the recurrence in a typed cursor; naming
 /// a stage alone does not add a queue/task. Stable references share one recurrence.
 /// Last-reader retirement stops unused inputs; prefetch can process beyond a
-/// delivered take prefix. Source errors/cancellation use normal run failure/join semantics;
+/// delivered take prefix. Pending operation errors pass without changing state.
+/// Source errors/cancellation use normal run failure/join semantics;
 /// optional/error-valued items stay data. Use hold(seed) for sampleable current
 /// state and values for initial plus every replacement. See examples/scan.zig.
 pub fn scan(initial: anytype, comptime reducer: anytype) Scan(reducer) {

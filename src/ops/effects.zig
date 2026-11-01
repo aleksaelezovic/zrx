@@ -1,4 +1,7 @@
 //! Deferred terminal effects; leading callback parameters are injected services.
+//! Pending operation errors arriving here are unhandled and fail run. Collection/
+//! batching discards pending storage, not earlier effects. To handle a failure,
+//! recover upstream or route it through whenError as an explicit Failure record.
 const std = @import("std");
 const decl = @import("../data/declarations.zig");
 const seq = @import("../data/sequences.zig");
@@ -6,6 +9,30 @@ const cb = @import("../internal/callbacks.zig");
 const composition = @import("../internal/composition.zig");
 const dependencies = @import("../internal/world/dependencies.zig");
 pub const Mode = enum { each, collect, batch };
+
+/// Explicitly consume and ignore successful items (including Failure records
+/// deliberately routed here). A pending, unhandled operation error still fails.
+pub fn discard() Discard {
+    return .{};
+}
+const Discard = struct {
+    pub fn Output(comptime Source: type) type {
+        return Flow(Source, struct {
+            pub const http_scoped_supported = true;
+            pub fn prepare(_: *@This(), _: std.mem.Allocator) !void {}
+            pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
+            pub fn consume(_: @This(), reader: anytype, _: anytype, _: std.mem.Allocator, _: std.Io) !void {
+                var cursor = reader.iterator();
+                while (try cursor.next()) |value| {
+                    _ = @import("../internal/error_receipt.zig").accept(value);
+                }
+            }
+        });
+    }
+    pub fn apply(_: @This(), source: anytype) Output(@TypeOf(source)) {
+        return .{ .source = source, .consumer = .{} };
+    }
+};
 
 pub fn terminal(comptime mode: Mode, size: usize, comptime effect: anytype) Terminal(mode, effect) {
     return .{ .size = size };
@@ -53,13 +80,13 @@ fn Terminal(comptime mode: Mode, comptime effect: anytype) type {
                     } else if (mode == .collect) {
                         var values: std.ArrayList(T) = .empty;
                         defer values.deinit(allocator);
-                        while (try input.next()) |value| try values.append(allocator, value);
+                        while (try input.next()) |value| try values.append(allocator, @import("../internal/error_receipt.zig").accept(value));
                         try io.checkCancel();
                         try invoke(env, @as([]const T, values.items));
                     } else {
                         var count: usize = 0;
                         while (try input.next()) |value| {
-                            self.storage[count] = value;
+                            self.storage[count] = @import("../internal/error_receipt.zig").accept(value);
                             count += 1;
                             if (count == self.storage.len) {
                                 try io.checkCancel();

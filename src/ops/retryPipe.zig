@@ -4,6 +4,7 @@ const seq = @import("../data/sequences.zig");
 const cb = @import("../internal/callbacks.zig");
 const composition = @import("../internal/composition.zig");
 const transforms = @import("../internal/transforms.zig");
+const outcomes = @import("../internal/outcomes.zig");
 
 /// Explicit stop-or-delay decision. Zero milliseconds retries immediately,
 /// with a cancellation poll; a positive delay uses run's Io and awake clock.
@@ -25,8 +26,9 @@ pub const RetryOptions = struct {
 /// belong outside the attempt: no stateful singleton-pipeline reinterpretation.
 ///
 /// Every attempt restarts from the original shallow input. On success emit the
-/// final payload as E!T data; on policy stop emit the last operation error as
-/// E!T data. Following items continue. Counts reset per item/run and saturate at
+/// final payload T; on policy stop forward the last operation error as pending,
+/// exactly like an ordinary failed map/tap. Use recover or whenError outside
+/// the attempt; only unhandled errors fail run. Counts reset per item/run and saturate at
 /// maxInt(usize). Sharing by stable reference evaluates one retry boundary.
 ///
 /// Policy is RetryOptions/an options literal, or a comptime-known typed
@@ -37,7 +39,8 @@ pub const RetryOptions = struct {
 /// losslessly to the standard Io duration representation.
 ///
 /// Cancellation is never policy input or item data. Poll even for zero delay.
-/// Source, acquisition and downstream errors retain normal run failure behavior.
+/// Source/acquisition failures remain execution control. Downstream operation
+/// errors use the same pending-error rules, but are never retried here.
 /// An indefinite retry backpressures following items; no new worker/queue is
 /// implied. Request-scoped HTTP lanes are unsupported in this first milestone.
 ///
@@ -95,7 +98,7 @@ fn Description(comptime Source: type, comptime Operators: type, comptime P: type
         pub const graph_tag = seq.GraphTag;
         pub const sequence_tag = seq.SequenceTag;
         pub const node_kind = .retry;
-        pub const Item = Meta.Result;
+        pub const Item = Meta.Payload;
         pub const Requirements = declarations.concat(declarations.requirements(Source), &LocalServices);
         pub const retry_meta = struct {
             pub fn validate(policy: if (is_function) P else RetryOptions) !void {
@@ -103,13 +106,13 @@ fn Description(comptime Source: type, comptime Operators: type, comptime P: type
                     if (policy.max_attempts == 0) return error.InvalidRetryAttempts;
                 }
             }
-            pub fn run(operators: Operators, policy: if (is_function) P else RetryOptions, env: anytype, original: seq.Item(Source), output: *Meta.Result) std.Io.Cancelable!void {
+            pub fn run(operators: Operators, policy: if (is_function) P else RetryOptions, env: anytype, original: seq.Item(Source), output: *outcomes.Outcome(Meta.Payload)) std.Io.Cancelable!void {
                 var retries: usize = 0;
                 while (true) {
                     try env.io().checkCancel();
                     if (Meta.run(operators, env, original)) |value| {
                         try env.io().checkCancel();
-                        output.* = value;
+                        output.* = .{ .value = value };
                         return;
                     } else |err| {
                         if (@as(anyerror, err) == error.Canceled) return error.Canceled;
@@ -123,7 +126,7 @@ fn Description(comptime Source: type, comptime Operators: type, comptime P: type
                         try env.io().checkCancel();
                         switch (decision) {
                             .stop => {
-                                output.* = err;
+                                output.* = .{ .failure = err };
                                 return;
                             },
                             .retry_after_ms => |delay| {
