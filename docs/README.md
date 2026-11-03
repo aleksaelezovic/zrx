@@ -74,8 +74,12 @@ smoke-check their entry points and import reusable compositions.
 ## Standalone applications
 
 [App project and testing conventions](../examples/apps/README.md) define the
-separate `examples/apps/` area. The [record processor](../examples/apps/record-processor/README.md)
-is an independently built CLI with managed command/I/O resources, typed processing
-stages, diagnostics and finite executable simulations. Apps own their
-dependencies and checks; the library build does not build them or resolve their
-app-only dependencies.
+separate `examples/apps/` area:
+
+- [Record processor](../examples/apps/record-processor/README.md): managed
+  command/I/O resources, typed processing stages and diagnostics.
+- [Durable checkout](../examples/apps/durable-checkout/README.md): SQLite-backed
+  local issuance with duplicate/conflict handling and real restart/crash simulations.
+
+Apps own their dependencies and checks; the library build does not build them
+or resolve their app-only dependencies. SQLite belongs only to the checkout app.
