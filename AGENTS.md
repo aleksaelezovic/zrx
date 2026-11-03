@@ -16,6 +16,10 @@ to this file; edit `AGENTS.md`, not copies.
 - Public pipelines start from declarations, not raw scalar/slice values.
   `fromValue`, `fromSlice`, borrowed adapters and producer/I/O sources stay cold.
   Selected roots must end with terminal effects returning void or E!void.
+- Prefer ordinary operators with named domain handlers over app-specific
+  operator protocols. Make command decisions, transformations and effects
+  visible in the composition. Bootstrap and OS exit policy may stay in main;
+  do not force unsupported graphs into nested run calls or mutable status cells.
 - The package is `zrx`, not a separate "world" framework. Do not reintroduce
   public eager value executors, `With` variants, or parallel old/new APIs.
   Keep one implementation and test the current API, not a compatibility facade.
@@ -52,6 +56,10 @@ to this file; edit `AGENTS.md`, not copies.
 - Failed constructors own their partial cleanup. Release returns void and uses
   non-failing, uncancelable cleanup. Fallible finalization is not a release
   shortcut; successful terminal finalization can fail normally.
+- `resource(config, acquire, null)` explicitly provides no independent cleanup;
+  borrowed dependencies still outlive users. Typed reader/writer configuration
+  providers inject every parameter and return exact Config or E!Config once
+  during acquisition, never at declaration construction or per item.
 - No ambient service globals, universal user context, runtime DI registry or
   per-item service lookup. Inject only the requested types. Static validation
   covers declared requirements, not arbitrary hidden global access.
@@ -69,6 +77,14 @@ to this file; edit `AGENTS.md`, not copies.
 - Map/each transform stream items as whole values, including arrays/slices.
   Signal map transforms whole current state. Filter is explicit item selection.
   Tap forwards the item after effects; per-item terminal effects return void.
+- `fromService(T)` emits one shallow exact binding after acquisition.
+  `flatMap` serially expands by-value synchronous pull declarations with static
+  enclosing DI, not child resource scopes, shared references or producer/HTTP
+  graphs. Supported pull forms do not prove termination. `flatten` owns current
+  array/Chunk storage; slice referents remain borrowed.
+- `splitBy` uses bounded owned frames across chunks; predicates are pure typed
+  callbacks with normal injected prefixes. First pending error/overflow discards
+  unfinished framing and ends; only normal end can emit a final tail.
 - Finite reductions are deferred left folds from a shallow seed copy per run.
   Reducers return exactly A or E!A; outer error-union seeds are rejected.
   First operation/reducer error discards partial state, emits a pending error,
@@ -162,6 +178,11 @@ to this file; edit `AGENTS.md`, not copies.
   shared-writer serialization are not promised.
 - Line(n) owns bounded bytes inline. LF is framing; CR/encoding remain data.
   General listeners/full-duplex sessions are separate. No human/network waits in defaults.
+- Reader/Writer owners manage bytes and handle lifetime, not framing. Use
+  readChunks/readerLines and splitBy/flatten explicitly. Generic writer recipes
+  require serial use and do not add endpoint/path conflict detection; successful
+  writes/flushes may fail, release never flushes failed work. Arguments owns the
+  full argv vector; command parsing remains app-domain policy.
 - HTTP uses a bounded serial listener/request scope and standard body reader.
   Request/response referents expire at completion, not at run end. Exclusive
   routing and per-item effects track completion; unsupported fan-out, retention,

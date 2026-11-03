@@ -21,7 +21,9 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Area | Source |
 |---|---|
 | Declaration composition and callbacks | [`pipe`, `map`/`each`, `filter`, `tap`](../src/compose.zig) |
-| Finite inputs, producers, deferred reduction | [`fromSlice`, `fromValue`, `Stream`, `fold`](../src/data/declarations.zig) |
+| Sequential declaration expansion | [`flatMap`](../src/ops/flatMap.zig) |
+| Chunk expansion and bounded framing | [`flatten`](../src/ops/flatten.zig), [`splitBy`](../src/ops/splitBy.zig), [`Chunk`](../src/data/chunks.zig) |
+| Finite inputs, bound services, producers, deferred reduction | [`fromSlice`, `fromValue`, `fromService`, `Stream`, `fold`](../src/data/declarations.zig) |
 | Borrowed consuming inputs | [`fromIterator`](../src/compose.zig), [`readFrom`](../src/io/readFrom.zig) |
 | Accumulated updates | [`scan`](../src/ops/scan.zig) |
 | Per-item retry boundaries | [`retryPipe`, `RetryDecision`, `RetryOptions`](../src/ops/retryPipe.zig) |
@@ -33,7 +35,9 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Terminal effects | [`forEach`, `collectThen`, `batchThen`, `discard`](../src/ops/effects.zig) |
 | Prefix, limits, suffix | [`take`](../src/ops/take.zig), [`maxItems`](../src/ops/maxItems.zig), [`takeLast`](../src/ops/takeLast.zig) |
 | Merge and state | [`merge`](../src/ops/merge.zig), [`hold`](../src/ops/hold.zig), [`values`](../src/ops/values.zig), [`withLatestFrom`](../src/ops/withLatestFrom.zig) |
-| Owned record values and I/O | [`Line`](../src/data/lines.zig), [line sources and resource glue](../src/io/lines.zig) |
+| Owned record values and line I/O | [`Line`](../src/data/lines.zig), [line sources and encoding](../src/io/lines.zig) |
+| Byte I/O and managed ownership | [`Reader`, `reader`, `Writer`, `writer`, `readChunks`, `writeTo`](../src/io/bytes.zig) |
+| Process argument ownership | [`Arguments`, `arguments`](../src/io/cli.zig) |
 | Serial HTTP server | [Request scopes, bodies and responses](../src/io/http.zig) |
 
 Only `run` executes declarations.

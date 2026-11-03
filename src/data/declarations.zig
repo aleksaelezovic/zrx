@@ -85,6 +85,33 @@ fn Value(comptime T: type) type {
     };
 }
 
+/// Emit one shallow copy of the exact typed binding after acquisition. Works
+/// with borrowed values and managed recipe results, using normal DI validation.
+/// Construction does not acquire/read the binding. Each run reads afresh;
+/// pointer identity shares evaluation just as for other source declarations.
+/// This does not transfer ownership, dereference pointers, or flatten optional/
+/// error-union bindings into control flow. The service must be a nonzero-sized
+/// runtime type; referents remain run-scoped.
+pub fn fromService(comptime Service: type) ServiceSource(Service) {
+    return .{};
+}
+
+fn ServiceSource(comptime Service: type) type {
+    switch (@typeInfo(Service)) {
+        .void, .noreturn, .type, .comptime_int, .comptime_float, .@"fn", .@"opaque", .null, .undefined => @compileError("fromService: expected a nonzero-sized runtime service type"),
+        else => {},
+    }
+    if (@sizeOf(Service) == 0)
+        @compileError("fromService: expected a nonzero-sized runtime service type");
+    return struct {
+        pub const graph_tag = seq.GraphTag;
+        pub const sequence_tag = seq.SequenceTag;
+        pub const node_kind = .service;
+        pub const Item = Service;
+        pub const Requirements = [_]type{Service};
+    };
+}
+
 pub const Operation = enum { map, filter, tap };
 
 pub fn transform(comptime operation: Operation, comptime input: anytype) Transform(operation, cb.functions(input, 1)) {

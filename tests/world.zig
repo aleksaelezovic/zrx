@@ -18,6 +18,71 @@ test "public API exposes one declaration-only surface without With variants" {
     try std.testing.expect(!@hasDecl(world.Stream(u32), "fromProducerWith"));
 }
 
+test "constructor-only bindings retain dependencies and work with nominal roles" {
+    const Owner = struct { value: u32 = 7 };
+    const Derived = struct { owner: *Owner };
+    const Role = struct { value: Derived };
+    const Lifetime = struct { owner: Owner = .{}, opened: usize = 0, closed: usize = 0, uses: usize = 0 };
+    const Functions = struct {
+        fn open(state: *Lifetime, _: void) *Owner {
+            state.opened += 1;
+            return &state.owner;
+        }
+        fn close(state: *Lifetime, _: *Owner) void {
+            state.closed += 1;
+        }
+        fn derive(owner: *Owner, _: void) Derived {
+            return .{ .owner = owner };
+        }
+        fn fail(owner: *Owner, _: void) error{ConstructFailed}!Derived {
+            _ = owner;
+            return error.ConstructFailed;
+        }
+        fn use(state: *Lifetime, role: Role, _: u32) !void {
+            try std.testing.expectEqual(@as(usize, 0), state.closed);
+            try std.testing.expectEqual(@as(u32, 7), role.value.owner.value);
+            state.uses += 1;
+        }
+    };
+    const derived = resource({}, Functions.derive, null);
+    try std.testing.expectEqual(@as(usize, 0), @TypeOf(derived).ReleaseServices.len);
+    const flow = pipe(fromSlice(&[_]u32{ 1, 2 }), .{forEach(Functions.use)});
+    var state: Lifetime = .{};
+    try run(.{
+        allocator,
+        io,
+        &state,
+        deriveResource(Role, derived),
+        resource({}, Functions.open, Functions.close),
+    }, .{flow});
+    try std.testing.expectEqual(@as(usize, 1), state.opened);
+    try std.testing.expectEqual(@as(usize, 1), state.closed);
+    try std.testing.expectEqual(@as(usize, 2), state.uses);
+
+    var cold: Lifetime = .{};
+    try run(.{
+        allocator,
+        io,
+        &cold,
+        deriveResource(Role, derived),
+        resource({}, Functions.open, Functions.close),
+    }, .{pipe(world.fromValue(@as(u32, 1)), .{world.discard()})});
+    try std.testing.expectEqual(@as(usize, 0), cold.opened);
+    try std.testing.expectEqual(@as(usize, 0), cold.closed);
+
+    var failed: Lifetime = .{};
+    try std.testing.expectError(error.ConstructFailed, run(.{
+        allocator,
+        io,
+        &failed,
+        deriveResource(Role, resource({}, Functions.fail, null)),
+        resource({}, Functions.open, Functions.close),
+    }, .{flow}));
+    try std.testing.expectEqual(@as(usize, 1), failed.opened);
+    try std.testing.expectEqual(@as(usize, 1), failed.closed);
+    try std.testing.expectEqual(@as(usize, 0), failed.uses);
+}
+
 test "unreachable large recipe results reserve no run-owned value storage" {
     const Huge = [16 * 1024 * 1024]u8;
     const Functions = struct {

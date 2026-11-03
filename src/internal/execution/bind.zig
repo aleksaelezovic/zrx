@@ -121,6 +121,8 @@ pub fn Scope(comptime Env: type) type {
             if (comptime @hasDecl(T, "node_kind")) {
                 if (T.node_kind == .slice) return .{ .input = input, .env = self.env };
                 if (T.node_kind == .value) return .{ .input = input, .env = self.env };
+                if (T.node_kind == .service) return .{ .input = input, .env = self.env };
+                if (T.node_kind == .reader) return .{ .input = input, .env = self.env };
                 if (T.node_kind == .producer) {
                     return .{ .capacity = input.capacity, .env = self.env };
                 }
@@ -159,6 +161,8 @@ pub fn Lowered(comptime T: type, comptime Env: type) type {
     if (@hasDecl(T, "node_kind")) {
         if (T.node_kind == .slice) return regions.View(T, Env);
         if (T.node_kind == .value) return regions.View(T, Env);
+        if (T.node_kind == .service) return regions.View(T, Env);
+        if (T.node_kind == .reader) return regions.View(T, Env);
         if (T.node_kind == .producer) return producer.Bound(T.Item, Env, T.callback);
         if (T.node_kind == .retained) return Retained(Lowered(@FieldType(T, "source"), Env));
         if (T.node_kind == .queue) return @TypeOf(@import("../../io/readFrom.zig").bind(@as(T, undefined), @as(std.Io, undefined)));

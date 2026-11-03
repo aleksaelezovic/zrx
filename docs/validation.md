@@ -18,7 +18,8 @@ zig build check
 - `test`: current behavior, expected-diagnostic compile failures, finite example
   entry points and actual I/O graphs using temporary files/finite loopback peers.
 - `declarative-test`: public dependency/resource, graph, operator, scan, branch
-  and HTTP suites.
+  and HTTP suites, including managed byte I/O/configuration, service sources,
+  synchronous declaration expansion and bounded framing.
 - `lifecycle-test`: forced alias/completion schedules and producer join/retirement
   orders, plus blocked reporting/cancellation and join-before-release checks.
   The small transport shim exposes no declaration operators/executor.

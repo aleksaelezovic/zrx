@@ -5,6 +5,7 @@ const sequences = @import("../data/sequences.zig");
 const runtime = @import("../internal/runtime/streams.zig");
 const resources = @import("../internal/resources.zig");
 const execution = @import("../internal/graph_run.zig");
+const bytes = @import("bytes.zig");
 const SourceTag = opaque {};
 
 fn requireHosted() void {
@@ -12,16 +13,17 @@ fn requireHosted() void {
         @compileError("line I/O requires a hosted target; Line values remain portable");
 }
 
-const Input = union(enum) {
-    stdin,
-    file: []const u8,
-    tcp: std.Io.net.IpAddress,
-};
-const OutputConfig = union(enum) {
-    stdout,
-    stderr,
-    file: struct { path: []const u8, options: std.Io.Dir.CreateFileOptions },
-};
+const Input = bytes.Reader.Config;
+/// Bounded line source from a borrowed standard reader or managed Reader pointer.
+/// The reader and its storage must remain stable through traversal. A flatMap
+/// factory can receive an injected service and pass its reader here directly.
+/// Reader failures and cancellation remain source/control failures.
+/// LF framing/bounds match fileLines. This is a synchronous pull declaration:
+/// no source worker, queue or prefetch is introduced. Borrowed reader position
+/// is consumed, not rewound. No shared-reader serialization is added.
+pub fn readerLines(comptime maxBytes: usize, input: anytype) bytes.ReadSource(maxBytes, @TypeOf(input), false) {
+    return .{ .input = input };
+}
 
 /// Declare LF-delimited stdin with bounded, inline Line(maxBytes) items.
 /// Declaration does no I/O/allocation. run owns the reader/buffer but never
@@ -69,11 +71,11 @@ fn Source(comptime maxBytes: usize) type {
                 .file => |path| .{ .read_file = path },
                 .tcp => null,
             };
-            const slot = try scope.add(InputResource, .{ .input = self.input }, claim);
+            const slot = try scope.add(bytes.Reader, .{ .input = self.input }, claim);
             const Producer = struct {
-                fn produce(input: *InputResource, output: *runtime.Stream(Item)) !void {
+                fn produce(input: *bytes.Reader, output: *runtime.Stream(Item)) !void {
                     while (true) {
-                        const value = records.next(maxBytes, input.reader(), input.io) catch |err|
+                        const value = records.next(maxBytes, input.interface(), input.io) catch |err|
                             return if (err == error.ReadFailed) input.failure() else err;
                         try output.push(value orelse return);
                     }
@@ -87,44 +89,6 @@ fn Source(comptime maxBytes: usize) type {
 pub fn isSource(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "io_source_tag") and T.io_source_tag == SourceTag;
 }
-
-const InputResource = struct {
-    input: Input,
-    io: std.Io = undefined,
-    buffer: [4096]u8 = undefined,
-    file: std.Io.File = undefined,
-    connection: std.Io.net.Stream = undefined,
-    file_reader: std.Io.File.Reader = undefined,
-    tcp_reader: std.Io.net.Stream.Reader = undefined,
-
-    pub fn acquire(self: *@This(), io: std.Io) !void {
-        self.io = io;
-        switch (self.input) {
-            .stdin, .file => {
-                self.file = if (self.input == .stdin) .stdin() else try std.Io.Dir.cwd().openFile(io, self.input.file, .{});
-                self.file_reader = self.file.readerStreaming(io, &self.buffer);
-            },
-            .tcp => |address| {
-                self.connection = try address.connect(io, .{ .mode = .stream, .protocol = .tcp });
-                self.tcp_reader = self.connection.reader(io, &self.buffer);
-            },
-        }
-    }
-
-    fn reader(self: *@This()) *std.Io.Reader {
-        return if (self.input == .tcp) &self.tcp_reader.interface else &self.file_reader.interface;
-    }
-    fn failure(self: *@This()) anyerror {
-        return if (self.input == .tcp) self.tcp_reader.err orelse error.ReadFailed else self.file_reader.err orelse error.ReadFailed;
-    }
-    pub fn release(self: *@This(), io: std.Io) void {
-        switch (self.input) {
-            .stdin => {},
-            .file => self.file.close(io),
-            .tcp => self.connection.close(io),
-        }
-    }
-};
 
 /// Deferred Line(maxBytes) terminal. run owns writer/buffering, not the process
 /// stdout handle. Writes payload + LF and flushes per record and on normal end.
@@ -157,7 +121,7 @@ pub fn writeFileLines(path: []const u8, options: std.Io.Dir.CreateFileOptions) S
 }
 
 const Sink = struct {
-    output: OutputConfig,
+    output: bytes.Writer.Config,
 
     pub fn Output(comptime SourceType: type) type {
         const Item = sequences.Item(SourceType);
@@ -172,8 +136,8 @@ const Sink = struct {
 fn Consumer(comptime Item: type) type {
     _ = Item;
     return struct {
-        output: OutputConfig,
-        slot: ?*OutputResource = null,
+        output: bytes.Writer.Config,
+        slot: ?*bytes.Writer = null,
 
         pub fn prepare(_: *@This(), _: std.mem.Allocator) !void {}
         pub fn prepareResources(self: *@This(), scope: *resources.Scope) !void {
@@ -182,7 +146,7 @@ fn Consumer(comptime Item: type) type {
                 .stderr => .stderr,
                 .file => |file| .{ .write_file = file.path },
             };
-            self.slot = try scope.add(OutputResource, .{ .output = self.output }, claim);
+            self.slot = try scope.add(bytes.Writer, .{ .output = self.output }, claim);
         }
         pub fn deinit(_: *@This(), _: std.mem.Allocator) void {}
         pub fn consume(self: @This(), reader: anytype, _: std.mem.Allocator, io: std.Io) !void {
@@ -191,33 +155,20 @@ fn Consumer(comptime Item: type) type {
             while (true) {
                 try io.checkCancel();
                 const value = (try input.next()) orelse break;
-                records.write(&slot.writer.interface, value) catch |err|
-                    return if (err == error.WriteFailed) slot.writer.err orelse err else err;
+                try writeLine(slot, value);
             }
             try io.checkCancel();
-            try slot.finish();
+            try slot.flush();
         }
     };
 }
 
-const OutputResource = struct {
-    output: OutputConfig,
-    file: std.Io.File = undefined,
-    writer: std.Io.File.Writer = undefined,
-    buffer: [4096]u8 = undefined,
-
-    pub fn acquire(self: *@This(), io: std.Io) !void {
-        self.file = switch (self.output) {
-            .stdout => .stdout(),
-            .stderr => .stderr(),
-            .file => |file| try std.Io.Dir.cwd().createFile(io, file.path, file.options),
-        };
-        self.writer = self.file.writerStreaming(io, &self.buffer);
-    }
-    fn finish(self: *@This()) !void {
-        self.writer.interface.flush() catch |err| return self.writer.err orelse err;
-    }
-    pub fn release(self: *@This(), io: std.Io) void {
-        if (self.output == .file) self.file.close(io);
-    }
-};
+/// Explicit Line(n) encoding: payload + LF, then a fallible flush. Accepts a
+/// standard writer pointer or managed byte Writer; does not close the writer.
+pub fn writeLine(output: anytype, value: anytype) !void {
+    if (comptime !records.isLine(@TypeOf(value))) @compileError("writeLine: expected Line(maxBytes)");
+    if (value.len > value.bytes.len) return error.InvalidLineLength;
+    try bytes.writeBytes(output, value.bytes[0..value.len]);
+    try bytes.writeBytes(output, "\n");
+    try bytes.flushOutput(output);
+}

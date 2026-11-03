@@ -10,7 +10,7 @@ const outcomes = @import("../outcomes.zig");
 pub fn finite(comptime Input: type) bool {
     const T = decl.Child(Input);
     if (!@hasDecl(T, "node_kind")) return false;
-    if (T.node_kind == .slice or T.node_kind == .value or T.node_kind == .iterator) return true;
+    if (T.node_kind == .slice or T.node_kind == .value or T.node_kind == .service or T.node_kind == .reader or T.node_kind == .iterator) return true;
     if (T.node_kind == .producer or T.node_kind == .queue or T.node_kind == .retained) return false;
     return finite(@FieldType(T, "source"));
 }
@@ -31,7 +31,7 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
             }
         };
     }
-    if (@hasDecl(T, "node_kind") and (T.node_kind == .slice or T.node_kind == .value)) {
+    if (@hasDecl(T, "node_kind") and (T.node_kind == .slice or T.node_kind == .value or T.node_kind == .service)) {
         return struct {
             source: T,
             env: *Env,
@@ -49,7 +49,136 @@ pub fn Cursor(comptime Input: type, comptime Env: type) type {
                 } else {
                     if (self.index != 0) return null;
                     self.index = 1;
-                    return .{ .value = self.source.value };
+                    return .{ .value = if (comptime T.node_kind == .service) self.env.get(T.Item) else self.source.value };
+                }
+            }
+        };
+    }
+    if (@hasDecl(T, "node_kind") and T.node_kind == .reader) {
+        return struct {
+            source: T,
+            env: *Env,
+            done: bool = false,
+            pub fn next(self: *@This()) anyerror!?T.Item {
+                return outcomes.unwrap(T.Item, try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(T.Item) {
+                try self.env.io().checkCancel();
+                if (self.done) return null;
+                const bytes = @import("../../io/bytes.zig");
+                const reader = bytes.readerInterface(self.source.input);
+                if (comptime T.is_chunked) {
+                    while (true) {
+                        try self.env.io().checkCancel();
+                        var value: T.Item = .{};
+                        var buffers = [_][]u8{&value.items};
+                        value.len = reader.readVec(&buffers) catch |err| switch (err) {
+                            error.EndOfStream => {
+                                self.done = true;
+                                return null;
+                            },
+                            else => return bytes.readerFailure(self.source.input),
+                        };
+                        if (value.len != 0) return .{ .value = value };
+                    }
+                }
+                const value = @import("../../data/lines.zig").next(T.Item.max_bytes, reader, self.env.io()) catch |err|
+                    return if (err == error.ReadFailed) bytes.readerFailure(self.source.input) else err;
+                if (value) |item| return .{ .value = item };
+                self.done = true;
+                return null;
+            }
+        };
+    }
+    if (@hasDecl(T, "node_kind") and (T.node_kind == .flatten or T.node_kind == .split)) {
+        const chunks = @import("../../data/chunks.zig");
+        const Source = @FieldType(T, "source");
+        const Chunk = seq.Item(Source);
+        const Element = chunks.Element(Chunk);
+        const splitting = T.node_kind == .split;
+        return struct {
+            source: T,
+            env: *Env,
+            input: Cursor(Source, Env),
+            chunk: ?Chunk = null,
+            index: usize = 0,
+            done: bool = false,
+            framing: if (splitting) @import("../framing.zig").State(Element, T.split_options) else void = if (splitting) .{} else {},
+
+            pub fn next(self: *@This()) anyerror!?T.Item {
+                return outcomes.unwrap(T.Item, try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(T.Item) {
+                if (self.done) return null;
+                while (true) {
+                    try self.env.io().checkCancel();
+                    if (self.chunk) |*chunk| {
+                        const elements = chunks.slice(chunk);
+                        while (self.index < elements.len) {
+                            try self.env.io().checkCancel();
+                            const element = elements[self.index];
+                            self.index += 1;
+                            if (comptime !splitting) return .{ .value = element };
+                            const item = self.framing.feed(element, T.matches(self.env, element)) catch |err| {
+                                self.done = true;
+                                self.framing = .{};
+                                return .{ .failure = err };
+                            };
+                            if (item) |value| return .{ .value = value };
+                        }
+                        self.chunk = null;
+                    }
+                    const item = (try self.input.nextOutcome()) orelse {
+                        self.done = true;
+                        if (comptime splitting) {
+                            if (self.framing.finish()) |value| return .{ .value = value };
+                        }
+                        return null;
+                    };
+                    switch (item) {
+                        .failure => |err| {
+                            if (comptime splitting) {
+                                self.done = true;
+                                self.framing = .{};
+                            }
+                            return .{ .failure = err };
+                        },
+                        .value => |value| {
+                            self.chunk = value;
+                            self.index = 0;
+                        },
+                    }
+                }
+            }
+        };
+    }
+    if (@hasDecl(T, "node_kind") and T.node_kind == .flat_map) {
+        return struct {
+            source: T,
+            env: *Env,
+            input: Cursor(@FieldType(T, "source"), Env),
+            child: ?Cursor(T.ChildSource, Env) = null,
+            pub fn next(self: *@This()) anyerror!?T.Item {
+                return outcomes.unwrap(T.Item, try self.nextOutcome());
+            }
+            pub fn nextOutcome(self: *@This()) anyerror!?outcomes.Outcome(T.Item) {
+                while (true) {
+                    try self.env.io().checkCancel();
+                    if (self.child) |*child| {
+                        if (try child.nextOutcome()) |item| return item;
+                        self.child = null;
+                    }
+                    const item = (try self.input.nextOutcome()) orelse return null;
+                    const value = switch (item) {
+                        .failure => |err| return .{ .failure = err },
+                        .value => |value| value,
+                    };
+                    const selected = cb.invoke(T.callback, self.env, .{value});
+                    const child = if (@typeInfo(@TypeOf(selected)) == .error_union)
+                        selected catch |err| return try outcomes.failed(T.Item, err)
+                    else
+                        selected;
+                    self.child = init(child, self.env);
                 }
             }
         };
@@ -183,8 +312,12 @@ pub fn init(input: anytype, env: anytype) Cursor(@TypeOf(input), @typeInfo(@Type
     const value = if (@typeInfo(Input) == .pointer and @typeInfo(Input).pointer.size == .one) input.* else input;
     if (comptime @hasDecl(T, "node_kind") and T.node_kind == .iterator)
         return .{ .input = seq.cursor(value.source), .env = env };
-    if (comptime @hasDecl(T, "node_kind") and (T.node_kind == .slice or T.node_kind == .value))
+    if (comptime @hasDecl(T, "node_kind") and (T.node_kind == .slice or T.node_kind == .value or T.node_kind == .service or T.node_kind == .reader))
         return .{ .source = value, .env = env };
+    if (comptime @hasDecl(T, "node_kind") and T.node_kind == .flat_map)
+        return .{ .source = value, .env = env, .input = init(value.source, env) };
+    if (comptime @hasDecl(T, "node_kind") and (T.node_kind == .flatten or T.node_kind == .split))
+        return .{ .source = value, .env = env, .input = init(value.source, env) };
     if (comptime !@hasDecl(T, "node_kind"))
         return .{ .input = seq.cursor(input), .env = env };
     return .{

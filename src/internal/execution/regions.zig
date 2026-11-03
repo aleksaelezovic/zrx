@@ -18,7 +18,8 @@ pub fn inlineNode(comptime T: type) bool {
     if (signals.isSignal(T)) return false;
     if (@hasDecl(T, "node_kind"))
         return T.node_kind == .map or T.node_kind == .filter or T.node_kind == .tap or T.node_kind == .fold or T.node_kind == .scan or
-            T.node_kind == .take or T.node_kind == .bounded or T.node_kind == .retry or T.node_kind == .recover;
+            T.node_kind == .take or T.node_kind == .bounded or T.node_kind == .retry or T.node_kind == .recover or T.node_kind == .flat_map or
+            T.node_kind == .flatten or T.node_kind == .split;
     return false;
 }
 
@@ -50,8 +51,11 @@ pub fn Rebased(comptime Original: type, comptime Boundary: type) type {
         pub const node_kind = Original.node_kind;
         pub const functions = if (@hasDecl(Original, "functions")) Original.functions else .{};
         pub const callback = if (@hasDecl(Original, "callback")) Original.callback else {};
+        pub const ChildSource = if (@hasDecl(Original, "ChildSource")) Original.ChildSource else void;
         pub const ErrorSet = if (@hasDecl(Original, "ErrorSet")) Original.ErrorSet else void;
         pub const retry_meta = if (@hasDecl(Original, "retry_meta")) Original.retry_meta else void;
+        pub const split_options = if (@hasDecl(Original, "split_options")) Original.split_options else {};
+        pub const matches = if (@hasDecl(Original, "matches")) Original.matches else {};
         source: Source,
         seed: if (@hasField(Original, "seed")) @FieldType(Original, "seed") else void,
         limit: usize,

@@ -68,6 +68,9 @@ not rolled back.
 |---|---|
 | `take` / `maxItems` | Forward without spending success-item budget; excess creates a pending `TooManyItems` and ends the edge |
 | `scan` | Forward without changing accumulated state |
+| `flatMap` | Skip the factory for pending outer errors; factory/child operation failures remain pending, while child reader/iterator failures stay execution control |
+| `flatten` | Forward pending errors unchanged; do not expand them |
+| `splitBy` | Discard unfinished frame, forward first pending error and end without another probe; excess frame length emits pending `FrameTooLong` and ends |
 | `fold` | Discard partial state, emit the first error, end without another probe |
 | `takeLast` | Discard retention, emit the first error, end |
 | `collectThen` / `batchThen` | Fail unhandled; discard pending storage, suppress end/partial callbacks |

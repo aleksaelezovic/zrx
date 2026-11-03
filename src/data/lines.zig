@@ -13,6 +13,20 @@ pub fn Line(comptime maxBytes: usize) type {
         pub const max_bytes = maxBytes;
         bytes: [maxBytes]u8 = @splat(0),
         len: usize = 0,
+
+        /// Copy into this bounded type using the same rule as line(n, bytes).
+        pub fn fromSlice(bytes: []const u8) error{LineTooLong}!@This() {
+            return line(maxBytes, bytes);
+        }
+
+        /// Format into owned inline storage. Excess output fails without
+        /// returning a truncated record; LF is not appended implicitly.
+        pub fn fromFormat(comptime fmt: []const u8, args: anytype) error{LineTooLong}!@This() {
+            var result: @This() = .{};
+            const text = std.fmt.bufPrint(&result.bytes, fmt, args) catch return error.LineTooLong;
+            result.len = text.len;
+            return result;
+        }
     };
 }
 
@@ -31,27 +45,19 @@ pub fn isLine(comptime T: type) bool {
         T.line_tag == Tag and T == Line(T.max_bytes);
 }
 
-// Standard readers own framing/transport buffers. Copy payload byte-by-byte
-// from their already-buffered interface; no buffer-size-dependent line limit.
+// Standard readers own framing/transport buffers. readSliceShort also supports
+// unbuffered readers; framing and the line bound never depend on buffer size.
 pub fn next(comptime maxBytes: usize, reader: *std.Io.Reader, io: std.Io) !?Line(maxBytes) {
-    var result: Line(maxBytes) = .{};
+    var state: @import("../internal/framing.zig").State(u8, .{ .max_items = maxBytes }) = .{};
     while (true) {
         try io.checkCancel();
-        const byte = reader.takeByte() catch |err| switch (err) {
-            error.EndOfStream => return if (result.len == 0) null else result,
-            else => return err,
-        };
-        if (byte == '\n') return result;
-        if (result.len == maxBytes) return error.LineTooLong;
-        result.bytes[result.len] = byte;
-        result.len += 1;
+        var one: [1]u8 = undefined;
+        if (try reader.readSliceShort(&one) == 0) {
+            var final = state.finish() orelse return null;
+            return line(maxBytes, final.slice()) catch unreachable;
+        }
+        const byte = one[0];
+        var item = (state.feed(byte, byte == '\n') catch return error.LineTooLong) orelse continue;
+        return line(maxBytes, item.slice()) catch unreachable;
     }
-}
-
-pub fn write(writer: *std.Io.Writer, value: anytype) !void {
-    if (comptime !isLine(@TypeOf(value))) @compileError("line output: expected Line(maxBytes) items");
-    if (value.len > value.bytes.len) return error.InvalidLineLength;
-    try writer.writeAll(value.bytes[0..value.len]);
-    try writer.writeByte('\n');
-    try writer.flush();
 }

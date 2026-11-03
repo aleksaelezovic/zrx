@@ -77,6 +77,10 @@ pub fn build(b: *std.Build) void {
     const transport = b.createModule(.{ .root_source_file = b.path("src/transport_test_api.zig"), .target = target, .optimize = optimize });
     inline for (.{
         .{ "resources", "tests/world.zig" },
+        .{ "service-io", "tests/service_io.zig" },
+        .{ "managed-reader", "tests/managed_reader.zig" },
+        .{ "byte-streams", "tests/byte_streams.zig" },
+        .{ "flat-map", "tests/flat_map.zig" },
         .{ "graphs", "tests/declarative_graphs.zig" },
         .{ "scan", "tests/declarative_scan.zig" },
         .{ "retry", "tests/retryPipe.zig" },

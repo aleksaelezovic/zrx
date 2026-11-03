@@ -4,6 +4,10 @@ All public behavior/contract suites import the one `zrx` package module:
 
 - `world.zig` and `world_loop.zig`: typed dependencies/resources, cold execution,
   coercions, finite lowering, callback failures and reverse release.
+- `service_io.zig` and `managed_reader.zig`: service-backed singleton inputs,
+  managed argv/readers/writers, injected configuration and lifetime/failure rules.
+- `flat_map.zig` and `byte_streams.zig`: synchronous child traversal, owned chunk
+  expansion, cross-chunk framing, pending errors and source/control failures.
 - `declarative_graphs.zig`: producer/shared regions, merge, signals, prefix
   retirement, allocation/startup failure, cancellation and actual file output.
 - `declarative_scan.zig` and `scan_example.zig`: recurrence, injected requirements,

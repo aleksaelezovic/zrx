@@ -14,19 +14,27 @@ pub fn Service(comptime T: type) type {
 /// Cold recipe. Acquire takes (services..., configuration), returning T
 /// or E!T. Release takes (services..., T), returning void. Failed acquire
 /// owns its partial cleanup. Release must use non-failing, uncancelable cleanup.
+/// Use null when the constructed value has no cleanup of its own (for example,
+/// derived configuration borrowing another binding). Dependencies still outlive
+/// all users; null does not infer destruction or close any referents.
 pub fn resource(config: anytype, comptime acquire_fn: anytype, comptime release_fn: anytype) Recipe(@TypeOf(config), acquire_fn, release_fn) {
     return .{ .config = config };
 }
 
 fn Recipe(comptime Config: type, comptime acquire_fn: anytype, comptime release_fn: anytype) type {
     const Acquire = callbacks.Info(acquire_fn, 1);
-    const Release = callbacks.Info(release_fn, 1);
+    const has_release = @TypeOf(release_fn) != @TypeOf(null);
+    const Release = if (has_release) callbacks.Info(release_fn, 1) else struct {
+        pub const Services: [0]type = .{};
+    };
     callbacks.validate(acquire_fn, &.{Config});
     const T = composition.Payload(Acquire.Return);
     if (T == void or @typeInfo(T) == .error_set)
         @compileError("world resource: acquire must provide a service value");
-    if (Release.Params[Release.Params.len - 1] != T or Release.Return != void)
-        @compileError("world resource: release must accept the provided type and return void");
+    if (has_release) {
+        if (Release.Params[Release.Params.len - 1] != T or Release.Return != void)
+            @compileError("world resource: release must accept the provided type and return void");
+    }
     return struct {
         pub const world_recipe_tag = RecipeTag;
         pub const Provided = T;
@@ -40,7 +48,7 @@ fn Recipe(comptime Config: type, comptime acquire_fn: anytype, comptime release_
         }
 
         pub fn release(_: @This(), env: anytype, value: T) void {
-            callbacks.invoke(release_fn, env, .{value});
+            if (comptime has_release) callbacks.invoke(release_fn, env, .{value});
         }
     };
 }

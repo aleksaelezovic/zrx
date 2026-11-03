@@ -10,6 +10,37 @@ other inputs. Construction does not iterate, call stage callbacks, acquire
 resources, or start tasks. Ordinary Zig expressions used to build configuration
 still evaluate normally.
 
+[`fromService(T)`](../src/data/declarations.zig) starts a pipe with one shallow
+copy of an exact typed binding, borrowed or managed, after acquisition. It
+reads afresh each run without transferring ownership or interpreting optional/
+error-union bindings as control flow. Normal DI validation and sharing apply.
+It lowers as a finite singleton source, not a producer/queue boundary.
+
+[`flatMap(factory)`](../src/ops/flatMap.zig) expands each successful item into a
+by-value synchronous declaration, draining it before taking another outer item.
+It supports finite pull forms such as values, slices, services, iterators,
+`readChunks` and `readerLines`, including their synchronous operators. The callback and child
+requirements join the enclosing run's static DI plan; there is no per-item
+acquisition, nested run, task or dynamic subscription. Shared declaration
+references and child graph/terminal boundaries are not supported. Here "finite"
+identifies the supported pull forms, not a proof that a supplied reader or
+iterator will terminate. Borrowed positions are consumed, not rewound.
+
+[`flatten()`](../src/ops/flatten.zig) expands array, slice or owned `Chunk` items
+in order. The cursor retains the current array/Chunk value, so a callback may
+return an array by value without lending a slice into a temporary. Slice
+referents remain borrowed. `map(factory), flatten()` is the simple array/chunk
+flat-map form; `flatMap` instead expands cold declarations.
+
+[`splitBy(separator, options)`](../src/ops/splitBy.zig) frames arrays/slices/Chunks
+across chunk boundaries. A delimiter value or pure typed predicate selects
+elements to exclude; predicates use normal service injection. Owned bounded
+frames survive later input, sharing and retention. Default policy emits empty
+delimited frames and a nonempty tail only at normal end. `.empty = .skip` treats
+delimiter runs as separators; `.final = .discard` drops the unfinished tail.
+It is serial state inside the direct-call region, not a new task/queue. Reader
+resources own bytes and buffering, independently of framing.
+
 Only `run(bindings, flows)` executes programs. Selected roots must terminate with
 effects returning `void` or `E!void`. Intermediate declarations may return items,
 signals, or reduction results. Unselected descriptions stay cold.
@@ -29,11 +60,14 @@ return types. Operators determine the trailing ordinary arguments:
 | Callback | Ordinary suffix | Injected prefix |
 |---|---|---|
 | `map`/`each`, `filter`, `tap`, `forEach` | Item | All preceding parameters |
+| `flatMap` factory | Item | All preceding parameters |
+| `splitBy` predicate | Chunk element | All preceding parameters |
 | `collectThen`, `batchThen` | Borrowed `[]const T` | All preceding parameters |
 | `fold`, `scan` | Accumulator, item | All preceding parameters |
 | Producer | `*Emitter(T)` | All preceding parameters |
 | Resource acquire | Configuration | All preceding parameters |
 | Resource release | Provided service value | All preceding parameters |
+| `reader`/`writer` configuration provider | None | All parameters |
 
 The suffix is always data, even if a matching service type exists. A struct
 parameter requests that struct as one service; it is not implicitly unpacked.
@@ -55,6 +89,11 @@ acquisition order. A successful acquire is released once in reverse dependency
 order; a failing acquire cleans up its own partial construction. Borrowed bindings
 are never implicitly destroyed. Values and injected parameters are shallow copies;
 address-stable mutable services should explicitly contain pointers.
+
+For a constructor-only derived value with no independent cleanup, use
+`resource(config, acquire, null)`. Its declared dependencies are still acquired
+first and retained through all users. Null means no finalizer, not inferred
+destruction, ownership transfer, or permission to leak acquired handles.
 
 Finite programs prepare terminal buffers before acquisition. Graph programs
 prepare readers/state/terminal buffers and gated terminal/state workers before
