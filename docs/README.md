@@ -74,6 +74,8 @@ smoke-check their entry points and import reusable compositions.
 ## Standalone applications
 
 [App project and testing conventions](../examples/apps/README.md) define the
-separate `examples/apps/` area. It currently has no implemented apps. Future apps
-own their dependencies and finite simulations; the library build does not build
-them or resolve their app-only dependencies.
+separate `examples/apps/` area. The [record processor](../examples/apps/record-processor/README.md)
+is an independently built CLI with managed command/I/O resources, typed processing
+stages, diagnostics and finite executable simulations. Apps own their
+dependencies and checks; the library build does not build them or resolve their
+app-only dependencies.

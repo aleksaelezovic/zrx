@@ -4,8 +4,14 @@ Small, realistic applications live here as independent Zig projects. The
 [examples above this directory](../../docs/README.md#executable-examples) remain
 focused API demonstrations built by the library's root build.
 
-This directory currently contains conventions only: no app implementation,
-third-party dependency, app runner or CI integration has been added.
+## Applications
+
+| App | Purpose | Validation |
+|---|---|---|
+| [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and summary | Run the project-local commands below from `record-processor/` |
+
+There is no shared app runner or app CI integration. Each app owns its build and
+tests; adding an app does not add its dependencies to the library.
 
 ## Project boundary
 
