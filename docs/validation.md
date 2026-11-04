@@ -103,5 +103,11 @@ assertions remain active. All expected diagnostics and cross fixtures stay in
 the graph. Cache misses use the same complete commands, not a reduced fallback.
 The standalone-app jobs still opt out of build caching.
 
+The library CI commands pass `-Dcpu=baseline` so the runner's changing CPU
+model/features do not change compilation inputs. Binaries still execute directly
+on the Linux host. This is a CI-only CPU policy: user/local defaults, app jobs
+and the explicit cross-target catalog are unchanged. Native-host diagnostics
+continue to report the actual machine, not the baseline validation CPU.
+
 See the [restored-cache experiment](measurements/library-cache/README.md) for
 measured execution evidence, the cache namespace and limitations.

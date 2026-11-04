@@ -26,7 +26,7 @@ jobs:
         uses: ./.github/actions/setup-zig
         with:
           use-cache: 'true'
-          cache-key: library-validation-v1
+          cache-key: library-validation-v2-baseline
 
       - name: Record library validation environment
         run: |
@@ -39,11 +39,12 @@ jobs:
 
       # The build owns the current API tests and single cross-target catalog.
       # Only native tests execute here; cross builds do not run foreign binaries.
+      # Fix CPU selection across heterogeneous hosts; user build defaults stay native.
       - name: Run full validation
-        run: zig build check --summary all
+        run: zig build check -Dcpu=baseline --summary all
 
       - name: Run ReleaseFast native tests
-        run: zig build test -Doptimize=ReleaseFast --summary all
+        run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline --summary all
 
   apps:
     name: "App: ${{ matrix.app }}"

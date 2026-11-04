@@ -70,9 +70,12 @@ after the experiment. These are local observations, not hosted-CI forecasts.
 
 Only the library job opts into caching through the existing pinned
 `mlugg/setup-zig` action. Its cache key includes job, platform/architecture and
-exact compiler version; `library-validation-v1` adds an explicit policy
-namespace. Source changes use Zig's normal dependency/content validation,
-not a workflow condition that skips commands on a cache hit.
+exact compiler version; `library-validation-v2-baseline` isolates the current
+policy from the earlier `library-validation-v1` experiment. Both library CI
+commands now select `-Dcpu=baseline`, rather than each runner's native CPU.
+User/local build defaults and app jobs are unchanged. Source changes use Zig's
+normal dependency/content validation, not a workflow condition that skips
+commands on a cache hit.
 
 The upstream action restores the latest matching cache and saves a new one
 per run/attempt. Its existing 2 GiB limit remains: oversized directories are
@@ -82,9 +85,10 @@ No secrets or extra generated packages are intentionally added to the cache.
 
 The [hosted follow-up and investigation](investigation.md) found successful cache
 transport and cross-object reuse, but no native executable reuse. The restored
-directory exceeded the limit and was cleared. The local result above must not
-be presented as a hosted caching speedup; native CPU variation remains an
-unproven hypothesis. No general runtime performance improvement is claimed.
+directory exceeded the limit and was cleared. Subsequent diagnostics confirmed
+different native CPU configurations between runners, justifying those misses.
+The baseline policy is the next hosted experiment, not an established speedup.
+No general runtime performance improvement is claimed.
 
 ## Validation
 

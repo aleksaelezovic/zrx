@@ -77,27 +77,49 @@ The baseline probe resolved `generic` without those feature additions.
 Generated `builtin.zig` files confirmed the distinct feature sets. This shows
 why logging the architecture/OS/ABI triple alone is insufficient.
 
-## What remains unproven
+## Follow-up: native CPU configurations differed
 
-The hosted evidence is consistent with varying native CPU features, while
-fixed cross targets retain their objects. But the two historical jobs did not
-log resolved CPU models/features, so their CPU equality or difference cannot
-be established from those logs.
+The two attempts of
+[diagnostic run 41929030704](https://github.com/aleksaelezovic/zrx/actions/runs/41929030704)
+used commit `450adf7c906a20345fe8ffde31c1867ca03f55c6`. Both passed every
+test/smoke execution in both build modes; the rerun reused 46/46 cross objects
+but 0/29 native artifacts per mode.
 
-The controlled probes did not reproduce misses caused solely by tool-path,
-inode, timestamp or archive restoration changes. That weakens those explanations;
-it does not eliminate every x86-64-specific compiler/linker or environment issue.
+| | Attempt 1 | Attempt 2 |
+|---|---|---|
+| Reported hardware | AMD EPYC 7763 | AMD EPYC 9V74 |
+| Zig CPU model | `znver3` | `znver4` |
+| `check` | 4m 25s | 2m 39s |
+| ReleaseFast validation | 11m 16s | 9m 59s |
 
-The next diagnostic change records `lscpu` plus Zig's actual resolved native
-triple and serialized CPU selection, using
-[`tests/ci_target.zig`](../../../tests/ci_target.zig). The helper runs through the
-same pinned compiler, independently of the declaration library and its tests.
-No CI target, CPU flags, cache namespace or size limit changes in this increment.
+The full serialized CPU selections were
+`znver3-mwaitx-pku+shstk-wbnoinvd` and
+`znver4-avx512bf16-avx512bitalg-avx512bw-avx512cd-avx512dq-avx512f-avx512ifma-avx512vbmi-avx512vbmi2-avx512vl-avx512vnni-avx512vpopcntdq-gfni-mwaitx-pku-wbnoinvd`.
+The native triples and runner image version were identical. The cache grew from
+1,501,585,575 to 2,948,655,134 bytes and was cleared by the 2 GiB limit.
 
-Compare two new hosted runs before choosing a remedy. If native CPU differences
-are confirmed, consider separate cache namespaces per resolved native
-configuration, preserving current CPU coverage. A fixed baseline compilation
-target is a different policy decision, not a silent cache fix.
+Those CPU differences are sufficient to invalidate native artifacts; reuse is
+not expected across them. There is no demonstrated Zig or setup-action bug.
+Other inputs can still affect reuse, and these observations do not quantify
+every compiler/linker cost or promise the CPU fix is the only remaining issue.
+
+## Baseline CPU experiment
+
+The accepted next policy uses `-Dcpu=baseline` on both library CI build commands,
+with a fresh `library-validation-v2-baseline` cache namespace. Binaries still
+execute on the native Linux runner; only their CPU model/features are fixed.
+The size limit remains 2 GiB. User/local defaults, app jobs, compiler version,
+optimization modes and cross fixtures are unchanged. No validation is skipped.
+
+Keeping native CPU selection and partitioning caches by CPU was the alternative;
+baseline selection favors reproducible regular CI inputs over host-specific CPU
+coverage. The first run must seed the new namespace. A later cache-restoring
+run is required to establish hosted artifact reuse and any end-to-end benefit.
+
+`lscpu` and [`tests/ci_target.zig`](../../../tests/ci_target.zig) continue to report
+the actual host CPU. The latter runs independently of the library and is not
+itself passed the baseline CPU option; its output must not be mistaken for the
+validation binaries' CPU policy.
 
 ## Validation and limits
 
@@ -107,4 +129,10 @@ passed on native macOS ARM64 with exactly Zig 0.17.0. No application source,
 library runtime, test count, cross catalog or optimization policy changed.
 Workflow lint, YAML/Bash syntax, local links, instruction symlinks and whitespace
 checks passed; ShellCheck was unavailable.
-The diagnostic workflow has not been pushed or run on GitHub yet.
+The diagnostic workflow subsequently passed both hosted attempts described above.
+The baseline commands, `zig build check -Dcpu=baseline --summary all` and
+`zig build test -Doptimize=ReleaseFast -Dcpu=baseline --summary all`, also passed
+locally with Zig 0.17.0 on macOS ARM64. Each executed 243 tests in 20 runners
+and eight smoke examples; `check` included the unchanged cross catalog.
+The baseline policy's hosted results remain pending; these local results are
+not Linux execution or cache-reuse evidence.
