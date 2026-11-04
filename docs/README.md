@@ -81,6 +81,8 @@ separate `examples/apps/` area:
   command/I/O resources, typed processing stages and diagnostics.
 - [Durable checkout](../examples/apps/durable-checkout/README.md): SQLite-backed
   local issuance with duplicate/conflict handling and real restart/crash simulations.
+- [HTTP jobs](../examples/apps/http-jobs/README.md): bounded in-memory
+  submission/status service with declarative routing and managed listener ownership.
 
 Apps own their dependencies and checks; the library build does not build them
 or resolve their app-only dependencies. SQLite belongs only to the checkout app.

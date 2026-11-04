@@ -10,6 +10,7 @@ focused API demonstrations built by the library's root build.
 |---|---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and summary | Run the project-local commands below from `record-processor/` |
 | [Durable checkout](durable-checkout/README.md) | SQLite-backed local issuance, persisted idempotency and process-restart/crash simulations | Run the project-local commands below from `durable-checkout/`; requires Python 3 with `sqlite3` for tests |
+| [HTTP jobs](http-jobs/README.md) | Bounded serial submission/status service, visible route/response branches and managed server lifetime | Run the project-local commands below from `http-jobs/` |
 
 There is no shared app runner or app CI integration. Each app owns its build and
 tests; adding an app does not add its dependencies to the library.
