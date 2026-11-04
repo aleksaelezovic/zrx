@@ -174,6 +174,34 @@ test "acquisition failure remains control flow without readiness or effects" {
     try std.testing.expectEqual(@as(usize, 0), store.len);
 }
 
+test "readiness output preserves cancellation and closes its partially acquired listener" {
+    const Fault = struct {
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .file_write_streaming) return error.Canceled;
+            return io.vtable.operate(userdata, operation);
+        }
+    };
+    var table = io.vtable.*;
+    table.operate = Fault.operate;
+    const observed: std.Io = .{ .userdata = io.userdata, .vtable = &table };
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const file = try temp.dir.createFile(io, "console", .{});
+    defer file.close(io);
+    var ready: zrx.HttpReady = .{};
+    var store = try Store.init(allocator, 1);
+    defer store.deinit(allocator);
+    const settings: app.commands.Config = .{ .connections = 0, .max_jobs = 1 };
+    try std.testing.expectError(error.Canceled, zrx.run(.{
+        allocator,                                                   observed, settings, &store,
+        app.resources.server(.{ .ready = &ready, .console = file }),
+    }, .{app.composition.program}));
+    try std.testing.expect(ready.ready.isSet());
+    var rebound = try ready.address.listen(io, .{});
+    rebound.deinit(io);
+    try std.testing.expectEqual(@as(usize, 0), store.len);
+}
+
 fn allocationFixture(a: std.mem.Allocator) !void {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();

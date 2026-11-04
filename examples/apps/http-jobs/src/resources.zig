@@ -52,8 +52,10 @@ fn openServer(allocator: std.mem.Allocator, io: std.Io, settings: commands.Confi
     errdefer owner.release(io);
     var buffer: [256]u8 = undefined;
     var output = options.console.writerStreaming(io, &buffer);
-    try output.interface.print("ready http://{f}\n", .{owner.address()});
-    try output.interface.flush();
+    const message = try zrx.Line(256).fromFormat("ready http://{f}", .{owner.address()});
+    // Keep the file writer's underlying error, especially cancellation during
+    // acquisition, instead of exposing only the erased interface's WriteFailed.
+    try zrx.writeLine(&output, message);
     return .{ .server = owner };
 }
 

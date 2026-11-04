@@ -23,6 +23,8 @@ and a spawned executable simulation checking status/headers/body, stdout,
 stderr, exit status and listener cleanup. `check` also checks formatting and
 builds/installs the executable. Scenarios have a 10-second watchdog, ephemeral
 ports, explicit readiness/completion and joined cancellation/child cleanup.
+An injected readiness-write cancellation checks that acquisition preserves the
+underlying error and releases the partially acquired listener.
 No default command starts a live server, contacts public services, sleeps or
 waits for human input. Run tests on a native hosted target; foreign execution is
 not provided.
