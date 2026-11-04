@@ -1,0 +1,5 @@
+phase,command,wall_seconds,child_user_cpu_seconds,child_system_cpu_seconds,exit_code,cache_file_bytes
+cold-check,zig build check --summary all --color off,91.410218,196.305679,38.473037,0,535769775
+cold-release,zig build test -Doptimize=ReleaseFast --summary all --color off,70.811399,312.355928,31.059846,0,715539166
+restored-check,zig build check --summary all --color off,6.796508,18.760268,23.429238,0,715849414
+restored-release,zig build test -Doptimize=ReleaseFast --summary all --color off,5.040039,13.628792,19.946845,0,716159662

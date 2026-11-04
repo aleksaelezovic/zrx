@@ -24,6 +24,9 @@ jobs:
 
       - name: Set up pinned Zig
         uses: ./.github/actions/setup-zig
+        with:
+          use-cache: 'true'
+          cache-key: library-validation-v1
 
       - name: Record library validation environment
         run: |

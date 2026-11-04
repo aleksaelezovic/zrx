@@ -95,10 +95,11 @@ CI-cache speedup. The uncached step table above supplies the execution evidence.
 
 ## Recommended next experiment
 
-First obtain native Linux attribution. The pending workflow change records the
+First obtain native Linux attribution. The diagnostic workflow records the
 runner CPU/memory/target and adds `--summary all` to the two library commands,
-without changing their checks. Its next hosted run can confirm or revise the
-local compilation-dominant finding.
+without changing their checks. The subsequent hosted run confirmed the
+compilation-dominant finding; see the
+[cache experiment](../library-cache/README.md) for that run's evidence.
 
 Then evaluate **compiled-artifact caching with every unit test and executable
 smoke still executed**, rather than blindly enabling cached test results. Compare
@@ -121,5 +122,6 @@ fingerprint was unchanged.
 
 The workflow passed actionlint 1.7.12 without ShellCheck integration (unavailable),
 YAML parsing and `bash -n` for its run blocks. Local documentation links,
-instruction symlink targets and whitespace checks passed. The changed workflow
-has not run on GitHub yet; no exact Linux per-artifact attribution is claimed.
+instruction symlink targets and whitespace checks passed. These local observations
+precede the linked hosted follow-up and do not attribute the earlier 9m 49s run
+retroactively.

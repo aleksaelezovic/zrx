@@ -1,6 +1,14 @@
 name: Set up pinned Zig
 description: Install and verify the repository's exact Zig version
 
+inputs:
+  use-cache:
+    description: Restore and save Zig build caches; callers must rerun validation processes
+    default: 'false'
+  cache-key:
+    description: Additional cache namespace within the upstream job/platform/compiler key
+    default: ''
+
 runs:
   using: composite
   steps:
@@ -18,7 +26,8 @@ runs:
       uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
       with:
         version: ${{ steps.zig_version.outputs.version }}
-        use-cache: false
+        use-cache: ${{ inputs.use-cache }}
+        cache-key: ${{ inputs.cache-key }}
 
     - name: Verify Zig version
       shell: bash

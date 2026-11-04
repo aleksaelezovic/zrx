@@ -95,3 +95,13 @@ The [library ReleaseFast profile](measurements/library-releasefast/README.md)
 separates artifact compilation from test execution and reproduces CI's
 check-then-ReleaseFast cache ordering. Library CI records its environment and
 full Zig step summaries so a long successful run has per-artifact evidence.
+
+Library validation reuses Zig's compilation cache, but every unit-test executable
+and finite example/smoke run executes on every invocation, even on a cache hit.
+The build marks those run steps with `has_side_effects`; output and exit-status
+assertions remain active. All expected diagnostics and cross fixtures stay in
+the graph. Cache misses use the same complete commands, not a reduced fallback.
+The standalone-app jobs still opt out of build caching.
+
+See the [restored-cache experiment](measurements/library-cache/README.md) for
+measured execution evidence, the cache namespace and limitations.

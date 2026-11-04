@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
         });
         demos[i] = exe;
         const run = b.addRunArtifact(exe);
+        run.has_side_effects = true;
         if (comptime std.mem.eql(u8, name, "resources"))
             run.expectStdErrEqual("Resources: primary=6 audit=12 acquired=2 released=2\n");
         if (comptime std.mem.eql(u8, name, "streams"))
@@ -69,6 +70,7 @@ pub fn build(b: *std.Build) void {
     }) });
     b.step("http-example", "Build/install the opt-in HTTP server").dependOn(&b.addInstallArtifact(http, .{}).step);
     const http_smoke = b.addRunArtifact(http);
+    http_smoke.has_side_effects = true;
     http_smoke.addArgs(&.{ "0", "0" });
     http_smoke.expectExitCode(0);
     public_tests.dependOn(&http_smoke.step);
@@ -119,6 +121,8 @@ pub fn build(b: *std.Build) void {
             },
         }) });
         const run = b.addRunArtifact(suite);
+        // Reuse compilation, never a previous validation result.
+        run.has_side_effects = true;
         if (comptime std.mem.eql(u8, item[0], "measurement")) {
             measurement.dependOn(&run.step);
         } else if (comptime std.mem.eql(u8, item[0], "join-retirement") or std.mem.eql(u8, item[0], "error-lifecycle") or std.mem.eql(u8, item[0], "http-completion")) {
