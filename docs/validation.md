@@ -26,7 +26,12 @@ zig build check
 - `measurement-test`: concurrent allocator accounting, failure cleanup and
   callback/coordinator checkpoint invariants, with no timing thresholds.
 - `test-branch`, `test-http`: focused routing and HTTP scopes, including startup/
-  allocation failure, completion credits, deadlines, cancellation and cleanup.
+  allocation failure, completion credits, header/body/JSON helpers, deadlines,
+  cancellation and cleanup.
+- `test-http-configuration`: managed server providers, lifetime planning,
+  nominal/borrowed owners, exclusive admission and partial-allocation cleanup.
+- `test-predicates`: static short-circuit all/any with normal typed injection
+  and pure/fallible predicate contracts.
 - `test-retry`: retry policies/DI, exact waits, pending outcomes, cancellation,
   shared execution, cold validation and the executable checkout composition.
 - `test-errors`: selective recovery, persistent error lanes, shared/merge/sample

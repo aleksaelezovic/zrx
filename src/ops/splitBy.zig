@@ -6,7 +6,8 @@ const cb = @import("../internal/callbacks.zig");
 pub const SplitOptions = @import("../internal/framing.zig").Options;
 
 /// Frame arrays/slices/Chunks across input boundaries into owned bounded Chunks.
-/// separator is a comptime delimiter value or pure typed fn(services..., T) bool.
+/// separator is a comptime delimiter value, pure typed fn(services..., T) bool,
+/// or pure all/any predicate composition.
 /// Delimiters are excluded. Defaults preserve empty delimited items and emit a
 /// nonempty unfinished item only at normal end (no extra item after a delimiter).
 /// Use empty=.skip for delimiter runs, e.g. an ASCII whitespace predicate.
@@ -27,7 +28,7 @@ fn Split(comptime separator: anytype, comptime options: SplitOptions) type {
             decl.requireSource(Input);
             const T = chunks.Element(seq.Item(Input));
             @import("../data/failures.zig").requireHandledBeforeDropping(T);
-            const predicate = @typeInfo(@TypeOf(separator)) == .@"fn";
+            const predicate = cb.isCallback(separator);
             if (predicate) {
                 cb.validate(separator, &.{T});
                 if (cb.Info(separator, 1).Return != bool)

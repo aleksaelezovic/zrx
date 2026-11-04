@@ -21,7 +21,12 @@ All public behavior/contract suites import the one `zrx` package module:
 - `branch.zig`: persistent case substreams, DI, retirement, state, all-terminal
   composition and gated startup.
 - `http.zig`: actual echo graph with finite loopback peers, body framing/limits,
-  request completion, routing/drops, cancellation, deadlines and cleanup.
+  request completion, routing/drops, header lookup, bounded JSON responses,
+  cancellation, deadlines and cleanup.
+- `http_configuration.zig`: managed server/provider dependencies, nominal roles,
+  alias rejection, reacquisition, partial allocation cleanup and real serving.
+- `predicates.zig`: static all/any composition, short circuit, nested predicates,
+  typed injection and fallible-filter versus pure branch/framing requirements.
 - `lifecycle_hardening.zig`: runtime-selected aliases, first-result handling and
   state errors after observation retirement; reporting/peer failure and external
   cancellation join resource users before release.

@@ -56,10 +56,13 @@ to this file; edit `AGENTS.md`, not copies.
 - Failed constructors own their partial cleanup. Release returns void and uses
   non-failing, uncancelable cleanup. Fallible finalization is not a release
   shortcut; successful terminal finalization can fail normally.
+- Resource-specific acquisition behavior belongs in the owner or a wrapper
+  resource, not generic terminal lifecycle hooks. Report process completion
+  after checking run's outcome and cleanup; never read a destroyed managed value.
 - `resource(config, acquire, null)` explicitly provides no independent cleanup;
-  borrowed dependencies still outlive users. Typed reader/writer configuration
-  providers inject every parameter and return exact Config or E!Config once
-  during acquisition, never at declaration construction or per item.
+  borrowed dependencies still outlive users. Typed reader/writer/HTTP-server
+  configuration providers inject every parameter and return exact Config or
+  E!Config once during acquisition, never at declaration construction or per item.
 - No ambient service globals, universal user context, runtime DI registry or
   per-item service lookup. Inject only the requested types. Static validation
   covers declared requirements, not arbitrary hidden global access.
@@ -74,6 +77,10 @@ to this file; edit `AGENTS.md`, not copies.
 - Reuse operators and sources of truth. Normalize single/flat nonempty callback
   tuples through one composition rule. Reject empty/nested operator/callback
   tuples. Named helpers express reusable groups.
+- `all`/`any` are static short-circuit predicate compositions with normal typed
+  DI. Explicit nested compositions are allowed, nested callback tuples are not.
+  All declared requirements remain reachable. Fallible predicates fit filter;
+  when and splitBy predicates remain non-failing.
 - Map/each transform stream items as whole values, including arrays/slices.
   Signal map transforms whole current state. Filter is explicit item selection.
   Tap forwards the item after effects; per-item terminal effects return void.
@@ -188,6 +195,15 @@ to this file; edit `AGENTS.md`, not copies.
   routing and per-item effects track completion; unsupported fan-out, retention,
   collection, batching and state dependencies fail before acquisition. Drops
   close without inventing responses. Handlers own response/error policy.
+- `HttpServer` is an address-stable managed owner; request sources borrow an
+  exact server service or nominal role. One traversal per acquisition; repeated
+  service fan-out fails cold and runtime role aliases fail before serving.
+  Release after users join. Readiness means listening, not guaranteed activation.
+- HTTP header helpers preserve duplicates; applications choose rejection policy.
+  Body protocol errors are distinct from transport/timeouts/cancellation.
+  Bounded JSON construction uses std.json outside locks and claims one response
+  attempt, without fallback or automatic sending. Target predicates match raw
+  bytes; path predicates only strip the query on origin-form targets.
 
 ## Layout, tests, and documentation
 

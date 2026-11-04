@@ -102,6 +102,17 @@ Unlike built-in endpoints, arbitrary reader/writer recipes do not register path/
 endpoint claims: callers ensure safe paths and serial/exclusive use across roles.
 
 HTTP has one active connection/request, bounded bodies and close-after-response.
+`httpServer(config)` is a managed `*HttpServer` recipe, with the same typed
+configuration-provider rules as reader/writer. `httpRequests(*HttpServer)` or
+`httpRequests(ServerRole)` borrows the acquired server; the role is a nominal
+single-field wrapper of `*HttpServer`. A custom resource can add acquisition
+behavior while retaining this base owner. Concrete `httpRequests(config)` uses
+the same HTTP runtime. Request users join before owned server release; borrowed
+owners require caller cleanup. Each acquisition supports one traversal.
+Request helpers provide duplicate-aware `headerValues`/`uniqueHeader`,
+stable `HttpBodyTooLarge`/`HttpInvalidBody` protocol errors, and bounded
+`jsonResponse` encoding through `std.json`. They do not choose client/domain
+status policies or turn cancellation/transport failures into request data.
 General listener/full-duplex session declarations, DNS/reconnect policy,
 application timeouts and filesystem watching remain separate designs. See the
 [execution guide](../../docs/execution.md) for dependency and cleanup rules.

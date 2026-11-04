@@ -434,7 +434,7 @@ test "request scoped HTTP retries fail before listener acquisition" {
         fn ignore(_: zrx.HttpResponse) void {}
     };
     var ready: zrx.HttpReady = .{};
-    const source = zrx.httpRequests(.{ .address = .{ .ip4 = .loopback(0) }, .ready = &ready, .connection_budget = 0 });
+    const source = zrx.httpRequests(zrx.HttpServerConfig{ .address = .{ .ip4 = .loopback(0) }, .ready = &ready, .connection_budget = 0 });
     const retried = retryPipe(source, .{map(Helpers.handle)}, .{ .max_attempts = 1 });
     try std.testing.expectError(error.UnsupportedHttpComposition, run(.{ allocator, io }, .{pipe(retried, .{forEach(Helpers.ignore)})}));
     try std.testing.expect(!ready.ready.isSet());

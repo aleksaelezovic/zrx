@@ -67,7 +67,7 @@ return types. Operators determine the trailing ordinary arguments:
 | Producer | `*Emitter(T)` | All preceding parameters |
 | Resource acquire | Configuration | All preceding parameters |
 | Resource release | Provided service value | All preceding parameters |
-| `reader`/`writer` configuration provider | None | All parameters |
+| `reader`/`writer`/`httpServer` configuration provider | None | All parameters |
 
 The suffix is always data, even if a matching service type exists. A struct
 parameter requests that struct as one service; it is not implicitly unpacked.
@@ -76,6 +76,19 @@ Map/each, filter and tap accept a callback or a flat nonempty callback tuple
 through one composition rule. Terminals and reductions take one callback.
 `map` and `each` map stream items as whole values, including slice/array items.
 Signal `map` instead derives the whole current state.
+
+[`all(predicates)` / `any(predicates)`](../src/ops/predicates.zig) compose typed
+item predicates with left-to-right short-circuiting. A predicate or flat nonempty
+tuple is accepted; nest explicit compositions rather than nested raw tuples.
+Each child receives the same item and its own injected service prefix. Every
+child requirement is statically reachable even when particular items skip it.
+No closure, worker, queue, runtime callback list or per-item interpreter is added.
+
+Predicates return `bool` or `E!bool`. A composition containing a fallible child
+returns `anyerror!bool`, stops on its first error, and works with ordinary
+`filter` pending-error/recovery semantics. `when` and `splitBy` still require
+non-fallible predicates. The same composition metadata/invocation is used by
+these consumers; this is not a separate router callback system.
 
 Two services of one implementation type use distinct nominal role wrappers.
 `deriveResource` delegates one single-field role's lifecycle to its configured
@@ -103,8 +116,20 @@ files or establish connections; those effects are not rolled back.
 
 On return or failure, execution users stop/join before owned resources release.
 Release callbacks return `void` and must use non-failing, uncancelable cleanup.
-Fallible finalizers are a separate design. No panic unwinding or rollback is
-promised.
+Fallible successful-terminal effects belong in normal execution, not release.
+No panic unwinding or rollback is promised.
+
+Resource-specific acquisition behavior belongs in a dependent custom resource.
+It can request the base resource and return a nominal wrapper after its extra
+work succeeds, using a null finalizer when the wrapper adds no ownership.
+The dependency plan retains the base owner through all wrapper users; if extra
+work fails, run releases already-acquired dependencies normally.
+
+Process-level work belongs before `run` or after checking its returned outcome.
+After return, execution users have joined and managed resources have released:
+do not inspect pointers into destroyed services. A declared one-shot effect can
+also start from `fromService(T)`; no init token/signal is needed. Independent
+roots do not become sequential merely by ordering their tuple entries.
 
 ## Synchronous regions, not one worker per stage
 

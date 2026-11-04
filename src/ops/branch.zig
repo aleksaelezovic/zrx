@@ -6,7 +6,7 @@ const dependencies = @import("../internal/world/dependencies.zig");
 const input = @import("../internal/branch.zig").Input;
 const CaseTag = opaque {};
 
-/// Ordered case with a typed fn (services..., item) bool predicate. Leading
+/// Ordered case with a typed fn (services..., item) bool or all/any predicate. Leading
 /// services follow normal injection. Operators are one operator or a flat,
 /// nonempty tuple, applied to a persistent substream, not per-item singletons.
 pub fn when(comptime predicate: anytype, operators: anytype) Case(predicate, @TypeOf(operators), false) {

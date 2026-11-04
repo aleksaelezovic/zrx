@@ -43,11 +43,10 @@ fn exchangeBound(comptime handler: anytype, options: zrx.HttpServerConfig, bytes
                 try echo.execute(allocator, io, self.options);
             } else {
                 const incoming = httpRequests(self.options);
-                const transform = if (@TypeOf(handler) == type) handler.handle else handler;
                 const replies = if (comptime @TypeOf(handler) == type and @hasDecl(handler, "operator"))
                     pipe(&incoming, .{handler.operator})
                 else
-                    pipe(&incoming, .{each(transform)});
+                    pipe(&incoming, .{each(if (@TypeOf(handler) == type) handler.handle else handler)});
                 if (comptime @TypeOf(handler) == type and !@hasDecl(handler, "terminal")) {
                     try run(.{ allocator, io } ++ self.bindings, .{replies});
                 } else {
@@ -541,4 +540,213 @@ test "cancel during on-demand body read joins users and sends no fallback respon
     try std.testing.expectError(error.Canceled, task.cancel(io));
     try peer.done.waitTimeout(io, watchdog);
     try client.await(io);
+}
+
+fn bodyFailureResponse(request: Request, err: anyerror) !Response {
+    switch (err) {
+        error.HttpBodyTooLarge, error.HttpInvalidBody => {
+            try std.testing.expectEqual(err, request.bodyError().?);
+            return request.response(.{ .status = .bad_request, .body = @errorName(err) });
+        },
+        else => return err,
+    }
+}
+
+fn stableBody(request: Request) !Response {
+    const body = request.readRemainingBody() catch |err| return bodyFailureResponse(request, err);
+    return request.response(.{ .body = body });
+}
+
+fn stableReader(request: Request) !Response {
+    const reader = request.bodyReader() catch |err| return bodyFailureResponse(request, err);
+    var bytes: [16]u8 = undefined;
+    const n = reader.readSliceShort(&bytes) catch |err| {
+        try std.testing.expectEqual(error.ReadFailed, err);
+        return bodyFailureResponse(request, request.bodyError().?);
+    };
+    return request.response(.{ .body = bytes[0..n] });
+}
+
+test "body helpers expose stable framing categories but preserve timeout control" {
+    const truncated = try exchangePeer(stableBody, config(), "POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\nabc", null, true);
+    defer allocator.free(truncated);
+    try std.testing.expect(std.mem.endsWith(u8, truncated, "\r\n\r\nHttpInvalidBody"));
+    inline for (.{ stableBody, stableReader }) |handler| {
+        const malformed = try exchange(handler, config(), "POST / HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n2\r\nabxx", null);
+        defer allocator.free(malformed);
+        try std.testing.expect(std.mem.endsWith(u8, malformed, "\r\n\r\nHttpInvalidBody"));
+        var limited = config();
+        limited.request_body_bytes = 3;
+        const excess = try exchange(handler, limited, "POST / HTTP/1.1\r\ntransfer-encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n", null);
+        defer allocator.free(excess);
+        try std.testing.expect(std.mem.endsWith(u8, excess, "\r\n\r\nHttpBodyTooLarge"));
+    }
+    var timed = config();
+    timed.request_timeout = .fromMilliseconds(50);
+    try std.testing.expectError(error.Timeout, exchange(stableBody, timed, "POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\n", null));
+}
+
+fn headerLookup(request: Request) !Response {
+    _ = try request.readRemainingBody(); // Standard parser storage may change.
+    var values = request.headerValues("x-test");
+    const first = values.next() orelse return error.MissingHeader;
+    const second = values.next() orelse return error.MissingDuplicate;
+    try std.testing.expect(values.next() == null);
+    try std.testing.expectError(error.DuplicateHttpHeader, request.uniqueHeader("X-TEST"));
+    try std.testing.expect((try request.uniqueHeader("missing")) == null);
+    try std.testing.expectEqualStrings("", (try request.uniqueHeader("X-Empty")).?);
+    return request.jsonResponse(.{ .first = first, .second = second, .host = (try request.uniqueHeader("HOST")).? }, .{});
+}
+
+test "header lookup preserves order duplicates empty values and copied head lifetime" {
+    inline for (.{ "second", "first" }) |second| {
+        const result = try exchange(headerLookup, config(), "POST / HTTP/1.1\r\nHost: local\r\nX-Test: first\r\nx-test: " ++ second ++ "\r\nx-empty:\r\ncontent-length: 3\r\n\r\nabc", null);
+        defer allocator.free(result);
+        try expectContains(result, "content-type: application/json\r\n");
+        try std.testing.expect(std.mem.endsWith(u8, result, "\r\n\r\n{\"first\":\"first\",\"second\":\"" ++ second ++ "\",\"host\":\"local\"}"));
+    }
+}
+
+const json_text = "quote\" slash\\ line\nzero\x00 snow雪";
+fn encodedJson(request: Request) !Response {
+    var text: [json_text.len]u8 = json_text.*;
+    var name = "x-copy".*;
+    var value = "kept".*;
+    const result = try request.jsonResponse(.{ .text = @as([]const u8, &text), .n = @as(i32, -7) }, .{
+        .status = .created,
+        .headers = &.{.{ .name = &name, .value = &value }},
+    });
+    @memset(&text, 'x');
+    @memset(&name, 'q');
+    @memset(&value, 'z');
+    return result;
+}
+
+test "JSON response escapes data copies temporary headers and never adds app policy" {
+    const result = try exchange(encodedJson, config(), "GET / HTTP/1.1\r\n\r\n", null);
+    defer allocator.free(result);
+    try expectContains(result, "201 Created\r\n");
+    try expectContains(result, "content-type: application/json\r\n");
+    try expectContains(result, "x-copy: kept\r\n");
+    try std.testing.expect(std.mem.find(u8, result, "cache-control") == null);
+    const start = std.mem.find(u8, result, "\r\n\r\n").? + 4;
+    const parsed = try std.json.parseFromSlice(struct { text: []const u8, n: i32 }, allocator, result[start..], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings(json_text, parsed.value.text);
+    try std.testing.expectEqual(@as(i32, -7), parsed.value.n);
+    try std.testing.expect(std.mem.findScalar(u8, result[start..], 0) == null);
+    try std.testing.expect(std.mem.findScalar(u8, result[start..], '\n') == null);
+}
+
+fn smallJson(request: Request) !Response {
+    return request.jsonResponse(.{ .n = @as(u8, 1) }, .{});
+}
+fn newlineJson(request: Request) !Response {
+    return request.jsonResponse(.{ .n = @as(u8, 1) }, .{ .newline = true });
+}
+fn extraJson(request: Request) !Response {
+    return request.jsonResponse(.{ .n = @as(u8, 1) }, .{ .headers = &.{.{ .name = "x", .value = "1" }} });
+}
+test "JSON response enforces exact body newline and generated header bounds" {
+    var exact = config();
+    exact.response_body_bytes = 7; // {"n":1}
+    const result = try exchange(smallJson, exact, "GET / HTTP/1.1\r\n\r\n", null);
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.endsWith(u8, result, "\r\n\r\n{\"n\":1}"));
+    try std.testing.expectError(error.HttpResponseTooLarge, exchange(newlineJson, exact, "GET / HTTP/1.1\r\n\r\n", null));
+    exact.response_body_bytes = 8;
+    const line = try exchange(newlineJson, exact, "GET / HTTP/1.1\r\n\r\n", null);
+    defer allocator.free(line);
+    try std.testing.expect(std.mem.endsWith(u8, line, "\r\n\r\n{\"n\":1}\n"));
+    exact.response_body_bytes = 6;
+    try std.testing.expectError(error.HttpResponseTooLarge, exchange(smallJson, exact, "GET / HTTP/1.1\r\n\r\n", null));
+    var headers = config();
+    headers.response_header_count = 1;
+    try std.testing.expectError(error.InvalidHttpResponse, exchange(extraJson, headers, "GET / HTTP/1.1\r\n\r\n", null));
+    headers = config();
+    headers.response_header_bytes = "content-type".len + "application/json".len - 1;
+    try std.testing.expectError(error.InvalidHttpResponse, exchange(smallJson, headers, "GET / HTTP/1.1\r\n\r\n", null));
+}
+
+fn badJsonOptions(request: Request) !Response {
+    return request.jsonResponse(.{}, .{ .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }} });
+}
+fn badJsonFraming(request: Request) !Response {
+    return request.jsonResponse(.{}, .{ .headers = &.{.{ .name = "Content-Length", .value = "0" }} });
+}
+fn noContentJson(request: Request) !Response {
+    return request.jsonResponse(.{}, .{ .status = .no_content });
+}
+fn doubleJson(request: Request) !Response {
+    const first = try request.jsonResponse(.{ .n = @as(u8, 1) }, .{});
+    try std.testing.expectError(error.InvalidHttpResponse, request.jsonResponse(.{ .n = @as(u8, 2) }, .{}));
+    return first;
+}
+fn failedJsonFallback(request: Request) !Response {
+    return request.jsonResponse(.{ .n = @as(u8, 1) }, .{}) catch |err| {
+        try std.testing.expectEqual(error.HttpResponseTooLarge, err);
+        return request.response(.{ .body = "x" });
+    };
+}
+const BrokenJson = struct {
+    pub fn jsonStringify(_: @This(), _: *std.json.Stringify) std.Io.Writer.Error!void {
+        return error.WriteFailed;
+    }
+};
+fn failedEncoder(request: Request) !Response {
+    return request.jsonResponse(BrokenJson{}, .{});
+}
+test "JSON validates framing and preserves one construction attempt on success and failure" {
+    inline for (.{ badJsonOptions, badJsonFraming, noContentJson }) |handler|
+        try std.testing.expectError(error.InvalidHttpResponse, exchange(handler, config(), "GET / HTTP/1.1\r\n\r\n", null));
+    const result = try exchange(doubleJson, config(), "GET / HTTP/1.1\r\n\r\n", null);
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.endsWith(u8, result, "\r\n\r\n{\"n\":1}"));
+    var tiny = config();
+    tiny.response_body_bytes = 1;
+    try std.testing.expectError(error.InvalidHttpResponse, exchange(failedJsonFallback, tiny, "GET / HTTP/1.1\r\n\r\n", null));
+    try std.testing.expectError(error.WriteFailed, exchange(failedEncoder, config(), "GET / HTTP/1.1\r\n\r\n", null));
+}
+
+fn submittedRoute(request: Request) Response {
+    return request.response(.{ .body = "submit" });
+}
+fn statusRoute(request: Request) Response {
+    return request.response(.{ .body = "status" });
+}
+fn pathRoute(request: Request) Response {
+    return request.response(.{ .body = "path" });
+}
+fn starRoute(request: Request) Response {
+    return request.response(.{ .body = "star" });
+}
+fn missingRoute(request: Request) Response {
+    return request.response(.{ .body = "missing" });
+}
+test "HTTP predicates compose in real routes with explicit raw target versus path semantics" {
+    const Application = struct {
+        pub const operator = branch(.{
+            when(zrx.all(.{ zrx.httpMethod(.POST), zrx.httpTarget("/jobs") }), each(submittedRoute)),
+            when(zrx.all(.{ zrx.any(.{ zrx.httpMethod(.GET), zrx.httpMethod(.HEAD) }), zrx.httpPathPrefix("/jobs/") }), each(statusRoute)),
+            when(zrx.httpPath("/jobs"), each(pathRoute)),
+            when(zrx.httpTarget("*"), each(starRoute)),
+            otherwise(each(missingRoute)),
+        });
+        pub const terminal = respondHttp();
+    };
+    inline for (.{
+        .{ "POST /jobs HTTP/1.1\r\n\r\n", "submit" },
+        .{ "POST /jobs?x=1 HTTP/1.1\r\n\r\n", "path" },
+        .{ "GET /jobs/1?x=1 HTTP/1.1\r\n\r\n", "status" },
+        .{ "HEAD /jobs/1 HTTP/1.1\r\n\r\n", "" },
+        .{ "GET /jobs%2F1 HTTP/1.1\r\n\r\n", "missing" },
+        .{ "OPTIONS * HTTP/1.1\r\n\r\n", "star" },
+        .{ "GET http://local/jobs HTTP/1.1\r\n\r\n", "missing" },
+    }) |case| {
+        const result = try exchange(Application, config(), case[0], null);
+        defer allocator.free(result);
+        try expectContains(result, "200 OK\r\n");
+        const body = std.mem.find(u8, result, "\r\n\r\n").? + 4;
+        try std.testing.expectEqualStrings(case[1], result[body..]);
+    }
 }

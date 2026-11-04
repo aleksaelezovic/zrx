@@ -21,6 +21,7 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Area | Source |
 |---|---|
 | Declaration composition and callbacks | [`pipe`, `map`/`each`, `filter`, `tap`](../src/compose.zig) |
+| Short-circuit predicate composition | [`all`, `any`](../src/ops/predicates.zig) |
 | Sequential declaration expansion | [`flatMap`](../src/ops/flatMap.zig) |
 | Chunk expansion and bounded framing | [`flatten`](../src/ops/flatten.zig), [`splitBy`](../src/ops/splitBy.zig), [`Chunk`](../src/data/chunks.zig) |
 | Finite inputs, bound services, producers, deferred reduction | [`fromSlice`, `fromValue`, `fromService`, `Stream`, `fold`](../src/data/declarations.zig) |
@@ -38,7 +39,7 @@ The [`zrx` module](../src/root.zig) is the only public package surface.
 | Owned record values and line I/O | [`Line`](../src/data/lines.zig), [line sources and encoding](../src/io/lines.zig) |
 | Byte I/O and managed ownership | [`Reader`, `reader`, `Writer`, `writer`, `readChunks`, `writeTo`](../src/io/bytes.zig) |
 | Process argument ownership | [`Arguments`, `arguments`](../src/io/cli.zig) |
-| Serial HTTP server | [Request scopes, bodies and responses](../src/io/http.zig) |
+| Serial HTTP server and managed ownership | [`HttpServer`, `httpServer`, requests, header access and bounded JSON responses](../src/io/http.zig) |
 
 Only `run` executes declarations.
 Leading callback parameters are exact-type service requests; trailing parameters

@@ -554,7 +554,10 @@ fn resolveReference(scope: *Scope, reference: anytype) anyerror!*Runtime(sequenc
     const Element = sequences.Item(Input);
     const root = comptime isSource(Definition);
     const key: Key = .{
-        .address = @intFromPtr(reference),
+        // A typed server binding is one exclusive request lane. Repeated
+        // descriptions of that binding must reject fan-out during preparation,
+        // rather than create concurrent producers for the same server.
+        .address = if (comptime @hasDecl(Definition, "http_service_source")) 0 else @intFromPtr(reference),
         .type_id = typeId(Definition),
     };
     if (scope.index.get(key)) |node| return @ptrCast(@alignCast(node.context));

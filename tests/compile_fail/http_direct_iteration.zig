@@ -1,6 +1,6 @@
 const zrx = @import("zrx");
 test {
-    const source = zrx.httpRequests(.{ .address = .{ .ip4 = .loopback(0) } });
+    const source = zrx.httpRequests(zrx.HttpServerConfig{ .address = .{ .ip4 = .loopback(0) } });
     _ = zrx.pipe(&source, .{zrx.each(handle)}).iterator();
 }
 

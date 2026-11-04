@@ -89,6 +89,8 @@ pub fn build(b: *std.Build) void {
         .{ "operators", "tests/operators.zig" },
         .{ "branch", "tests/branch.zig" },
         .{ "http", "tests/http.zig" },
+        .{ "http-configuration", "tests/http_configuration.zig" },
+        .{ "predicates", "tests/predicates.zig" },
         .{ "lifecycle", "tests/lifecycle_hardening.zig" },
         .{ "join-retirement", "tests/join_retirement.zig" },
         .{ "error-lifecycle", "tests/error_lifecycle.zig" },
@@ -124,7 +126,7 @@ pub fn build(b: *std.Build) void {
             public_tests.dependOn(&run.step);
             if (comptime std.mem.eql(u8, item[0], "lifecycle")) lifecycle.dependOn(&run.step);
         }
-        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http") or std.mem.eql(u8, item[0], "retry") or std.mem.eql(u8, item[0], "errors") or std.mem.eql(u8, item[0], "error-lifecycle"))
+        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http") or std.mem.eql(u8, item[0], "http-configuration") or std.mem.eql(u8, item[0], "predicates") or std.mem.eql(u8, item[0], "retry") or std.mem.eql(u8, item[0], "errors") or std.mem.eql(u8, item[0], "error-lifecycle"))
             b.step("test-" ++ item[0], "Run the " ++ item[0] ++ " suite").dependOn(&run.step);
     }
     inline for (contracts.failures) |failure| {

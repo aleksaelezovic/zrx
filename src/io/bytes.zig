@@ -1,13 +1,12 @@
 //! Byte-oriented managed I/O and borrowed standard-reader/writer adapters.
 const std = @import("std");
 const builtin = @import("builtin");
-const recipes = @import("../internal/world/resources.zig");
 const sequences = @import("../data/sequences.zig");
 const chunks = @import("../data/chunks.zig");
 const effects = @import("../ops/effects.zig");
-const callbacks = @import("../internal/callbacks.zig");
 const declarations = @import("../data/declarations.zig");
-const composition = @import("../internal/composition.zig");
+const Configured = @import("../internal/world/configured.zig").Configured;
+const configured = @import("../internal/world/configured.zig").configured;
 
 fn requireHosted() void {
     if (builtin.os.tag == .freestanding) @compileError("byte I/O resources require a hosted target");
@@ -177,69 +176,6 @@ pub const Writer = struct {
 pub fn writer(config: anytype) Configured(Writer.Config, if (@typeInfo(@TypeOf(config)) == .@"fn") config else {}, openWriter, closeWriter) {
     comptime requireHosted();
     return configured(Writer.Config, config, openWriter, closeWriter);
-}
-
-// Keep one acquisition/release implementation for static and injected config.
-// This is recipe construction, not a per-item service or dynamic DI registry.
-fn Configured(comptime Config: type, comptime config: anytype, comptime acquire_fn: anytype, comptime release_fn: anytype) type {
-    const Base = @TypeOf(recipes.resource(@as(Config, undefined), acquire_fn, release_fn));
-    if (@typeInfo(@TypeOf(config)) != .@"fn") return Base;
-    const Meta = callbacks.Info(config, 0);
-    if (composition.Payload(Meta.Return) != Config)
-        @compileError("I/O configuration provider must return " ++ @typeName(Config) ++ " or E!" ++ @typeName(Config));
-    return struct {
-        pub const world_recipe_tag = recipes.RecipeTag;
-        pub const Provided = Base.Provided;
-        pub const AcquireServices = declarations.concat(&Base.AcquireServices, &Meta.Services);
-        pub const ReleaseServices = Base.ReleaseServices;
-
-        pub fn acquire(_: @This(), env: anytype) anyerror!Provided {
-            const selected = callbacks.invoke(config, env, .{});
-            const value = if (@typeInfo(Meta.Return) == .error_union) try selected else selected;
-            return recipes.resource(value, acquire_fn, release_fn).acquire(env);
-        }
-
-        pub fn release(_: @This(), env: anytype, value: Provided) void {
-            callbacks.invoke(release_fn, env, .{value});
-        }
-    };
-}
-
-fn configured(comptime Config: type, config: anytype, comptime acquire: anytype, comptime release: anytype) Configured(Config, if (@typeInfo(@TypeOf(config)) == .@"fn") config else {}, acquire, release) {
-    if (comptime @typeInfo(@TypeOf(config)) == .@"fn") return .{};
-    if (comptime @typeInfo(@TypeOf(config)) == .pointer and @typeInfo(@typeInfo(@TypeOf(config)).pointer.child) == .@"fn")
-        @compileError("I/O configuration provider must be a comptime-known function, not a function pointer");
-    return recipes.resource(configuration(Config, config), acquire, release);
-}
-
-// anytype preserves the public union-literal spelling as an anonymous struct.
-// Restore its explicit destination type rather than weakening provider typing.
-fn configuration(comptime Config: type, value: anytype) Config {
-    const T = @TypeOf(value);
-    if (T == Config) return value;
-    if (comptime @typeInfo(Config) == .@"union" and @typeInfo(T) == .@"struct") {
-        const fields = @typeInfo(T).@"struct".field_names;
-        if (fields.len != 1 or !@hasField(Config, fields[0]))
-            @compileError("I/O resource: expected configuration or a comptime-known configuration provider");
-        return @unionInit(Config, fields[0], configuration(@FieldType(Config, fields[0]), @field(value, fields[0])));
-    }
-    if (comptime @typeInfo(Config) == .@"struct" and @typeInfo(T) == .@"struct") {
-        const info = @typeInfo(Config).@"struct";
-        inline for (@typeInfo(T).@"struct".field_names) |name| {
-            if (!@hasField(Config, name)) @compileError("I/O configuration: unknown field " ++ name);
-        }
-        var result: Config = undefined;
-        inline for (info.field_names, info.field_types, info.field_attrs) |name, Field, attrs| {
-            @field(result, name) = if (@hasField(T, name))
-                configuration(Field, @field(value, name))
-            else if (attrs.defaultValue(Field)) |default|
-                default
-            else
-                @compileError("I/O configuration: missing field " ++ name);
-        }
-        return result;
-    }
-    return value;
 }
 
 fn openWriter(allocator: std.mem.Allocator, io: std.Io, config: Writer.Config) !*Writer {

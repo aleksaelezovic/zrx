@@ -260,13 +260,49 @@ pub const Server = struct {
         return self.body.err;
     }
 
-    pub fn response(self: *Server, generation: usize, options: api.HttpResponseOptions) api.HttpResponse {
+    fn beginResponse(self: *Server, generation: usize) bool {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (!self.pending or generation != self.generation or self.sent or self.built)
-            return .{ ._server = self, ._generation = generation, ._invalid = true };
+            return false;
         self.built = true;
+        return true;
+    }
+
+    pub fn response(self: *Server, generation: usize, options: api.HttpResponseOptions) api.HttpResponse {
+        if (!self.beginResponse(generation))
+            return .{ ._server = self, ._generation = generation, ._invalid = true };
         self.copyResponse(options) catch return .{ ._server = self, ._generation = generation, ._invalid = true };
+        return self.responseValue(generation);
+    }
+
+    pub fn jsonResponse(self: *Server, generation: usize, value: anytype, options: api.HttpJsonResponseOptions) !api.HttpResponse {
+        if (!self.beginResponse(generation)) return error.InvalidHttpResponse;
+        const content_type: std.http.Header = .{ .name = "content-type", .value = "application/json" };
+        if (options.status == .no_content or options.status == .not_modified) return error.InvalidHttpResponse;
+        for (options.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) return error.InvalidHttpResponse;
+        }
+        try self.validateResponse(.{ .status = options.status, .headers = options.headers }, content_type);
+        // The request's exclusive delivery keeps storage alive through callbacks.
+        // Claim construction under the mutex, then encode OUTSIDE it.
+        var output: JsonWriter = .{ .interface = .fixed(self.response_body) };
+        output.interface.vtable = &JsonWriter.vtable;
+        std.json.Stringify.value(value, .{}, &output.interface) catch |err|
+            return if (output.exceeded) error.HttpResponseTooLarge else err;
+        if (options.newline) output.interface.writeByte('\n') catch return error.HttpResponseTooLarge;
+        var offset: usize = 0;
+        try self.copyHeader(content_type, 0, &offset);
+        for (options.headers, 1..) |header, i| try self.copyHeader(header, i, &offset);
+        self.response_options = .{
+            .status = options.status,
+            .headers = self.response_headers[0 .. options.headers.len + 1],
+            .body = self.response_body[0..output.interface.end],
+        };
+        return self.responseValue(generation);
+    }
+
+    fn responseValue(self: *Server, generation: usize) api.HttpResponse {
         return .{
             ._server = self,
             ._generation = generation,
@@ -276,33 +312,39 @@ pub const Server = struct {
         };
     }
 
-    fn validateResponse(self: *Server, options: api.HttpResponseOptions) !void {
+    fn validateResponse(self: *Server, options: api.HttpResponseOptions, prefix: ?std.http.Header) !void {
         const status = @backingInt(options.status);
         if (status < 200 or status > 599 or options.body.len > self.response_body.len or
             options.headers.len > self.response_headers.len or
             ((status == 204 or status == 304) and options.body.len != 0))
             return error.InvalidHttpResponse;
+        if (prefix != null and options.headers.len == self.response_headers.len) return error.InvalidHttpResponse;
         var available = self.response_text.len;
-        for (options.headers) |header| {
-            if (!validHeader(header)) return error.InvalidHttpResponse;
-            inline for (.{ "content-length", "transfer-encoding", "connection", "trailer", "upgrade" }) |reserved| {
-                if (std.ascii.eqlIgnoreCase(header.name, reserved)) return error.InvalidHttpResponse;
-            }
-            for ([_][]const u8{ header.name, header.value }) |text| {
-                if (text.len > available) return error.InvalidHttpResponse;
-                available -= text.len;
-            }
+        if (prefix) |header| try validateExtraHeader(header, &available);
+        for (options.headers) |header| try validateExtraHeader(header, &available);
+    }
+
+    fn validateExtraHeader(header: std.http.Header, available: *usize) !void {
+        if (!validHeader(header)) return error.InvalidHttpResponse;
+        inline for (.{ "content-length", "transfer-encoding", "connection", "trailer", "upgrade" }) |reserved| {
+            if (std.ascii.eqlIgnoreCase(header.name, reserved)) return error.InvalidHttpResponse;
+        }
+        for ([_][]const u8{ header.name, header.value }) |text| {
+            if (text.len > available.*) return error.InvalidHttpResponse;
+            available.* -= text.len;
         }
     }
 
+    fn copyHeader(self: *Server, header: std.http.Header, index: usize, offset: *usize) !void {
+        const name = try copyBytes(self.response_text, offset, header.name);
+        const value = try copyBytes(self.response_text, offset, header.value);
+        self.response_headers[index] = .{ .name = name, .value = value };
+    }
+
     fn copyResponse(self: *Server, options: api.HttpResponseOptions) !void {
-        try self.validateResponse(options);
+        try self.validateResponse(options, null);
         var offset: usize = 0;
-        for (options.headers, 0..) |header, i| {
-            const name = try copyBytes(self.response_text, &offset, header.name);
-            const value = try copyBytes(self.response_text, &offset, header.value);
-            self.response_headers[i] = .{ .name = name, .value = value };
-        }
+        for (options.headers, 0..) |header, i| try self.copyHeader(header, i, &offset);
         @memcpy(self.response_body[0..options.body.len], options.body);
         self.response_options = .{
             .status = options.status,
@@ -381,8 +423,34 @@ pub const Server = struct {
         defer self.mutex.unlock(self.io);
         if (value._invalid or value._generation != self.generation or !self.pending or self.sent or !self.built)
             return error.InvalidHttpResponse;
-        try self.validateResponse(.{ .status = value.status, .headers = value.headers, .body = value.body });
+        try self.validateResponse(.{ .status = value.status, .headers = value.headers, .body = value.body }, null);
         self.sent = true;
+    }
+};
+
+// Use the standard fixed writer, recording only actual capacity failures.
+// A custom jsonStringify returning WriteFailed is not necessarily an overflow.
+const JsonWriter = struct {
+    interface: Writer,
+    exceeded: bool = false,
+    const vtable: Writer.VTable = block: {
+        var table = Writer.fixed(@constCast(&.{})).vtable.*;
+        table.drain = drain;
+        table.rebase = rebase;
+        break :block table;
+    };
+
+    fn drain(writer: *Writer, data: []const []const u8, splat: usize) Writer.Error!usize {
+        const self: *JsonWriter = @fieldParentPtr("interface", writer);
+        return Writer.fixedDrain(writer, data, splat) catch |err| {
+            self.exceeded = true;
+            return err;
+        };
+    }
+    fn rebase(writer: *Writer, _: usize, _: usize) Writer.Error!void {
+        const self: *JsonWriter = @fieldParentPtr("interface", writer);
+        self.exceeded = true;
+        return error.WriteFailed;
     }
 };
 
@@ -500,7 +568,7 @@ const Body = struct {
         }
         const n = self.input.stream(writer, limit.min(.limited(remaining))) catch |err| {
             if (err == error.EndOfStream and self.server.http.reader.state != .ready) {
-                self.err = error.HttpBodyTruncated;
+                self.err = error.HttpInvalidBody;
                 return error.ReadFailed;
             }
             if (err == error.ReadFailed) self.failure(err);
@@ -511,11 +579,15 @@ const Body = struct {
     }
 
     fn failure(self: *Body, err: anyerror) void {
-        self.err = if (self.server.input.err) |cause|
+        const cause = if (self.server.input.err) |cause|
             cause
         else if (self.server.http.reader.body_err) |cause|
             cause
         else
             err;
+        self.err = switch (cause) {
+            error.HttpChunkInvalid, error.HttpChunkTruncated, error.HttpHeadersOversize => error.HttpInvalidBody,
+            else => cause,
+        };
     }
 };

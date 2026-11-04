@@ -39,6 +39,39 @@ startup, run allocates bounded buffers and acquires the listener. Optional
 zero. It signals listening, not guaranteed later startup success; acquisition
 failure does not signal it. Keep readiness/stop capabilities alive through run.
 
+`httpServer(config)` provides a managed `*HttpServer`. It accepts concrete
+configuration or a typed `HttpServerConfig`/`E!HttpServerConfig` provider, with
+all parameters injected and resolved once during acquisition. Buffers and the
+listener use the same implementation as concrete `httpRequests(config)`.
+Provider failures remain acquisition control, never request/error-handler data.
+Dependencies remain alive through request joins and server release.
+
+`httpRequests(*HttpServer)` borrows that exact service. A nominal single-field
+wrapper of `*HttpServer` is also accepted, including one created by
+`deriveResource` or an app-specific resource. For example, an app resource can
+request the server and a console writer, report `server.address()` after
+acquisition, and return its server role with a null finalizer. The request pipe
+selects that role; no terminal lifecycle hooks or external readiness coordinator
+are needed. Extra acquisition effects may precede later acquisition/activation
+failure and are not rolled back.
+
+One owner supports one request traversal per acquisition. Do not move/copy it
+while acquired or release it before users join. Borrowed owners are not released
+by run; release/reacquire before another run. Repeated source descriptions of
+one exact server service reject fan-out during preparation. Distinct nominal
+roles can conceal runtime pointer aliases: those fail `HttpServerInUse` during
+source admission, after acquisition but before any request activation. Multiple
+independent owners remain supported.
+
+Use a typed `HttpServerConfig{ ... }` literal when its fields use contextual
+member syntax such as `.loopback(0)`; the generic source argument cannot supply
+that nested type context.
+
+This permits managed arguments → configuration/store/server → a custom server
+resource → one HTTP request pipe in one `run`. Report process completion after
+checking run's result, when cleanup has actually finished. Do not access a
+destroyed managed store just to include a count in that report.
+
 There is one active connection and one outstanding request. Each request's
 head is copied before body reads invalidate standard parser storage. Body access
 is on demand through the run's Io, using standard HTTP body framing:
@@ -50,6 +83,22 @@ is on demand through the run's Io, using standard HTTP body framing:
 - `100 Continue` is sent only when the handler requests a permitted body.
   An unread body is not drained before sending a response and closing.
 
+Known protocol failures have stable public categories: `HttpBodyTooLarge` for
+cumulative/declared bounds, `HttpInvalidBody` for malformed or truncated framing.
+`bodyReader` still reports generic `ReadFailed`; `bodyError()` gives the category
+or preserved underlying transport cause. `readRemainingBody` returns it directly.
+Cancellation, timeout, reset and other I/O failures are not classified as client
+framing errors. These two protocol errors form the `HttpBodyError` subset, not
+the complete set of possible read failures. Applications choose response policy
+while they still own the request; there is no automatic 400/413 conversion.
+
+`request.headerValues(name)` performs case-insensitive, allocation-free lookup,
+preserving occurrences in wire order (including empty values). Its iterator and
+values remain borrowed; keep the lookup name alive through iteration.
+`request.uniqueHeader(name)` returns null for absence and fails
+`DuplicateHttpHeader` on repetition, even for identical values. No first/last
+winner, comma merging, media-type parsing or rejection policy is invented.
+
 Request data, fetched bytes, readers, and constructed response storage are
 borrowed until that request completes. Construct one response per request;
 the constructor copies temporary body/header bytes into bounded storage.
@@ -58,6 +107,38 @@ Response construction never sends. The terminal validates, sends, and flushes;
 the last delivery must also finish before the source can reuse its storage.
 An invalid/over-bound constructed response fails the terminal without a hidden
 fallback. A second/stale response token is rejected before another write.
+
+`request.jsonResponse(value, options)` encodes using `std.json` directly into the
+existing response-body buffer, without allocation or sending. It adds
+`content-type: application/json`; the caller supplies status and extra headers,
+and may explicitly request a trailing LF with `.newline = true`. Cache/error
+policy remains application-owned. Extra content-type or framing headers and
+bodyless 204/304 statuses fail `InvalidHttpResponse`. Generated content-type
+counts against header byte/count bounds. Excess body bytes (including optional
+LF) fail `HttpResponseTooLarge`; no output is silently truncated.
+
+Like the raw constructor, JSON claims one construction attempt per request.
+Failure returns no response token and does not permit a second construction or
+implicit fallback. Serialization runs outside the server mutex, including any
+user-defined standard `jsonStringify` method. Payload/header referents need only
+survive the call; the result borrows bounded request-owned storage until
+completion. Standard encoder behavior applies; this is not a JSON request parser
+or a new schema/validation framework.
+
+## Declarative request predicates
+
+`httpMethod(.GET)`, `httpTarget("/jobs")` and `httpTargetPrefix("/jobs/")`
+construct typed request predicates. Targets match raw bytes, including query
+strings. `httpPath("/jobs")` and `httpPathPrefix("/jobs/")` instead match only an
+origin-form path before `?`; non-origin targets do not match. No percent decoding,
+canonicalization, wildcard or path-parameter inference is performed. Prefixes
+are literal byte prefixes, not segment matchers.
+
+Predicate arguments are comptime-known route definitions. Combine them with
+`all`/`any` in ordinary `when`/`filter` stages, for example
+`when(all(.{ httpMethod(.GET), httpPath("/jobs") }), handlerOperators)`.
+Dynamic policy can use a normal typed predicate with an injected configuration
+prefix. Route ordering, query acceptance and response policy stay in the app.
 
 The scoped lane supports exclusive branch cases, `each`, `filter`, `take`, and
 per-item effects, but not independent fan-out, retention, collection, batching,
@@ -97,7 +178,3 @@ Framing headers are adapter-owned. TLS, HTTP/2, upgrades, compression, persisten
 connections, concurrent clients and streaming response bodies are unsupported.
 Parsing inherits the pinned standard library's behavior; this experimental
 milestone is not a public-deployment hardening claim.
-
-Generic recovery remains separate, unimplemented work. HTTP does not require it.
-Public partition/pipeEach operators and predicate
-combinators are also outside this milestone.

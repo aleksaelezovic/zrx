@@ -12,6 +12,7 @@ const regions = @import("regions.zig");
 const branching = @import("../../ops/branch.zig");
 const branch_plan = @import("../branch.zig");
 const configuration = @import("configuration.zig");
+const http = @import("../../io/http.zig");
 const Key = struct { address: usize, type_id: usize };
 const Allocation = struct { ptr: *anyopaque, free: *const fn (std.mem.Allocator, *anyopaque) void };
 
@@ -116,6 +117,7 @@ pub fn Scope(comptime Env: type) type {
         pub fn lower(self: *Self, input: anytype) anyerror!Lowered(@TypeOf(input), Env) {
             const T = @TypeOf(input);
             if (comptime @typeInfo(T) == .pointer) return self.reference(input);
+            if (comptime http.isConfigured(T)) return .{ .capacity = input.capacity, .env = self.env };
             if (comptime @hasDecl(T, "branch_source"))
                 return .{ .source = try self.lower(input.source), .cases = boundCases(self, input) };
             if (comptime @hasDecl(T, "node_kind")) {
@@ -154,6 +156,7 @@ pub fn Scope(comptime Env: type) type {
 
 pub fn Lowered(comptime T: type, comptime Env: type) type {
     if (@typeInfo(T) == .pointer) return *Lowered(@typeInfo(T).pointer.child, Env);
+    if (http.isConfigured(T)) return http.Bound(T, Env);
     if (@hasDecl(T, "branch_source")) {
         const S = Lowered(@FieldType(T, "source"), Env);
         return branch_plan.Descriptor(S, BoundCases(T, Env));
