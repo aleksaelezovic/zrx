@@ -80,10 +80,11 @@ cleared before saving, yielding a cold future build rather than weaker checks.
 Standalone-app caching remains disabled, and app dependencies are unaffected.
 No secrets or extra generated packages are intentionally added to the cache.
 
-The first hosted run seeds a cache; a subsequent hit is needed to measure
-restore/upload overhead and confirm all test/smoke executions on Linux.
-No hosted caching speedup, arbitrary-path cache portability or general
-runtime performance improvement has been established here.
+The [hosted follow-up and investigation](investigation.md) found successful cache
+transport and cross-object reuse, but no native executable reuse. The restored
+directory exceeded the limit and was cleared. The local result above must not
+be presented as a hosted caching speedup; native CPU variation remains an
+unproven hypothesis. No general runtime performance improvement is claimed.
 
 ## Validation
 
@@ -99,4 +100,5 @@ YAML parsing and `bash -n` covered workflow/composite run blocks. Documentation
 links, instruction symlink targets and whitespace checks passed.
 
 The standalone apps were not retested: their source, builds and job cache policy
-are unchanged. The new library cache policy has not run on GitHub yet.
+are unchanged in this local experiment. The subsequent hosted run passed the
+library and all three apps; its library-only rerun also passed.

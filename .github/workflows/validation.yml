@@ -33,7 +33,9 @@ jobs:
           uname -sm
           nproc
           grep MemTotal /proc/meminfo
+          lscpu
           zig env
+          zig run tests/ci_target.zig -OReleaseFast
 
       # The build owns the current API tests and single cross-target catalog.
       # Only native tests execute here; cross builds do not run foreign binaries.
