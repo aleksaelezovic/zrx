@@ -25,13 +25,20 @@ jobs:
       - name: Set up pinned Zig
         uses: ./.github/actions/setup-zig
 
+      - name: Record library validation environment
+        run: |
+          uname -sm
+          nproc
+          grep MemTotal /proc/meminfo
+          zig env
+
       # The build owns the current API tests and single cross-target catalog.
       # Only native tests execute here; cross builds do not run foreign binaries.
       - name: Run full validation
-        run: zig build check
+        run: zig build check --summary all
 
       - name: Run ReleaseFast native tests
-        run: zig build test -Doptimize=ReleaseFast
+        run: zig build test -Doptimize=ReleaseFast --summary all
 
   apps:
     name: "App: ${{ matrix.app }}"
