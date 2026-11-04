@@ -1,7 +1,8 @@
 # Record processor
 
 A finite import CLI built with zrx and Zig **0.17.0**. No third-party app
-dependencies, external services or root-build/CI integration.
+dependencies or external services. CI runs this project's checks separately
+from the library build.
 
 ```sh
 cd examples/apps/record-processor

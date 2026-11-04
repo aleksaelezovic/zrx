@@ -22,23 +22,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # Keep toolchain selection tied to the repository's single version pin.
-      - name: Read pinned Zig version
-        id: zig_version
-        run: |
-          set -euo pipefail
-          version="$(cat .zigversion)"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install pinned Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ steps.zig_version.outputs.version }}
-          use-cache: false
-
-      - name: Verify Zig version
-        run: test "$(zig version)" = "$(cat .zigversion)"
+      - name: Set up pinned Zig
+        uses: ./.github/actions/setup-zig
 
       # The build owns the current API tests and single cross-target catalog.
       # Only native tests execute here; cross builds do not run foreign binaries.
@@ -47,3 +32,46 @@ jobs:
 
       - name: Run ReleaseFast native tests
         run: zig build test -Doptimize=ReleaseFast
+
+  apps:
+    name: "App: ${{ matrix.app }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [record-processor, durable-checkout, http-jobs]
+    defaults:
+      run:
+        shell: bash
+        working-directory: examples/apps/${{ matrix.app }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Zig
+        uses: ./.github/actions/setup-zig
+
+      - name: Verify app version pin matches the library
+        run: cmp .zigversion "$GITHUB_WORKSPACE/.zigversion"
+
+      - name: Verify database-test prerequisites
+        if: matrix.app == 'durable-checkout'
+        run: |
+          python3 -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 37), sqlite3.sqlite_version"
+
+      # Use each independent project's documented validation path, including
+      # its real finite executable simulations. No app dependencies enter zrx.
+      - name: Build app
+        run: zig build
+
+      - name: Run app tests
+        run: zig build test
+
+      - name: Run app ReleaseFast tests
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Run app checks
+        run: zig build check

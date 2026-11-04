@@ -1,0 +1,26 @@
+name: Set up pinned Zig
+description: Install and verify the repository's exact Zig version
+
+runs:
+  using: composite
+  steps:
+    - name: Read pinned Zig version
+      id: zig_version
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        version="$(cat .zigversion)"
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+
+    - name: Install pinned Zig
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+      with:
+        version: ${{ steps.zig_version.outputs.version }}
+        use-cache: false
+
+    - name: Verify Zig version
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: test "$(zig version)" = "$(cat .zigversion)"

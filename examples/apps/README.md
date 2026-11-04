@@ -12,8 +12,9 @@ focused API demonstrations built by the library's root build.
 | [Durable checkout](durable-checkout/README.md) | SQLite-backed local issuance, persisted idempotency and process-restart/crash simulations | Run the project-local commands below from `durable-checkout/`; requires Python 3 with `sqlite3` for tests |
 | [HTTP jobs](http-jobs/README.md) | Bounded serial submission/status service, visible route/response branches and managed server lifetime | Run the project-local commands below from `http-jobs/` |
 
-There is no shared app runner or app CI integration. Each app owns its build and
-tests; adding an app does not add its dependencies to the library.
+Each app has an independent Linux job in [CI](../../.github/workflows/validation.yml).
+There is no shared app build: each project owns its build, dependencies and
+tests. App dependencies do not enter the library.
 
 ## Project boundary
 
@@ -70,12 +71,22 @@ and defined crash points using the same persisted store, and distinguish local
 transactions from external effects requiring idempotency or reconciliation.
 Do not label a mock remote service as proof of real remote exactly-once behavior.
 
-## Library checks and future CI
+## Library checks and CI
 
-The root build does not build these apps or resolve their dependencies. Keep app
-validation opt-in until each app exists and is reviewed. Existing ignore patterns
-already cover nested `.zig-cache/` and `zig-out/` directories.
+The root build does not build these apps or resolve their dependencies. Run
+project-local commands directly, or use the independent app CI jobs. Existing
+ignore patterns cover nested `.zig-cache/` and `zig-out/` directories.
 
-Future CI should call each app's documented commands, rather than implement a
-second simulation flow or duplicate the library's cross-target catalog. Add app
-discovery/catalog tooling only when there are real projects to run.
+CI runs the four documented commands above for every app in its explicit job
+matrix. Jobs run independently with fail-fast disabled, so one app failure does
+not hide the others. The root job still owns the library's cross-target catalog;
+app jobs execute native Linux simulations, not another target matrix.
+
+The shared setup action reads the library's `.zigversion`, installs that exact
+compiler without a persistent build cache, and checks the installed version.
+Each app job also verifies that its own pin matches. The checkout app checks
+Python's SQLite test prerequisite before running its app-local tests.
+
+See the [local validation timings](../../docs/measurements/app-validation/README.md)
+for fresh-job and warm-cache observations. They are not CI duration guarantees
+or timing thresholds.

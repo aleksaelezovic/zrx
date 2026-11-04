@@ -49,8 +49,9 @@ zig build check
 - `fmt`, `cross`: focused formatting and current-API object builds.
 - `check`: formatting, all native tests and cross builds.
 
-Future [standalone apps](../examples/apps/README.md) have separate project-local
-checks and dependencies. They are not part of these library build/CI steps.
+[Standalone apps](../examples/apps/README.md) have separate project-local checks
+and dependencies. They are not part of the root library build; independent CI
+jobs run each app's documented build, Debug tests, ReleaseFast tests and check.
 
 The [diagnostic catalog](../tests/contracts.zig) requires the intended error,
 not merely any compilation failure. [Test suites](../tests/README.md) cover
@@ -80,5 +81,12 @@ callback semantics permit. Whole-item vector callbacks work; no specialized SIMD
 mode or universal zero-overhead guarantee is implied.
 
 [GitHub Actions](../.github/workflows/validation.yml) runs `zig build check` and
-ReleaseFast native tests on Linux. Local validation does not require CI, emulators,
-or another target matrix.
+ReleaseFast native library tests on Linux, plus one independent job per standalone
+app. A [shared setup action](../.github/actions/setup-zig/action.yml) enforces the
+root compiler pin; app pins must match. Only the checkout app fetches/links SQLite.
+No app dependencies are added to the library manifest or build. Local validation
+does not require a CI provider or another target matrix.
+
+[Local app command timings](measurements/app-validation/README.md) distinguish
+fresh per-job caches from warm result-cache reuse. They are observations, not
+thresholds or predictions for GitHub's Linux runners.
