@@ -381,10 +381,14 @@ pub const Server = struct {
         self.interrupt(self.io);
     }
 
-    fn acquireDelivery(context: *anyopaque) completion.Token {
+    fn acquireDelivery(context: *anyopaque) std.Io.Cancelable!completion.Token {
         const self: *Server = @ptrCast(@alignCast(context));
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        // Shutdown can retire the last input credit while a handler/forwarder
+        // still unwinds. It must not resurrect that request (or panic) just
+        // because cancellation has not yet reached its own worker.
+        if (self.interrupted) return error.Canceled;
         std.debug.assert(self.pending and self.deliveries != 0);
         self.deliveries += 1;
         return self.token();

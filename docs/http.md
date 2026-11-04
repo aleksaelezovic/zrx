@@ -169,6 +169,10 @@ unsupported heads close that session and allow the next connection.
 
 Shutdown interrupts connected I/O, cancels the source's accept/completion work,
 and joins graph users before closing remaining sockets or freeing buffers.
+Interruption also closes new publication admission: a forwarder still unwinding
+cannot revive a retired request by reserving another delivery credit. It returns
+cancellation control rather than publishing an outcome. Already-issued credits
+remain releasable during cleanup; normal request-credit invariants still apply.
 Earlier successful sends are not rolled back. Flush does not prove remote
 receipt or exactly-once application effects.
 

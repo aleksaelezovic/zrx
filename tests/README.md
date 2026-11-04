@@ -35,6 +35,9 @@ All public behavior/contract suites import the one `zrx` package module:
 - `error_lifecycle.zig`: private receipt decisions, stripped terminal data, stale
   generations and forced dispatcher acceptance/retirement/cancellation schedules.
   Test-local Io observes exact waits, not elapsed timing.
+- `http_completion.zig`: forced late forwarding after HTTP interruption,
+  canceled publication admission and balanced cleanup of already-issued credits.
+  These private schedules require no sockets, sleeps or production hooks.
 - `measurement.zig` and `phase_observation.zig`: concurrency-safe allocator/
   checkpoint tools, current graph failure cleanup and phase ordering.
   `phase_erasure.zig` supplies native runtime-input inspection fixtures.
@@ -47,5 +50,5 @@ foreign execution or imperative codegen equality.
 `zig build test` runs these suites and finite example entry points.
 `zig build check` additionally checks formatting and cross-object builds.
 Use `declarative-test`, `lifecycle-test`, `measurement-test`, `test-branch`,
-`test-errors`, `test-error-lifecycle`, `test-retry` or `test-http` for focused loops. See
+`test-errors`, `test-error-lifecycle`, `test-http-completion`, `test-retry` or `test-http` for focused loops. See
 [validation](../docs/validation.md).

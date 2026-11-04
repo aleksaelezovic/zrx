@@ -21,7 +21,8 @@ zig build check
   and HTTP suites, including managed byte I/O/configuration, service sources,
   synchronous declaration expansion and bounded framing.
 - `lifecycle-test`: forced alias/completion schedules and producer join/retirement
-  orders, plus blocked reporting/cancellation and join-before-release checks.
+  orders, plus blocked reporting/cancellation, late HTTP publication admission
+  and join-before-release checks.
   The small transport shim exposes no declaration operators/executor.
 - `measurement-test`: concurrent allocator accounting, failure cleanup and
   callback/coordinator checkpoint invariants, with no timing thresholds.
@@ -40,6 +41,8 @@ zig build check
 - `test-error-lifecycle`: private forced receipt/dispatcher schedules, including
   late acknowledgement after retirement, stale generations, unrelated lane
   retirement and cancellation while waiting for error acceptance.
+- `test-http-completion`: private deterministic HTTP credit/forwarding schedules,
+  including shutdown before publication and failed publication after reservation.
 - `example`: finite public demos. Each also has an `example-NAME` step.
   `io-examples` and `http-example` build/install opt-in executables without
   starting live services.

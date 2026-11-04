@@ -8,3 +8,6 @@ pub const ErrorReceipt = @import("internal/error_receipt.zig").Receipt;
 pub const acceptFailure = @import("internal/error_receipt.zig").accept;
 pub const Failure = @import("data/failures.zig").Failure;
 pub const ErrorRouter = @import("internal/runtime/branch.zig").Router;
+pub const HttpRuntime = @import("internal/runtime/http.zig").Server;
+pub const HttpCompletion = @import("internal/runtime/completion.zig");
+pub const share = transport.share;

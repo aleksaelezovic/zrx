@@ -371,7 +371,7 @@ pub fn Bound(comptime Definition: type, comptime Env: type) type {
             return stream;
         }
 
-        fn acquireDelivery(context: *anyopaque) completion.Token {
+        fn acquireDelivery(context: *anyopaque) std.Io.Cancelable!completion.Token {
             const owner: *Owner = @ptrCast(@alignCast(context));
             return owner.server.?._state.completionOwner().acquire();
         }

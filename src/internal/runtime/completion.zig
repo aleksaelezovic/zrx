@@ -1,5 +1,7 @@
 //! Private completion credit for the single-outstanding-request HTTP runtime.
 //! Not an inferred payload destructor or general ownership protocol.
+const std = @import("std");
+
 pub const Token = struct {
     context: *anyopaque,
     generation: usize,
@@ -12,11 +14,13 @@ pub const Token = struct {
 
 pub const Owner = struct {
     context: *anyopaque,
-    acquire_fn: *const fn (*anyopaque) Token,
+    acquire_fn: *const fn (*anyopaque) std.Io.Cancelable!Token,
     peek_fn: *const fn (*anyopaque) Token,
     abort_fn: *const fn (*anyopaque) void,
 
-    pub fn acquire(self: Owner) Token {
+    // Publication admission can close before the forwarding task itself is
+    // canceled. Existing credits still release normally after interruption.
+    pub fn acquire(self: Owner) std.Io.Cancelable!Token {
         return self.acquire_fn(self.context);
     }
     pub fn peek(self: Owner) Token {

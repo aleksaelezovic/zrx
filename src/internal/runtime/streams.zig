@@ -105,7 +105,7 @@ pub fn Stream(comptime T: type) type {
         }
 
         pub fn pushOutcome(self: *Self, value: Wire) (std.Io.QueueClosedError || std.Io.Cancelable)!void {
-            const token = if (self.completionOwner()) |owner| owner.acquire() else null;
+            const token = if (self.completionOwner()) |owner| try owner.acquire() else null;
             errdefer if (token) |item| item.release();
             if (self.state.buffer.len == 0) {
                 try self.state.rendezvous.putOne(self.state.io, value);

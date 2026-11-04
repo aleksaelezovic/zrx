@@ -94,6 +94,7 @@ pub fn build(b: *std.Build) void {
         .{ "lifecycle", "tests/lifecycle_hardening.zig" },
         .{ "join-retirement", "tests/join_retirement.zig" },
         .{ "error-lifecycle", "tests/error_lifecycle.zig" },
+        .{ "http-completion", "tests/http_completion.zig" },
         .{ "measurement", "tests/measurement.zig" },
     }) |item| {
         const suite = b.addTest(.{ .name = item[0], .root_module = b.createModule(.{
@@ -120,13 +121,13 @@ pub fn build(b: *std.Build) void {
         const run = b.addRunArtifact(suite);
         if (comptime std.mem.eql(u8, item[0], "measurement")) {
             measurement.dependOn(&run.step);
-        } else if (comptime std.mem.eql(u8, item[0], "join-retirement") or std.mem.eql(u8, item[0], "error-lifecycle")) {
+        } else if (comptime std.mem.eql(u8, item[0], "join-retirement") or std.mem.eql(u8, item[0], "error-lifecycle") or std.mem.eql(u8, item[0], "http-completion")) {
             lifecycle.dependOn(&run.step);
         } else {
             public_tests.dependOn(&run.step);
             if (comptime std.mem.eql(u8, item[0], "lifecycle")) lifecycle.dependOn(&run.step);
         }
-        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http") or std.mem.eql(u8, item[0], "http-configuration") or std.mem.eql(u8, item[0], "predicates") or std.mem.eql(u8, item[0], "retry") or std.mem.eql(u8, item[0], "errors") or std.mem.eql(u8, item[0], "error-lifecycle"))
+        if (comptime std.mem.eql(u8, item[0], "branch") or std.mem.eql(u8, item[0], "http") or std.mem.eql(u8, item[0], "http-configuration") or std.mem.eql(u8, item[0], "predicates") or std.mem.eql(u8, item[0], "retry") or std.mem.eql(u8, item[0], "errors") or std.mem.eql(u8, item[0], "error-lifecycle") or std.mem.eql(u8, item[0], "http-completion"))
             b.step("test-" ++ item[0], "Run the " ++ item[0] ++ " suite").dependOn(&run.step);
     }
     inline for (contracts.failures) |failure| {
