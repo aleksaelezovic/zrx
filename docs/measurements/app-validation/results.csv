@@ -1,0 +1,25 @@
+phase,app,command,seconds,exit_code
+fresh-job,record-processor,zig build,58.338492,0
+fresh-job,record-processor,zig build test,3.588357,0
+fresh-job,record-processor,zig build test -Doptimize=ReleaseFast,19.622662,0
+fresh-job,record-processor,zig build check,0.241620,0
+warm,record-processor,zig build,0.178933,0
+warm,record-processor,zig build test,0.240053,0
+warm,record-processor,zig build test -Doptimize=ReleaseFast,0.235223,0
+warm,record-processor,zig build check,0.236628,0
+fresh-job,durable-checkout,zig build,89.412407,0
+fresh-job,durable-checkout,zig build test,3.161179,0
+fresh-job,durable-checkout,zig build test -Doptimize=ReleaseFast,23.894078,0
+fresh-job,durable-checkout,zig build check,1.299937,0
+warm,durable-checkout,zig build,0.233522,0
+warm,durable-checkout,zig build test,1.249239,0
+warm,durable-checkout,zig build test -Doptimize=ReleaseFast,0.891168,0
+warm,durable-checkout,zig build check,1.310063,0
+fresh-job,http-jobs,zig build,60.149550,0
+fresh-job,http-jobs,zig build test,7.684428,0
+fresh-job,http-jobs,zig build test -Doptimize=ReleaseFast,27.209041,0
+fresh-job,http-jobs,zig build check,0.241682,0
+warm,http-jobs,zig build,0.132221,0
+warm,http-jobs,zig build test,0.183287,0
+warm,http-jobs,zig build test -Doptimize=ReleaseFast,0.182022,0
+warm,http-jobs,zig build check,0.239838,0
