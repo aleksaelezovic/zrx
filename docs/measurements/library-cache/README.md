@@ -87,8 +87,17 @@ The [hosted follow-up and investigation](investigation.md) found successful cach
 transport and cross-object reuse, but no native executable reuse. The restored
 directory exceeded the limit and was cleared. Subsequent diagnostics confirmed
 different native CPU configurations between runners, justifying those misses.
-The baseline policy is the next hosted experiment, not an established speedup.
-No general runtime performance improvement is claimed.
+The subsequent [baseline result](investigation.md#hosted-baseline-result) verified
+29/29 native artifact hits per mode and full test/smoke execution: the library job
+took 1m 23s with restored compilation, versus 10m 56s for its cold seed.
+That pair had identical host CPU diagnostics and unchanged source; cross-CPU
+reuse and partial-change timings were not measured. No general runtime
+performance improvement is claimed.
+
+The namespace does not include the source commit, so a new commit can restore
+the previous cache. Zig validates affected compilation dependencies rather than
+treating every source change as a whole-cache reset. See
+[partial-change behavior](../../validation.md#partial-changes-and-cache-reuse).
 
 ## Validation
 

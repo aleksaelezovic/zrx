@@ -111,3 +111,26 @@ continue to report the actual machine, not the baseline validation CPU.
 
 See the [restored-cache experiment](measurements/library-cache/README.md) for
 measured execution evidence, the cache namespace and limitations.
+
+### Partial changes and cache reuse
+
+Caching is not all-or-nothing across commits. The setup action restores the
+latest matching job/platform/compiler/policy cache, without a commit-SHA
+component. Zig then checks each artifact's source/dependencies and compilation
+settings. A changed input invalidates its consumers, not unrelated artifacts.
+
+- Changing one test file generally rebuilds that suite's executable.
+- Changing shared library code can rebuild many suites/examples importing it.
+- Changing documentation that is not a declared compilation input generally
+  leaves compiled artifacts reusable.
+- Changing compiler, target/CPU or optimization settings needs matching artifacts;
+  the older entries are not thereby erased.
+
+This does not promise function-level incremental recompilation: an affected
+executable may require substantial compiler work. Tests and smoke examples still
+execute even when their executables are reused.
+
+After the run, the action saves a new cache archive containing reusable old and
+new entries. Cache absence/eviction, a new namespace, or the action's size-limit
+cleanup can instead cause a cold build. The verified hosted comparison used
+unchanged source; it is not a measurement of partial-change rebuild time.

@@ -113,13 +113,50 @@ optimization modes and cross fixtures are unchanged. No validation is skipped.
 
 Keeping native CPU selection and partitioning caches by CPU was the alternative;
 baseline selection favors reproducible regular CI inputs over host-specific CPU
-coverage. The first run must seed the new namespace. A later cache-restoring
-run is required to establish hosted artifact reuse and any end-to-end benefit.
+coverage. The two hosted attempts below verify cache seeding followed by
+compilation reuse without reusing test results.
 
 `lscpu` and [`tests/ci_target.zig`](../../../tests/ci_target.zig) continue to report
 the actual host CPU. The latter runs independently of the library and is not
 itself passed the baseline CPU option; its output must not be mistaken for the
 validation binaries' CPU policy.
+
+## Hosted baseline result
+
+Both attempts of [run 41934170836](https://github.com/aleksaelezovic/zrx/actions/runs/41934170836)
+used commit `56d812f0e7e2b0539d7f7316641b2915c2cef6c6`, Zig 0.17.0,
+Ubuntu 24.04 and the baseline CPU commands above. The seed ran on
+2026-11-04; the library-only rerun ran on 2026-11-05. Both completed successfully.
+The seed also passed all three standalone-app jobs.
+
+| Observation | Seed, attempt 1 | Restored, attempt 2 |
+|---|---:|---:|
+| Entire library job, including setup/cache transfer | 10m 56s | 1m 23s |
+| Setup step, including tool installation/cache restore | 10s | 23s |
+| `check` | 3m 14s | 28s |
+| ReleaseFast validation | 7m 01s | 18s |
+| Post-setup step, including cache save | 6s | 6s |
+| Native artifacts reused per build mode | 0/29 | 29/29 |
+| Cross objects reused | 0/46 | 46/46 |
+| Test execution, per build mode | 243 passed, 20 runners | 243 passed, 20 runners |
+| Smoke execution, per build mode | 8 passed | 8 passed |
+| Expected-diagnostic compilations, per build mode | 96 | 96 |
+| Cached test/smoke run results | 0 | 0 |
+
+Whole-second timestamps come from GitHub's job/step API; these are one pair of
+observations, not timing thresholds or predictions for changed source. Job
+totals include orchestration outside the listed steps.
+
+The rerun explicitly restored the seed key
+`setup-zig-cache-v2-validation-zig-x86_64-linux-0.17.0-library-validation-v2-baseline-41934170836-1`.
+Both attempts reported 1,505,975,393 cache-file bytes, below the 2 GiB limit;
+neither cleared the directory. The seed archive was 190,674,253 bytes.
+
+Both native-host diagnostics reported `znver4-mwaitx-pku-wbnoinvd`. Thus this
+pair proves warm baseline artifact reuse and full validation execution, but
+does not directly test reuse between different host CPU configurations.
+It does not measure partial-source-change rebuilds, compiler-phase costs or
+runtime performance.
 
 ## Validation and limits
 
@@ -134,5 +171,6 @@ The baseline commands, `zig build check -Dcpu=baseline --summary all` and
 `zig build test -Doptimize=ReleaseFast -Dcpu=baseline --summary all`, also passed
 locally with Zig 0.17.0 on macOS ARM64. Each executed 243 tests in 20 runners
 and eight smoke examples; `check` included the unchanged cross catalog.
-The baseline policy's hosted results remain pending; these local results are
-not Linux execution or cache-reuse evidence.
+The hosted baseline logs independently verify all counts and cache outcomes
+in the table above. Recording those results changed documentation only; local
+links, instruction symlinks and whitespace were checked without rerunning builds.
