@@ -28,6 +28,7 @@ pub const cases = .{
     .{ "queue_without_io", "queue: needs `std.Io` to run its consumer task; pass `io` to `run(.{ io, ... })`" },
     .{ "recover_handler", "recover: the handler's first data parameter must be an error set or anyerror, got `u32`" },
     .{ "resource_release", "resource: release must return `void`; a release cannot fail" },
+    .{ "route_bare_batch", "otherwise: expected `pipe(.{ ... })`, got `pipe.Spliced(\"batch\"[0..5],struct { ops.transform.BatchSlots(2), ops.transform.BatchBuffer(2) })`" },
     .{ "route_mismatch", "route: every case must end the same way (all terminate, or all emit one item type); case 0 terminates but case 1 emits `u32`" },
     .{ "route_not_case", "route: element 0 is not a case (got `pipe.Pipe(struct { ops.sink.Subscribe((function 'ignore')) })`); use when(predicate, pipe(...)) or otherwise(pipe(...))" },
     .{ "route_otherwise_order", "route: otherwise(...) must be the last case" },

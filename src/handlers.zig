@@ -118,6 +118,7 @@ pub fn compose(comptime handlers: anytype) type {
 /// `handler`, with a failure turned into a value: when `handler` returns an
 /// error, the result is `fallback(deps..., err, item)` instead. Where `recover`
 /// skips an item that failed, this keeps it, as whatever the fallback makes.
+/// Like `recover`, it never handles `error.Canceled`: that one is returned.
 pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
     return struct {
         pub const zrx_handler = {};
@@ -128,6 +129,9 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
 
         pub fn call(env: anytype, args: anytype) Fallen(di.types(@TypeOf(args))) {
             return di.invoke(handler, env, args) catch |err| {
+                if (comptime canCancel(Failure(di.types(@TypeOf(args))))) {
+                    if (@as(anyerror, err) == error.Canceled) return error.Canceled;
+                }
                 var with_error: @Tuple(WithError(di.types(@TypeOf(args)))) = undefined;
                 with_error[0] = err;
                 inline for (0..args.len) |i| with_error[i + 1] = args[i];
@@ -146,7 +150,15 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
             return &[_]type{Failure(Args)} ++ Args;
         }
 
-        /// What the fallback returns, which must be what the handler would have.
+        /// Whether the handler can report a cancellation, which is not a failure to fall back from.
+        fn canCancel(comptime E: type) bool {
+            const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+            for (names) |name| if (std.mem.eql(u8, name, "Canceled")) return true;
+            return false;
+        }
+
+        /// What the fallback returns, which must be what the handler would
+        /// have; plus `error.Canceled` when the handler can be cancelled.
         fn Fallen(comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
             const Wanted = di.Payload(di.Result("orElse", handler, Args));
@@ -159,7 +171,9 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
             if (di.Payload(F) != Wanted) @compileError(
                 "orElse: the fallback must return `" ++ @typeName(Wanted) ++ "` like the handler, got `" ++ @typeName(F) ++ "`",
             );
-            return F;
+            if (!canCancel(Failure(Args))) return F;
+            const Own = if (Fallible(F)) @typeInfo(F).error_union.error_set else error{};
+            return (Own || error{Canceled})!Wanted;
         }
     };
 }

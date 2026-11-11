@@ -56,6 +56,25 @@ pub fn isPipe(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_pipe");
 }
 
+/// Whether `pipe` replaces an operator of type `T` by the operators in its `ops`.
+fn isSpliced(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_spliced");
+}
+
+/// An operator made of several stages, for when its parts must be stages of
+/// their own (see `batch`). `pipe` splices its `ops` in like a nested pipe's,
+/// but it is one operator to its user, not a `pipe(...)`: where a sub-pipe is
+/// expected it is rejected like any other bare operator.
+pub fn Spliced(comptime operator_name: []const u8, comptime Ops: type) type {
+    return struct {
+        ops: Ops,
+
+        pub const zrx_operator = {};
+        pub const zrx_spliced = {};
+        pub const name = operator_name;
+    };
+}
+
 /// For operators that take sub-pipelines.
 pub fn expectPipe(comptime who: []const u8, comptime T: type) void {
     if (comptime !isPipe(T)) @compileError(who ++ ": expected `pipe(.{ ... })`, got `" ++ @typeName(T) ++ "`");
@@ -76,7 +95,7 @@ pub fn pipe(operators: anytype) Pipe(Operators(@TypeOf(operators))) {
     var ops: Operators(@TypeOf(operators)) = undefined;
     comptime var at = 0;
     inline for (0..operators.len) |i| {
-        if (comptime isPipe(@TypeOf(operators[i]))) {
+        if (comptime isSpliced(@TypeOf(operators[i]))) {
             inline for (0..comptime di.types(@TypeOf(operators[i].ops)).len) |j| {
                 ops[at] = operators[i].ops[j];
                 at += 1;
@@ -100,7 +119,7 @@ fn Operators(comptime Given: type) type {
             "pipe: element {d} is not an operator (got `{s}`); a pipe holds operators such as map(...), filter(...) or another pipe",
             .{ i, @typeName(Op) },
         ));
-        ops = ops ++ if (isPipe(Op)) di.types(@FieldType(Op, "ops")) else &[_]type{Op};
+        ops = ops ++ if (isSpliced(Op)) di.types(@FieldType(Op, "ops")) else &[_]type{Op};
     }
     return @Tuple(ops);
 }
@@ -111,6 +130,7 @@ pub fn Pipe(comptime Ops: type) type {
 
         pub const zrx_operator = {};
         pub const zrx_pipe = {};
+        pub const zrx_spliced = {};
         pub const name = "pipe";
 
         pub fn Out(comptime Env: type, comptime In: type) type {

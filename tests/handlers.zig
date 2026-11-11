@@ -141,6 +141,26 @@ fn orderFallback(err: anyerror, order: Order) error{GaveUp}!u32 {
     return giveUp(err, order.price);
 }
 
+var fallbacks: u32 = 0;
+fn interrupted(value: u32) error{ Canceled, Odd }!u32 {
+    if (value == 2) return error.Canceled;
+    if (value % 2 == 1) return error.Odd;
+    return value;
+}
+fn countFallback(_: error{ Canceled, Odd }, _: u32) u32 {
+    fallbacks += 1;
+    return 0;
+}
+
+test "orElse falls back from failures but never from a cancellation" {
+    var seen: Numbers = .{};
+    fallbacks = 0;
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, countFallback)), subscribe(record) })).run(.{&seen});
+    try std.testing.expectError(error.Canceled, result);
+    try seen.expect(&.{ 0, 0 });
+    try std.testing.expectEqual(@as(u32, 1), fallbacks);
+}
+
 test "constant replaces every item" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 3), pipe(.{ map(constant(@as(u32, 9))), subscribe(record) })).run(.{&seen});
