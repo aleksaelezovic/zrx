@@ -89,7 +89,8 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 all have finished. The first failure cancels the others and is returned. A
 system is itself runnable, so systems nest. Programs are started with
 `Io.async`: they run concurrently when the `Io` can do so and one after another
-when it cannot.
+when it cannot, in which case a program is not started once an earlier one
+has failed.
 
 ## Sources
 
@@ -100,7 +101,7 @@ when it cannot.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io`. |
+| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io`. Once the pipe is done or fails, sources still waiting are cancelled. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -223,8 +224,12 @@ pipe(.{
 - `error.Canceled` is never given to a handler.
 - A `recover` guards what comes *after* it, up to the next `queue`. Errors on
   the far side of a queue happen in another task and fail the run.
-- Errors raised while the stream is finishing (a final `fold` value, a flush)
-  do not belong to an item and fail the run.
+- It guards every item that passes through it, including the ones an earlier
+  operator emits when the stream ends: a `fold` result, or the last, partial
+  `batch`, is handled like any other item. Put `recover` before the `fold` if
+  its result should not be guarded.
+- A later stage's own end-of-stream work, such as flushing a writer, is not an
+  item and fails the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
 
@@ -242,6 +247,21 @@ only task boundary: the stages before it push into a buffer of `n` items and
 wait while it is full; a second task feeds the stages after it. That waiting is
 the backpressure: a slow consumer slows the source instead of dropping items or
 growing memory.
+
+A program with a queue is a small group of supervised tasks: one per queue,
+and one for the source and the stages before the first queue. The run returns
+when all of them are done, and the first failure cancels the rest:
+
+- A failure behind a queue cancels the source at once, even one that is
+  waiting for its next item and not pushing.
+- So does the pipe behind a queue being done (`take` after a `queue`), unless
+  that queue is inside a `branch` or `route` sub-pipe: one sub-pipe being done
+  says nothing about its siblings, so there the source finds out at its next push.
+- Every task is cancelled and joined before any resource is released, so a
+  handler never runs against a released resource.
+- Cancellation is cooperative: it takes effect where a task calls into
+  `std.Io`. A source or handler that computes without ever doing so cannot be
+  interrupted.
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:
@@ -300,10 +320,12 @@ A run goes through these steps:
 3. the source pushes items;
 4. on a normal end, stages finish in order (`fold` and `batch` emit, queues
    drain), then owned writers flush, last stage first;
-5. always: stages are torn down in reverse order (`resource` releases, files close).
+5. always: every task still running is cancelled and joined;
+6. always: stages are torn down in reverse order (`resource` releases, files close).
 
-A failure at any step skips to 5. A resource is released after everything
-downstream of it is done, so a handler never sees a released value.
+A failure at any step skips to 5. No task is running by the time anything is
+released, and a resource is released after everything downstream of it, so a
+handler never sees a released value.
 
 ## Writing your own
 
@@ -345,8 +367,8 @@ const Counted = struct {
 };
 ```
 
-A stage may also declare `start`, `finish`, `flush`, `deinit` and, with
-`Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
+A stage may also declare `start`, `finish`, `flush`, `stop`, `deinit` and,
+with `Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
 

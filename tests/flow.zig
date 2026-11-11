@@ -286,3 +286,96 @@ test "terminal cases can be queued" {
     try left.expect(&.{ 0, 2, 4 });
     try right.expect(&.{ 2, 6, 10 });
 }
+
+// --- supervision ------------------------------------------------------------
+
+const Flags = struct {
+    released: std.atomic.Value(bool) = .init(false),
+    used_after_release: std.atomic.Value(bool) = .init(false),
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+};
+const Handle = struct { flags: *Flags };
+
+fn open(flags: *Flags) Handle {
+    return .{ .flags = flags };
+}
+fn close(handle: Handle) void {
+    handle.flags.released.store(true, .seq_cst);
+}
+fn useSlowly(clock: std.Io, handle: Handle, _: u32) void {
+    clock.sleep(.fromMilliseconds(20), .awake) catch {};
+    if (handle.flags.released.load(.seq_cst)) handle.flags.used_after_release.store(true, .seq_cst);
+}
+fn breakAfterOne(out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    return error.SourceBroke;
+}
+
+test "a queue's consumer is joined before the resources it uses are released" {
+    var flags: Flags = .{};
+    const work = pipe(.{ queue(4), zrx.resource(open, close), subscribe(useSlowly) });
+    const result = program(zrx.fromProducer(u32, breakAfterOne), work).run(.{ io, &flags });
+    try std.testing.expectError(error.SourceBroke, result);
+    try std.testing.expect(flags.released.load(.seq_cst));
+    try std.testing.expect(!flags.used_after_release.load(.seq_cst));
+}
+
+/// Pushes one item, then waits far longer than a test should take. Only a
+/// cancellation ends the wait early; waking up by itself is recorded.
+fn pushThenIdle(clock: std.Io, flags: *Flags, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    try clock.sleep(.fromSeconds(5), .awake);
+    flags.woke_by_itself.store(true, .seq_cst);
+    _ = try out.push(@as(u32, 2));
+}
+fn failAlways(_: u32) error{ConsumerBroke}!void {
+    return error.ConsumerBroke;
+}
+
+test "a failure behind a queue interrupts a source that is not pushing" {
+    var flags: Flags = .{};
+    const result = program(zrx.fromProducer(u32, pushThenIdle), pipe(.{ queue(4), subscribe(failAlways) })).run(.{ io, &flags });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+test "a pipe that is done behind a queue interrupts a source that is not pushing" {
+    var flags: Flags = .{};
+    var seen: Numbers = .{};
+    try program(zrx.fromProducer(u32, pushThenIdle), pipe(.{ queue(4), take(1), subscribe(record) })).run(.{ io, &flags, &seen });
+    try seen.expect(&.{1});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+test "a failure in a queued branch interrupts a source that is not pushing" {
+    var flags: Flags = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(2), subscribe(failAlways) }),
+        pipe(.{ queue(2), subscribe(toRight) }),
+    })});
+    const result = program(zrx.fromProducer(u32, pushThenIdle), work).run(.{ io, &flags, Right{ .seen = &right } });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+test "one queued branch being done does not stop its siblings" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(2), take(1), subscribe(toLeft) }),
+        pipe(.{ queue(2), map(slowly), subscribe(toRight) }),
+    })});
+    try program(range(u32, 0, 20), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{0});
+    try std.testing.expectEqual(@as(usize, 20), right.len);
+}
+
+fn anyFailure(value: u32) anyerror!void {
+    if (value == 3) return error.Three;
+}
+
+test "a handler that can fail with anyerror works behind a queue" {
+    try std.testing.expectError(error.Three, program(range(u32, 0, 10), pipe(.{ queue(2), subscribe(anyFailure) })).run(.{io}));
+    try program(range(u32, 0, 3), pipe(.{ queue(2), subscribe(anyFailure) })).run(.{io});
+}

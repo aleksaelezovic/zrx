@@ -212,3 +212,55 @@ test "run has a precise error set, never anyerror" {
     const Both = @typeInfo(@TypeOf(system(.{ queued, plain }).run(deps))).error_union.error_set;
     try std.testing.expectEqual(@as(usize, 3), comptime @typeInfo(Both).error_set.error_names.?.len);
 }
+
+// --- supervision ------------------------------------------------------------
+
+const Idle = struct { woke_by_itself: std.atomic.Value(bool) = .init(false) };
+
+/// Waits far longer than a test should take before its only item. Only a
+/// cancellation ends the wait early; waking up by itself is recorded.
+fn idleThenPush(clock: std.Io, idle: *Idle, out: anytype) !void {
+    try clock.sleep(.fromSeconds(5), .awake);
+    idle.woke_by_itself.store(true, .seq_cst);
+    _ = try out.push(@as(u32, 2));
+}
+
+test "merge cancels a source that is not pushing once the pipe is done" {
+    var seen: Numbers = .{};
+    var idle: Idle = .{};
+    const sources = merge(.{ fromValue(@as(u32, 7)), fromProducer(u32, idleThenPush) });
+    try program(sources, pipe(.{ take(1), subscribe(record) })).run(.{ io, &seen, &idle });
+    try seen.expect(&.{7});
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "merge cancels a source that is not pushing once a push fails" {
+    var seen: Numbers = .{};
+    var idle: Idle = .{};
+    const sources = merge(.{ fromValue(@as(u32, 2)), fromProducer(u32, idleThenPush) });
+    const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen, &idle });
+    try std.testing.expectError(error.Two, result);
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "without concurrency, a system does not start a program after one has failed" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer backend.deinit();
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
+    const later = program(fromValue(@as(u32, 9)), pipe(.{subscribe(toRight)}));
+    const result = system(.{ later, failing, later }).run(.{ backend.io(), Left{ .seen = &left }, Right{ .seen = &right } });
+    try std.testing.expectError(error.Two, result);
+    try right.expect(&.{9});
+}
+
+test "without concurrency, merge runs its sources one after another" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer backend.deinit();
+    var seen: Numbers = .{};
+    const low = [_]u32{ 1, 2 };
+    const high = [_]u32{ 10, 20 };
+    try program(merge(.{ fromSlice(&low), fromSlice(&high) }), pipe(.{ take(3), subscribe(record) })).run(.{ backend.io(), &seen });
+    try seen.expect(&.{ 1, 2, 10 });
+}

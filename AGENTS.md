@@ -48,16 +48,26 @@ to this file; edit `AGENTS.md`, not copies.
   forward their children's requirements. No closures, no runtime function pointers.
 - **Errors are Zig errors.** A handler error fails the run after teardown.
   `recover(handler)` guards the operators after it per item; its error
-  parameter type selects what it handles; `error.Canceled` is never handled;
-  errors during finish, or beyond a `queue`, are not item errors. No error lane,
-  no rollback.
+  parameter type selects what it handles; `error.Canceled` is never handled.
+  A value an earlier operator emits at the end of the stream is an item like
+  any other; a later stage's own finish or flush, and anything beyond a
+  `queue`, is not. `orElse` is the handler-level counterpart that keeps the
+  item. No error lane, no rollback.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
-  `system` and `merge` use `tasks.all`: `Io.async`, fail fast, cancel the rest.
+- **Every task is supervised.** A stop or a failure must not wait for a
+  producer's next push. A program whose pipe has a queue runs its source as a
+  task and cancels it when a worker reports through `Supervision` (always on
+  failure; on "done" only outside `branch`/`route` sub-pipes). `system` and
+  `merge` use `tasks.all`: `Io.async`, fail fast, cancel the rest, and do not
+  start a member after an earlier one failed. A program without a queue stays
+  a plain loop on the caller's task.
 - **Lifecycle.** `init` in order, `start` in reverse, pushes, then on a normal
-  end `finish` in order and `flush` in reverse; always `deinit` in reverse.
-  Whoever owns a writer flushes it. `release` cannot fail.
+  end `finish` in order and `flush` in reverse; always `stop` in order, then
+  `deinit` in reverse. A stage that runs a task joins it in `stop`, never in
+  `deinit`: every task is gone before anything is released. Whoever owns a
+  writer flushes it. `release` cannot fail.
 - **Programs must terminate.** `program` takes a source and a `pipe(...)`;
   `branch`, `when` and `otherwise` take `pipe(...)` too, never a bare operator.
 
@@ -110,4 +120,6 @@ to this file; edit `AGENTS.md`, not copies.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
-  timing or scheduling order for their assertions.
+  timing or scheduling order for their assertions. To show that something is
+  interrupted, have it wait far longer than the test and record whether it
+  woke by itself, rather than measuring how long the run took.

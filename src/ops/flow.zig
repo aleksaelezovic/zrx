@@ -40,6 +40,7 @@ fn Queue(comptime capacity: usize) type {
                 consumer: ?Io.Future(void),
                 /// The error that stopped the consumer; read only after it is joined.
                 failure: ?anyerror,
+                supervision: ?core.Supervision,
 
                 const Self = @This();
                 pub const zrx_boundary = {};
@@ -49,6 +50,7 @@ fn Queue(comptime capacity: usize) type {
                     self.channel = .init(&self.buffer);
                     self.consumer = null;
                     self.failure = null;
+                    self.supervision = if (comptime di.has(Env, core.Supervision)) di.get(env, core.Supervision) else null;
                 }
 
                 pub fn start(self: *Self, down: anytype) !void {
@@ -60,19 +62,25 @@ fn Queue(comptime capacity: usize) type {
                         fn run(self: *Self, down: Down) void {
                             // Take whatever is ready in one go rather than one lock per item.
                             var ready: [@min(capacity, 32)]In = undefined;
-                            consuming: while (true) {
-                                // Closed: upstream ended and the buffer is empty. Canceled: torn down.
-                                const count = self.channel.get(self.io, &ready, 1) catch break;
+                            const ending: enum { drained, failed, satisfied } = consuming: while (true) {
+                                // Closed: upstream ended and the buffer is empty. Canceled: stopped.
+                                const count = self.channel.get(self.io, &ready, 1) catch break .drained;
                                 for (ready[0..count]) |item| {
                                     const flow = down.push(item) catch |err| {
                                         self.failure = err;
-                                        break :consuming;
+                                        break :consuming .failed;
                                     };
-                                    if (flow == .done) break :consuming;
+                                    if (flow == .done) break :consuming .satisfied;
                                 }
-                            }
+                            };
                             // Unblocks a producer waiting for space; it then sees `.done`.
                             self.channel.close(self.io);
+                            // A producer that is not pushing would never look: tell the run.
+                            if (self.supervision) |supervision| switch (ending) {
+                                .drained => {},
+                                .failed => supervision.failed(),
+                                .satisfied => supervision.satisfied(),
+                            };
                         }
                     };
                 }
@@ -94,12 +102,17 @@ fn Queue(comptime capacity: usize) type {
                     }
                     if (self.failure) |err| {
                         // `failure` only ever holds an error that `down.push` returned.
-                        if (comptime @typeInfo(Failure).error_set.error_names.?.len == 0) unreachable;
+                        // (`anyerror` has no list of names; it can hold anything.)
+                        const names = comptime @typeInfo(Failure).error_set.error_names;
+                        if (comptime names != null and names.?.len == 0) unreachable;
                         return @as(Failure, @errorCast(err));
                     }
                 }
 
-                pub fn deinit(self: *Self) void {
+                /// After a failure the consumer may still be running handlers
+                /// of the stages after this one: it must be gone before any of
+                /// them is torn down.
+                pub fn stop(self: *Self) void {
                     if (self.consumer) |*consumer| {
                         self.channel.close(self.io);
                         consumer.cancel(self.io);
@@ -166,7 +179,10 @@ fn Branch(comptime Ps: type) type {
                 chains: @Tuple(&chains),
                 live: [n]bool,
 
-                pub fn init(self: *@This(), op: *const Op, env: Env) !void {
+                pub const has_boundary = anyBoundary(&chains);
+
+                pub fn init(self: *@This(), op: *const Op, outer: Env) !void {
+                    const env = core.Supervision.nest(outer);
                     self.live = @splat(true);
                     inline for (0..n) |i| {
                         self.chains[i].init(&op.pipes[i], env) catch |err| {
@@ -202,12 +218,22 @@ fn Branch(comptime Ps: type) type {
                     inline for (0..n) |i| try self.chains[n - 1 - i].flush();
                 }
 
+                pub fn stop(self: *@This()) void {
+                    inline for (0..n) |i| self.chains[i].stop();
+                }
+
                 pub fn deinit(self: *@This()) void {
                     inline for (0..n) |i| self.chains[n - 1 - i].deinit();
                 }
             };
         }
     };
+}
+
+/// Whether any of the sub-pipe stage types runs part of itself on another task.
+fn anyBoundary(comptime chains: []const type) bool {
+    for (chains) |C| if (C.has_boundary) return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +346,8 @@ fn Route(comptime Cs: type) type {
 
                 const Self = @This();
 
+                pub const has_boundary = anyBoundary(&chains);
+
                 /// The `down` given to a rejoining case: forwards and remembers `.done`.
                 fn Rejoin(comptime Down: type) type {
                     return struct {
@@ -342,7 +370,8 @@ fn Route(comptime Cs: type) type {
                     return if (rejoins) .{ .down = down, .done = &self.downstream_done } else .{};
                 }
 
-                pub fn init(self: *Self, op: *const Op, env: Env) !void {
+                pub fn init(self: *Self, op: *const Op, outer: Env) !void {
+                    const env = core.Supervision.nest(outer);
                     self.live = @splat(true);
                     self.downstream_done = false;
                     inline for (0..n) |i| {
@@ -383,6 +412,10 @@ fn Route(comptime Cs: type) type {
 
                 pub fn flush(self: *Self) !void {
                     inline for (0..n) |i| try self.chains[n - 1 - i].flush();
+                }
+
+                pub fn stop(self: *Self) void {
+                    inline for (0..n) |i| self.chains[i].stop();
                 }
 
                 pub fn deinit(self: *Self) void {

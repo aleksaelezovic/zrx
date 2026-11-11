@@ -17,6 +17,7 @@
 //!     pub fn start(self: *Stage, down: anytype) !void    // optional: after every stage is initialized
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
 //!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
+//!     pub fn stop(self: *Stage) void                     // optional: cancel and join any task this stage runs
 //!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
 //!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
@@ -27,7 +28,9 @@
 //!
 //! A run goes: `init` every stage in order, `start` in reverse, `push` per
 //! item, then on a normal end `finish` in order and `flush` in reverse; and
-//! always, last, `deinit` in reverse. A failure skips `finish` and `flush`.
+//! always, last, `stop` in order and then `deinit` in reverse. A failure skips
+//! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
+//! still using a stage when that stage, or one after it, is torn down.
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -35,6 +38,7 @@
 //! through memory until inlining removes it, and that shape stops the
 //! optimizer from doing so. `zig build zero-overhead` guards the operators here.
 const std = @import("std");
+const Io = std.Io;
 const di = @import("di.zig");
 
 /// What a push tells its caller: keep sending, or stop because nothing
@@ -47,6 +51,43 @@ pub const End = opaque {};
 
 /// The `down` given to stages of a terminated pipe. It has no `push`.
 pub const Closed = struct {};
+
+/// How a stage that runs a worker task tells the run that its worker ended on
+/// its own, so that a source waiting for its next item is not left to find
+/// out only when it pushes again. A program provides this dependency to its
+/// stages when its pipe crosses a task boundary.
+pub const Supervision = struct {
+    signal: *Signal,
+    /// False inside a `branch` or `route` sub-pipe, where one sub-pipe
+    /// wanting no more says nothing about its siblings.
+    whole_pipe: bool,
+
+    pub const Signal = struct {
+        io: Io,
+        wake: Io.Event = .unset,
+    };
+
+    /// The worker's side of the pipe failed: the run is over.
+    pub fn failed(supervision: Supervision) void {
+        supervision.signal.wake.set(supervision.signal.io);
+    }
+
+    /// The worker's side of the pipe wants no more items.
+    pub fn satisfied(supervision: Supervision) void {
+        if (supervision.whole_pipe) supervision.signal.wake.set(supervision.signal.io);
+    }
+
+    /// What a stage with sub-pipes provides to them in its place.
+    pub fn nested(supervision: Supervision) Supervision {
+        return .{ .signal = supervision.signal, .whole_pipe = false };
+    }
+
+    /// `env` as a sub-pipe of a `branch` or `route` should see it.
+    pub fn nest(env: anytype) @TypeOf(env) {
+        if (comptime !di.has(@TypeOf(env), Supervision)) return env;
+        return di.extend(env, di.get(env, Supervision).nested());
+    }
+};
 
 pub fn isOperator(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_operator");
@@ -274,6 +315,13 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 }
             }
 
+            /// Before any `deinit`: every task a stage runs is cancelled and joined.
+            pub fn stop(refs: Refs) void {
+                inline for (0..n) |i| {
+                    if (@hasDecl(stages[i], "stop")) refs[i].stop();
+                }
+            }
+
             pub fn deinit(refs: Refs) void {
                 comptime var i = n;
                 inline while (i > 0) {
@@ -331,6 +379,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         pub fn flush(self: *Self) !void {
             return at.flush(self.refsOf());
+        }
+
+        pub fn stop(self: *Self) void {
+            at.stop(self.refsOf());
         }
 
         pub fn deinit(self: *Self) void {

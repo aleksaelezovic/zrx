@@ -43,14 +43,23 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     "`; end it with subscribe(...), drain() or another terminal operator",
             );
 
-            const Frame = P.Stage(Env, S.Item);
+            if (comptime !P.Stage(Env, S.Item).has_boundary) return self.runHere(env);
+            return self.runSupervised(env);
+        }
+
+        /// The whole program is one loop on the caller's task.
+        fn runHere(self: *const @This(), env: anytype) !void {
+            const Frame = P.Stage(@TypeOf(env), S.Item);
             const Body = struct {
                 program: *const Program(S, P),
-                env: Env,
+                env: @TypeOf(env),
 
                 pub fn call(body: @This(), refs: Frame.Refs) !void {
                     try Frame.at.init(refs, &body.program.pipe.ops, body.env);
-                    defer Frame.at.deinit(refs);
+                    defer {
+                        Frame.at.stop(refs);
+                        Frame.at.deinit(refs);
+                    }
                     try Frame.at.start(refs, Closed{});
                     try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
                     try Frame.at.finish(refs, Closed{});
@@ -58,6 +67,63 @@ pub fn Program(comptime S: type, comptime P: type) type {
                 }
             };
             return Frame.withLocals(Body{ .program = self, .env = env });
+        }
+
+        /// The pipe crosses a task boundary, so the source is a task too: when
+        /// a worker ends on its own (its side failed, or wants no more), the
+        /// source is cancelled instead of being left to find out at its next
+        /// push, which for an idle source might never come.
+        fn runSupervised(self: *const @This(), outer: anytype) !void {
+            const io = di.get(outer, Io);
+            var signal: core.Supervision.Signal = .{ .io = io };
+            const env = di.extend(outer, core.Supervision{ .signal = &signal, .whole_pipe = true });
+            const Env = @TypeOf(env);
+            const Frame = P.Stage(Env, S.Item);
+            const Feed = struct {
+                fn run(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *core.Supervision.Signal, ended: *std.atomic.Value(bool)) !void {
+                    defer {
+                        ended.store(true, .release);
+                        wake.wake.set(wake.io);
+                    }
+                    return source.run(feed_env, entry);
+                }
+            };
+            const Body = struct {
+                program: *const Program(S, P),
+                env: Env,
+                signal: *core.Supervision.Signal,
+
+                pub fn call(body: @This(), refs: Frame.Refs) !void {
+                    const body_io = body.signal.io;
+                    try Frame.at.init(refs, &body.program.pipe.ops, body.env);
+                    defer {
+                        Frame.at.stop(refs);
+                        Frame.at.deinit(refs);
+                    }
+                    try Frame.at.start(refs, Closed{});
+
+                    var ended: std.atomic.Value(bool) = .init(false);
+                    var source = try body_io.concurrent(Feed.run, .{
+                        &body.program.source, body.env, Entry(Frame, S.Item){ .refs = refs }, body.signal, &ended,
+                    });
+                    body.signal.wake.wait(body_io) catch |err| {
+                        // This task is being cancelled: so is the source.
+                        source.cancel(body_io) catch {};
+                        return err;
+                    };
+                    const ended_by_itself = ended.load(.acquire);
+                    source.cancel(body_io) catch |err| {
+                        // Cancelled by the line above because a worker ended:
+                        // not a failure of the source. What the worker ended
+                        // with comes out of `finish`.
+                        const interrupted = !ended_by_itself and @as(anyerror, err) == error.Canceled;
+                        if (!interrupted) return err;
+                    };
+                    try Frame.at.finish(refs, Closed{});
+                    try Frame.at.flush(refs);
+                }
+            };
+            return Frame.withLocals(Body{ .program = self, .env = env, .signal = &signal });
         }
     };
 }
@@ -114,7 +180,7 @@ pub fn System(comptime Ps: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .program = &self.programs[i], .env = env };
-            return tasks.all(di.get(env, Io), group);
+            return tasks.all(di.get(env, Io), group, null);
         }
     };
 }
