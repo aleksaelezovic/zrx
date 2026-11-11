@@ -321,16 +321,20 @@ fn Route(comptime Cs: type) type {
                 const Self = @This();
 
                 /// The `down` given to a rejoining case: forwards and remembers `.done`.
-                fn Rejoin(comptime Down: type) type {
+                ///
+                /// While items flow, a `.done` from the pipe after the route
+                /// goes straight back to the source, which stops. What is
+                /// left is what the cases emit as the stream ends: with
+                /// `ending`, a case's final value is not forwarded once that
+                /// pipe is done. (Checking on every push as well would cost
+                /// nothing per item but makes the optimizer peel the loop.)
+                fn Rejoin(comptime Down: type, comptime ending: bool) type {
                     return struct {
                         down: Down,
                         done: *bool,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            // Once the pipe after the route is done, no case
-                            // forwards to it again: not another case later on,
-                            // nor a value a case emits as the stream ends.
-                            if (self.done.*) return .done;
+                            if (ending and self.done.*) return .done;
                             if (try self.down.push(item) == .done) {
                                 self.done.* = true;
                                 return .done;
@@ -340,11 +344,11 @@ fn Route(comptime Cs: type) type {
                     };
                 }
 
-                fn Tail(comptime Down: type) type {
-                    return if (rejoins) Rejoin(Down) else Closed;
+                fn Tail(comptime Down: type, comptime ending: bool) type {
+                    return if (rejoins) Rejoin(Down, ending) else Closed;
                 }
 
-                fn tail(self: *Self, down: anytype) Tail(@TypeOf(down)) {
+                fn tail(self: *Self, down: anytype, comptime ending: bool) Tail(@TypeOf(down), ending) {
                     return if (rejoins) .{ .down = down, .done = &self.downstream_done } else .{};
                 }
 
@@ -361,7 +365,7 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn start(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(self.tail(down));
+                    inline for (0..n) |i| try self.chains[i].start(self.tail(down, false));
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
@@ -369,7 +373,7 @@ fn Route(comptime Cs: type) type {
                         const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
                             if (self.live[i]) {
-                                if (try self.chains[i].push(item, self.tail(down)) == .done) self.live[i] = false;
+                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.live[i] = false;
                             }
                             return self.verdict();
                         }
@@ -384,7 +388,7 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn finish(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down));
+                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down, true));
                 }
 
                 pub fn flush(self: *Self) !void {
