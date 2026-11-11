@@ -1,6 +1,6 @@
 .{
     .name = .zrx,
-    .version = "0.1.0",
+    .version = "0.2.0",
     .fingerprint = 0xe5f0d6eec402ea20,
     .minimum_zig_version = "0.17.0",
     .paths = .{
@@ -10,6 +10,7 @@
         "tests",
         "examples",
         "benchmarks",
+        "tools",
         "docs",
         "README.md",
         "LICENSE",

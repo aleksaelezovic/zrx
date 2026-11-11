@@ -1,53 +1,92 @@
 # zrx
 
-A declarative functional/reactive library for Zig. Describe inputs,
-transformations, decisions and terminal effects as named standalone stages;
-execute them together with `run(bindings, flows)`.
+Declarative push streams for Zig with type-keyed dependency injection, compiled
+down to the loop you would have written by hand.
 
-**Experimental:** one declaration-only public model,
-type-keyed dependency injection, managed resources, finite inputs, producer-backed
-streams, streaming accumulation, per-item retries, replacement/derived signals, bounded line I/O
-and serial HTTP servers.
-Ordinary synchronous stages compose directly rather than acquiring a worker/queue
-per stage.
+**Experimental.** This is a ground-up rewrite; the API is small on purpose and
+may still change.
 
-The package module is `zrx`. Callbacks declare dependencies as typed leading
-parameters; ordinary data arguments come last. Supply allocator, Io, service
-values or lifecycle recipes at `run`. Only selected terminal roots execute.
-Errors and ownership stay explicit; no universal zero-overhead claim is made.
+```zig
+const std = @import("std");
+const zrx = @import("zrx");
+const pipe = zrx.pipe;
+const program = zrx.program;
+const fromSlice = zrx.fromSlice;
+const map = zrx.map;
+const filter = zrx.filter;
+const fold = zrx.fold;
+const stdout = zrx.stdout;
+const print = zrx.print;
 
-Start with the tested [resource](examples/resources.zig),
-[stream](examples/streams.zig), [signal](examples/signals.zig), and
-[accumulation](examples/scan.zig) examples:
+const Scale = struct { by: u32 };
 
-```sh
-zig build example
+fn scale(factor: Scale, value: u32) u32 { // `factor` is injected by its type
+    return value * factor.by;
+}
+fn isLarge(value: u32) bool {
+    return value >= 6;
+}
+fn add(sum: u64, value: u32) u64 {
+    return sum + value;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const values = [_]u32{ 1, 2, 3, 4 };
+    const total = pipe(.{
+        map(scale),
+        filter(isLarge),
+        fold(0, add),
+        stdout(64),
+        print(zrx.Stdout, "total: {d}\n"),
+    });
+    try program(fromSlice(&values), total).run(.{ init.io, Scale{ .by = 2 } });
+}
 ```
 
-See the **[documentation index](docs/README.md)** for contracts, lifecycle,
-and the opt-in [file program](examples/io_file.zig). Larger, independently built
-applications follow the [standalone app conventions](examples/apps/README.md).
+## The model
 
-## Toolchain and checks
+| Concept | What it is |
+|---|---|
+| **handler** | A plain function. Its leading parameters are dependencies, found by type; its last parameter is the data. |
+| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`, `provide(db)`. |
+| **pipe** | Operators composed left to right. A pipe is itself an operator, so pipes nest. |
+| **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
+| **system** | Several programs run together with the same dependencies. |
 
-Use exactly Zig **0.17.0**, recorded in [`.zigversion`](.zigversion).
+There is one way to write each thing, and mistakes are compile errors that say
+what to do: a missing dependency, a handler whose parameter does not match the
+stream, an operator after a terminal one, a pipe that never ends.
+
+Read the **[guide](docs/guide.md)** for every operator, the error and
+concurrency model, and how to write operators of your own. The
+[examples](examples) are small and each is run and checked by the build.
+
+## Zero overhead, checked
+
+Everything is resolved at compile time: stages are laid out in one struct,
+dependencies are copied into the handlers that asked for them once, and a push
+is a chain of direct calls the optimizer flattens. `zig build zero-overhead`
+compiles each fixture in [`tests/zero_overhead`](tests/zero_overhead/cases.zig)
+twice, as a pipeline and as a hand-written loop, and compares the optimized
+LLVM IR function by function. Six of the eight fixtures are the same
+instructions; the other two differ only in loop shape and are required to be
+free of calls and extra memory traffic.
+
+`queue` is the one operator that costs something by design: it is a real
+bounded buffer between two tasks.
+
+## Use
+
+Requires exactly Zig **0.17.0** (see [`.zigversion`](.zigversion)).
 
 ```sh
-zig version
-zig fmt --check build.zig build.zig.zon src tests examples benchmarks
-zig build test
-zig build test -Doptimize=ReleaseFast
-zig build check
+zig build test            # suites, compile-error contracts, examples, zero-overhead
+zig build check           # the above plus formatting and cross compilation
+zig build example         # run the examples
+zig build zero-overhead   # print the code comparison
+zig build benchmark       # throughput against a hand-written loop
 ```
-
-`zig build declarative-test` focuses on the current public API. `check` includes
-native tests, formatting, and catalog cross builds.
-Cross compilation is not foreign execution or performance proof.
-
-`zig build benchmark` is an opt-in direct/pipeline workload comparison with
-correctness checks, never a default timing threshold. See
-[measurement scope and next investigations](docs/performance.md).
 
 ## License
 
-Licensed under the [MIT License](LICENSE).
+[MIT](LICENSE)
