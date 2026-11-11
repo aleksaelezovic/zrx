@@ -7,6 +7,8 @@ const tasks = @import("tasks.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
+const Supervision = core.Supervision;
+const Signal = core.Supervision.Signal;
 
 pub fn isSource(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_source");
@@ -62,28 +64,39 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     }
                     try Frame.at.start(refs, Closed{});
                     try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
-                    try Frame.at.finish(refs, Closed{});
+                    try Frame.at.finish(refs, Closed{}, {});
                     try Frame.at.flush(refs);
                 }
             };
             return Frame.withLocals(Body{ .program = self, .env = env });
         }
 
-        /// The pipe crosses a task boundary, so the source is a task too: when
-        /// a worker ends on its own (its side failed, or wants no more), the
-        /// source is cancelled instead of being left to find out at its next
-        /// push, which for an idle source might never come.
+        /// The pipe crosses a task boundary, so the run is a group of
+        /// supervised tasks: the workers its stages start, and the source.
+        ///
+        /// - The source is a task so that it can be cancelled. When a worker
+        ///   fails, or nothing wants another item, the source is not left to
+        ///   find out at its next push, which for an idle source might never
+        ///   come. What a source returns after being interrupted is a
+        ///   consequence, not a result.
+        /// - The first failure of a worker is the result of the run. Once
+        ///   there is one, no stage finishes and no join waits: an effect of
+        ///   a normal end must not follow a failure.
+        /// - `stop` then cancels and joins every worker before anything is
+        ///   torn down.
         fn runSupervised(self: *const @This(), outer: anytype) !void {
-            const io = di.get(outer, Io);
-            var signal: core.Supervision.Signal = .{ .io = io };
-            const env = di.extend(outer, core.Supervision{ .signal = &signal, .whole_pipe = true });
+            var signal: Signal = .{};
+            const supervision: Supervision = .{ .signal = &signal };
+            const env = di.extend(outer, supervision);
             const Env = @TypeOf(env);
             const Frame = P.Stage(Env, S.Item);
             const Feed = struct {
-                fn run(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *core.Supervision.Signal, ended: *std.atomic.Value(bool)) !void {
+                fn run(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
                     defer {
-                        ended.store(true, .release);
-                        wake.wake.set(wake.io);
+                        wake.mutex.lockUncancelable(io);
+                        wake.source_ended = true;
+                        wake.changed.broadcast(io);
+                        wake.mutex.unlock(io);
                     }
                     return source.run(feed_env, entry);
                 }
@@ -91,10 +104,10 @@ pub fn Program(comptime S: type, comptime P: type) type {
             const Body = struct {
                 program: *const Program(S, P),
                 env: Env,
-                signal: *core.Supervision.Signal,
+                supervision: Supervision,
 
                 pub fn call(body: @This(), refs: Frame.Refs) !void {
-                    const body_io = body.signal.io;
+                    const wake = body.supervision.signal;
                     try Frame.at.init(refs, &body.program.pipe.ops, body.env);
                     defer {
                         Frame.at.stop(refs);
@@ -102,30 +115,63 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     }
                     try Frame.at.start(refs, Closed{});
 
-                    var ended: std.atomic.Value(bool) = .init(false);
-                    var source = try body_io.concurrent(Feed.run, .{
-                        &body.program.source, body.env, Entry(Frame, S.Item){ .refs = refs }, body.signal, &ended,
-                    });
-                    body.signal.wake.wait(body_io) catch |err| {
-                        // This task is being cancelled: so is the source.
-                        source.cancel(body_io) catch {};
+                    // Every worker that started gave its `Io`. With none,
+                    // there is nobody to supervise.
+                    const entry: Entry(Frame, S.Item) = .{ .refs = refs };
+                    if (wake.io) |io| {
+                        var source = try io.concurrent(Feed.run, .{ &body.program.source, body.env, entry, wake, io });
+                        const ended_by_itself = sourceOrSignal(wake, io) catch |err| {
+                            // This task is being cancelled: so is the source.
+                            source.cancel(io) catch {};
+                            return err;
+                        };
+                        const outcome = source.cancel(io);
+                        if (ended_by_itself) try outcome else outcome catch {};
+                    } else {
+                        try body.program.source.run(body.env, entry);
+                    }
+
+                    const Failure = @typeInfo(@TypeOf(Frame.at.finish(refs, Closed{}, body.supervision))).error_union.error_set;
+                    if (wake.failure) |first| return recast(Failure, first);
+                    Frame.at.finish(refs, Closed{}, body.supervision) catch |err| {
+                        // Whatever cut the end short, the failure that caused it is the result.
+                        if (firstFailure(wake)) |first| return recast(Failure, first);
                         return err;
                     };
-                    const ended_by_itself = ended.load(.acquire);
-                    source.cancel(body_io) catch |err| {
-                        // Cancelled by the line above because a worker ended:
-                        // not a failure of the source. What the worker ended
-                        // with comes out of `finish`.
-                        const interrupted = !ended_by_itself and @as(anyerror, err) == error.Canceled;
-                        if (!interrupted) return err;
-                    };
-                    try Frame.at.finish(refs, Closed{});
                     try Frame.at.flush(refs);
                 }
+
+                /// Waits until the source has ended or the run needs it to:
+                /// a worker failed, or nothing wants another item. Returns
+                /// whether the source ended by itself.
+                fn sourceOrSignal(wake: *Signal, io: Io) Io.Cancelable!bool {
+                    wake.mutex.lockUncancelable(io);
+                    defer wake.mutex.unlock(io);
+                    while (!wake.source_ended and wake.failure == null and !wake.satisfied) {
+                        try wake.changed.wait(io, &wake.mutex);
+                    }
+                    return wake.source_ended;
+                }
+
+                /// Read after workers may still be running, so under the lock.
+                fn firstFailure(wake: *Signal) ?anyerror {
+                    const io = wake.io orelse return wake.failure;
+                    wake.mutex.lockUncancelable(io);
+                    defer wake.mutex.unlock(io);
+                    return wake.failure;
+                }
             };
-            return Frame.withLocals(Body{ .program = self, .env = env, .signal = &signal });
+            return Frame.withLocals(Body{ .program = self, .env = env, .supervision = supervision });
         }
     };
+}
+
+/// An error a worker recorded, as a member of the error set `E` it came from.
+fn recast(comptime E: type, err: anyerror) E {
+    const names = comptime @typeInfo(E).error_set.error_names;
+    if (comptime names == null) return err; // anyerror
+    if (comptime names.?.len == 0) unreachable;
+    return @errorCast(err);
 }
 
 /// The `down` a source pushes into.

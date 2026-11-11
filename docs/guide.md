@@ -87,10 +87,14 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 
 `system` runs its programs together with the same dependencies and returns when
 all have finished. The first failure cancels the others and is returned. A
-system is itself runnable, so systems nest. Programs are started with
-`Io.async`: they run concurrently when the `Io` can do so and one after another
-when it cannot, in which case a program is not started once an earlier one
-has failed.
+system is itself runnable, so systems nest.
+
+Programs are started with `Io.concurrent`, each on a task of its own, so the
+system stays free to notice a failure and cancel the rest. An `Io` that cannot
+run anything concurrently runs them one after another instead, and does not
+start one after an earlier one has failed. An `Io` that runs out of
+concurrency part-way fails the system with `error.ConcurrencyUnavailable`
+rather than run a program where it could block the others.
 
 ## Sources
 
@@ -101,7 +105,7 @@ has failed.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io`. Once the pipe is done or fails, sources still waiting are cancelled. |
+| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io` at `run`. Once the pipe is done, sources still waiting are cancelled; a failed push fails the run. Sources are started like the programs of a `system`. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -250,18 +254,27 @@ growing memory.
 
 A program with a queue is a small group of supervised tasks: one per queue,
 and one for the source and the stages before the first queue. The run returns
-when all of them are done, and the first failure cancels the rest:
+when all of them are done, and the first failure ends it:
 
-- A failure behind a queue cancels the source at once, even one that is
-  waiting for its next item and not pushing.
-- So does the pipe behind a queue being done (`take` after a `queue`), unless
-  that queue is inside a `branch` or `route` sub-pipe: one sub-pipe being done
-  says nothing about its siblings, so there the source finds out at its next push.
-- Every task is cancelled and joined before any resource is released, so a
-  handler never runs against a released resource.
-- Cancellation is cooperative: it takes effect where a task calls into
+- **A failure behind a queue is the result of the run.** It cancels the
+  source at once, even one that is waiting for its next item and not pushing,
+  and whatever the interrupted source then returns is ignored. If the source
+  had already ended and the run is waiting for another queue to drain, that
+  wait ends too.
+- **Nothing finishes normally after a failure.** Once a worker has failed, no
+  further stage emits its final value or flushes.
+- **A pipe that is done stops its source** the same way (`take` after a
+  `queue`). Inside `branch` and `route` that means every sub-pipe: one being
+  done says nothing about its siblings, so the source is stopped when the
+  last one is.
+- **Every task is cancelled and joined before any resource is released**, so
+  a handler never runs against a released resource.
+- **Cancellation is cooperative**: it takes effect where a task calls into
   `std.Io`. A source or handler that computes without ever doing so cannot be
   interrupted.
+
+`std.Io` is needed where a queue is, not at `run`: `provide(io)` before the
+queue is enough.
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:

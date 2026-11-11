@@ -57,11 +57,20 @@ to this file; edit `AGENTS.md`, not copies.
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
 - **Every task is supervised.** A stop or a failure must not wait for a
-  producer's next push. A program whose pipe has a queue runs its source as a
-  task and cancels it when a worker reports through `Supervision` (always on
-  failure; on "done" only outside `branch`/`route` sub-pipes). `system` and
-  `merge` use `tasks.all`: `Io.async`, fail fast, cancel the rest, and do not
-  start a member after an earlier one failed. A program without a queue stays
+  producer's next push, nor for a join. A program whose pipe has a queue runs
+  its source as a task; workers report through `Supervision`, which records
+  the first failure. That failure is the run's result: it cancels the source,
+  ends any wait for another worker, and stops further stages from finishing.
+  What an interrupted source returns is ignored. "Done" is aggregated per
+  `branch`/`route` scope (`Arms`) and stops the source when it holds for the
+  whole pipe. `Supervision` takes its `Io` from the first worker, so `Io` may
+  be provided mid-pipe.
+- **Members never run on the supervising task.** `system` and `merge` use
+  `tasks.all`: `Io.concurrent`, fail fast, cancel the rest. Only an `Io` with
+  no concurrency at all runs members one after another; running out part-way
+  is `error.ConcurrencyUnavailable`. Do not use `Io.async` for a member: it
+  may run inline and block the supervisor. A failure and a "done" are separate
+  signals; never let one flag stand for both. A program without a queue stays
   a plain loop on the caller's task.
 - **Lifecycle.** `init` in order, `start` in reverse, pushes, then on a normal
   end `finish` in order and `flush` in reverse; always `stop` in order, then
@@ -120,6 +129,9 @@ to this file; edit `AGENTS.md`, not copies.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
-  timing or scheduling order for their assertions. To show that something is
+  timing or scheduling order for their assertions. Things that run at the same
+  time (programs of a system, queued branches) get a log each: the test logs
+  are not synchronized. Repeat the concurrency suites a few hundred times, in
+  Debug and ReleaseFast, before trusting a change to them. To show that something is
   interrupted, have it wait far longer than the test and record whether it
   woke by itself, rather than measuring how long the run took.

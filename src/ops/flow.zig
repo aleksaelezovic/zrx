@@ -41,6 +41,8 @@ fn Queue(comptime capacity: usize) type {
                 /// The error that stopped the consumer; read only after it is joined.
                 failure: ?anyerror,
                 supervision: ?core.Supervision,
+                /// The consumer has returned. Guarded by the supervision.
+                ended: bool,
 
                 const Self = @This();
                 pub const zrx_boundary = {};
@@ -51,9 +53,11 @@ fn Queue(comptime capacity: usize) type {
                     self.consumer = null;
                     self.failure = null;
                     self.supervision = if (comptime di.has(Env, core.Supervision)) di.get(env, core.Supervision) else null;
+                    self.ended = false;
                 }
 
                 pub fn start(self: *Self, down: anytype) !void {
+                    if (self.supervision) |supervision| supervision.adopt(self.io);
                     self.consumer = try self.io.concurrent(Consumer(@TypeOf(down)).run, .{ self, down });
                 }
 
@@ -75,12 +79,16 @@ fn Queue(comptime capacity: usize) type {
                             };
                             // Unblocks a producer waiting for space; it then sees `.done`.
                             self.channel.close(self.io);
-                            // A producer that is not pushing would never look: tell the run.
-                            if (self.supervision) |supervision| switch (ending) {
-                                .drained => {},
-                                .failed => supervision.failed(),
-                                .satisfied => supervision.satisfied(),
-                            };
+                            // A producer that is not pushing would never look, and a
+                            // run joining another worker would not either: tell the run.
+                            if (self.supervision) |supervision| {
+                                switch (ending) {
+                                    .drained => {},
+                                    .failed => supervision.fail(self.io, self.failure.?),
+                                    .satisfied => supervision.satisfy(self.io),
+                                }
+                                supervision.workerEnded(self.io, &self.ended);
+                            }
                         }
                     };
                 }
@@ -97,6 +105,12 @@ fn Queue(comptime capacity: usize) type {
                     const Failure = @typeInfo(@TypeOf(down.push(@as(In, undefined)))).error_union.error_set;
                     self.channel.close(self.io);
                     if (self.consumer) |*consumer| {
+                        if (self.supervision) |supervision| {
+                            // Wait for this worker to drain, unless another one
+                            // fails meanwhile: then the run is over, and `stop`
+                            // is what ends this worker.
+                            if (!try supervision.awaitWorker(self.io, &self.ended)) return error.Canceled;
+                        }
                         consumer.await(self.io);
                         self.consumer = null;
                     }
@@ -177,15 +191,14 @@ fn Branch(comptime Ps: type) type {
             };
             return struct {
                 chains: @Tuple(&chains),
-                live: [n]bool,
+                arms: core.Arms(n, Env),
 
                 pub const has_boundary = anyBoundary(&chains);
 
-                pub fn init(self: *@This(), op: *const Op, outer: Env) !void {
-                    const env = core.Supervision.nest(outer);
-                    self.live = @splat(true);
+                pub fn init(self: *@This(), op: *const Op, env: Env) !void {
+                    self.arms.init(env);
                     inline for (0..n) |i| {
-                        self.chains[i].init(&op.pipes[i], env) catch |err| {
+                        self.chains[i].init(&op.pipes[i], self.arms.envFor(env, i)) catch |err| {
                             inline for (0..i) |j| self.chains[i - 1 - j].deinit();
                             return err;
                         };
@@ -199,9 +212,9 @@ fn Branch(comptime Ps: type) type {
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
                     var wanted = false;
                     inline for (0..n) |i| {
-                        if (self.live[i]) {
+                        if (self.arms.wants(i)) {
                             if (try self.chains[i].push(item, Closed{}) == .done) {
-                                self.live[i] = false;
+                                self.arms.finished(i);
                             } else {
                                 wanted = true;
                             }
@@ -211,7 +224,7 @@ fn Branch(comptime Ps: type) type {
                 }
 
                 pub fn finish(self: *@This(), _: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].finish(Closed{});
+                    inline for (0..n) |i| try self.chains[i].finish(Closed{}, self.arms.guard());
                 }
 
                 pub fn flush(self: *@This()) !void {
@@ -339,7 +352,7 @@ fn Route(comptime Cs: type) type {
             return struct {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
-                live: [n]bool,
+                arms: core.Arms(n, Env),
                 /// Set when the pipe after the route asked to stop.
                 downstream_done: bool,
 
@@ -379,13 +392,12 @@ fn Route(comptime Cs: type) type {
                     return if (rejoins) .{ .down = down, .done = &self.downstream_done } else .{};
                 }
 
-                pub fn init(self: *Self, op: *const Op, outer: Env) !void {
-                    const env = core.Supervision.nest(outer);
-                    self.live = @splat(true);
+                pub fn init(self: *Self, op: *const Op, env: Env) !void {
+                    self.arms.init(env);
                     self.downstream_done = false;
                     inline for (0..n) |i| {
                         self.tests[i] = if (cases[i].is_otherwise) {} else .init(env);
-                        self.chains[i].init(&op.cases[i].pipe, env) catch |err| {
+                        self.chains[i].init(&op.cases[i].pipe, self.arms.envFor(env, i)) catch |err| {
                             inline for (0..i) |j| self.chains[i - 1 - j].deinit();
                             return err;
                         };
@@ -400,8 +412,8 @@ fn Route(comptime Cs: type) type {
                     inline for (0..n) |i| {
                         const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
-                            if (self.live[i]) {
-                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.live[i] = false;
+                            if (self.arms.wants(i)) {
+                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.arms.finished(i);
                             }
                             return self.verdict();
                         }
@@ -411,12 +423,11 @@ fn Route(comptime Cs: type) type {
 
                 fn verdict(self: *const Self) Flow {
                     if (self.downstream_done) return .done;
-                    for (self.live) |live| if (live) return .more;
-                    return .done;
+                    return if (self.arms.anyWants()) .more else .done;
                 }
 
                 pub fn finish(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down, true));
+                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down, true), self.arms.guard());
                 }
 
                 pub fn flush(self: *Self) !void {

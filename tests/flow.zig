@@ -398,3 +398,101 @@ test "a handler that can fail with anyerror works behind a queue" {
     try std.testing.expectError(error.Three, program(range(u32, 0, 10), pipe(.{ queue(2), subscribe(anyFailure) })).run(.{io}));
     try program(range(u32, 0, 3), pipe(.{ queue(2), subscribe(anyFailure) })).run(.{io});
 }
+
+/// Blocks far longer than a test should take; only a cancellation ends it early.
+fn blockLong(clock: std.Io, flags: *Flags, _: u32) !void {
+    try clock.sleep(.fromSeconds(5), .awake);
+    flags.woke_by_itself.store(true, .seq_cst);
+}
+
+test "a failure while the run is draining another worker ends the run" {
+    // The source is finite and ends at once. The run then joins the first
+    // branch, whose worker is stuck; the second branch failing must end that.
+    var flags: Flags = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(2), subscribe(blockLong) }),
+        pipe(.{ queue(2), subscribe(failAlways) }),
+    })});
+    const result = program(range(u32, 0, 2), work).run(.{ io, &flags });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+test "nothing finishes normally once a worker has failed" {
+    // The fold's final value would be published when the stream ends; the
+    // run has failed by then, so it must not be.
+    var flags: Flags = .{};
+    var published: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ fold(@as(u32, 0), add), subscribe(record) }),
+        pipe(.{ queue(2), subscribe(failAlways) }),
+    })});
+    const result = program(zrx.fromProducer(u32, pushThenIdle), work).run(.{ io, &flags, &published });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try published.expect(&.{});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+/// A source whose own read fails when it is interrupted, as a blocked
+/// reader's does.
+fn pushThenFailWhenInterrupted(clock: std.Io, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    clock.sleep(.fromSeconds(5), .awake) catch return error.ReadFailed;
+    _ = try out.push(@as(u32, 2));
+}
+
+test "the failure that ended the run is its result, not what the interrupted source returned" {
+    const result = program(zrx.fromProducer(u32, pushThenFailWhenInterrupted), pipe(.{ queue(2), subscribe(failAlways) })).run(.{io});
+    try std.testing.expectError(error.ConsumerBroke, result);
+}
+
+test "std.Io only has to be provided where the queue needs it" {
+    var seen: Numbers = .{};
+    try program(range(u32, 0, 3), pipe(.{ zrx.provide(io), queue(1), subscribe(record) })).run(.{&seen});
+    try seen.expect(&.{ 0, 1, 2 });
+    const failing = program(zrx.fromProducer(u32, breakAfterOne), pipe(.{ zrx.provide(io), queue(1), drain() }));
+    try std.testing.expectError(error.SourceBroke, failing.run(.{}));
+}
+
+test "when every queued branch is done, a source that is not pushing is interrupted" {
+    var flags: Flags = .{};
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(2), take(1), subscribe(toLeft) }),
+        pipe(.{ queue(2), take(1), subscribe(toRight) }),
+    })});
+    try program(zrx.fromProducer(u32, pushThenIdle), work).run(.{ io, &flags, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{1});
+    try right.expect(&.{1});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+test "the same holds for routes, and for branches inside branches" {
+    var flags: Flags = .{};
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{route(.{
+            when(isEven, pipe(.{ queue(2), take(1), subscribe(toLeft) })),
+            otherwise(pipe(.{ take(1), subscribe(toRight) })),
+        })}),
+        pipe(.{branch(.{
+            pipe(.{ queue(2), take(1), subscribe(record) }),
+        })}),
+    })});
+    try program(zrx.fromProducer(u32, evenOddThenIdle), work).run(.{ io, &flags, &seen, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{2});
+    try right.expect(&.{1});
+    try seen.expect(&.{1});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+fn evenOddThenIdle(clock: std.Io, flags: *Flags, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    _ = try out.push(@as(u32, 2));
+    try clock.sleep(.fromSeconds(5), .awake);
+    flags.woke_by_itself.store(true, .seq_cst);
+    _ = try out.push(@as(u32, 3));
+}

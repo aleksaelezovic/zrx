@@ -204,7 +204,7 @@ fn Merge(comptime Ss: type) type {
             if (comptime !di.has(Env, Io)) @compileError("merge: needs `std.Io` to run sources together; pass `io` to `run(.{ io, ... })`");
             const io = di.get(env, Io);
 
-            var turn: Turn = .{ .mutex = .init, .stopped = .init(false) };
+            var turn: Turn = .{ .mutex = .init, .done = .init(false), .failed = false };
             const Gate = Serialized(Item, @TypeOf(down));
             const gate: Gate = .{ .io = io, .turn = &turn, .down = down };
 
@@ -216,16 +216,20 @@ fn Merge(comptime Ss: type) type {
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .source = &self.sources[i], .env = env, .gate = gate };
             // Once the pipe wants no more, a source still waiting for its own
-            // next item is cancelled rather than waited for.
-            return tasks.all(io, group, &turn.stopped);
+            // next item is cancelled rather than waited for. A failed push is
+            // not that: its error comes back as the failing source's result.
+            return tasks.all(io, group, &turn.done);
         }
     };
 }
 
 const Turn = struct {
     mutex: Io.Mutex,
-    /// Set once the pipe wants no more or a push failed; every source then stops.
-    stopped: std.atomic.Value(bool),
+    /// The pipe wants no more: every source stops, and that is a success.
+    done: std.atomic.Value(bool),
+    /// A push failed: no source pushes again, and the run fails with that
+    /// error. Guarded by `mutex`.
+    failed: bool,
 };
 
 fn Serialized(comptime T: type, comptime Down: type) type {
@@ -237,11 +241,13 @@ fn Serialized(comptime T: type, comptime Down: type) type {
         pub fn push(gate: @This(), item: T) !Flow {
             try gate.turn.mutex.lock(gate.io);
             defer gate.turn.mutex.unlock(gate.io);
-            if (gate.turn.stopped.load(.acquire)) return .done;
-            errdefer gate.turn.stopped.store(true, .release);
-            const flow = try gate.down.push(item);
-            if (flow == .done) gate.turn.stopped.store(true, .release);
-            return flow;
+            if (gate.turn.failed or gate.turn.done.load(.acquire)) return .done;
+            errdefer gate.turn.failed = true;
+            if (try gate.down.push(item) == .done) {
+                gate.turn.done.store(true, .release);
+                return .done;
+            }
+            return .more;
         }
     };
 }

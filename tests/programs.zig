@@ -161,14 +161,18 @@ test "a system runs every program with the same dependencies" {
 }
 
 test "systems nest, and a system of one needs no Io" {
+    // Programs of a system run at the same time: each writes to its own log.
     var left: Numbers = .{};
     var right: Numbers = .{};
+    var seen: Numbers = .{};
     const a = program(fromValue(@as(u32, 1)), pipe(.{subscribe(toLeft)}));
     const b = program(fromValue(@as(u32, 2)), pipe(.{subscribe(toRight)}));
+    const c = program(fromValue(@as(u32, 3)), pipe(.{subscribe(record)}));
     try system(.{a}).run(.{Left{ .seen = &left }});
-    try system(.{ system(.{a}), system(.{ b, b }) }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try system(.{ system(.{a}), system(.{ b, c }) }).run(.{ io, &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 1, 1 });
-    try right.expect(&.{ 2, 2 });
+    try right.expect(&.{2});
+    try seen.expect(&.{3});
 }
 
 fn patiently(clock: std.Io, out: anytype) !void {
@@ -244,7 +248,7 @@ test "merge cancels a source that is not pushing once a push fails" {
 }
 
 test "without concurrency, a system does not start a program after one has failed" {
-    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
     defer backend.deinit();
     var left: Numbers = .{};
     var right: Numbers = .{};
@@ -256,11 +260,57 @@ test "without concurrency, a system does not start a program after one has faile
 }
 
 test "without concurrency, merge runs its sources one after another" {
-    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
     defer backend.deinit();
     var seen: Numbers = .{};
     const low = [_]u32{ 1, 2 };
     const high = [_]u32{ 10, 20 };
     try program(merge(.{ fromSlice(&low), fromSlice(&high) }), pipe(.{ take(3), subscribe(record) })).run(.{ backend.io(), &seen });
     try seen.expect(&.{ 1, 2, 10 });
+}
+
+test "a failed push under merge is never reported as success" {
+    // The failing source and a sibling that is already done race to be seen
+    // first; whichever wins, the run fails.
+    for (0..200) |_| {
+        var seen: Numbers = .{};
+        const sources = merge(.{ fromValue(@as(u32, 2)), fromValue(@as(u32, 9)), fromValue(@as(u32, 9)) });
+        const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen });
+        try std.testing.expectError(error.Two, result);
+    }
+}
+
+fn idleProgram() @TypeOf(program(fromProducer(u32, idleThenPush), pipe(.{subscribe(toRight)}))) {
+    return program(fromProducer(u32, idleThenPush), pipe(.{subscribe(toRight)}));
+}
+
+test "members never run on the supervising task, however busy the async pool is" {
+    // With no async capacity, `Io.async` would run a member inline and the
+    // supervisor could not see the other one fail.
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer backend.deinit();
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
+    const deps = .{ backend.io(), &idle, Left{ .seen = &left }, Right{ .seen = &right } };
+    try std.testing.expectError(error.Two, system(.{ failing, idleProgram() }).run(deps));
+    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing }).run(deps));
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+
+    var seen: Numbers = .{};
+    const sources = merge(.{ fromProducer(u32, idleThenPush), fromValue(@as(u32, 7)) });
+    try program(sources, pipe(.{ take(1), subscribe(record) })).run(.{ backend.io(), &seen, &idle });
+    try seen.expect(&.{7});
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "running out of concurrency part-way is an error, not a member run inline" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .limited(1) });
+    defer backend.deinit();
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const result = system(.{ idleProgram(), idleProgram() }).run(.{ backend.io(), &idle, Right{ .seen = &right } });
+    try std.testing.expectError(error.ConcurrencyUnavailable, result);
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }

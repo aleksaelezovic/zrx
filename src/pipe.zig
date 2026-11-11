@@ -32,6 +32,10 @@
 //! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
 //! still using a stage when that stage, or one after it, is torn down.
 //!
+//! A stage that runs a task takes part in the run's `Supervision` (see below):
+//! it reports when its worker ends and why, and joins it through the
+//! supervision so that the join gives way to a failure elsewhere.
+//!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
 //! store a `Flow` and later choose between it and a constant: `E!Flow` travels
@@ -52,42 +56,158 @@ pub const End = opaque {};
 /// The `down` given to stages of a terminated pipe. It has no `push`.
 pub const Closed = struct {};
 
-/// How a stage that runs a worker task tells the run that its worker ended on
-/// its own, so that a source waiting for its next item is not left to find
-/// out only when it pushes again. A program provides this dependency to its
-/// stages when its pipe crosses a task boundary.
+/// The supervision of a run whose pipe crosses a task boundary: how its tasks
+/// find out about each other without waiting for an item to be pushed.
+///
+/// A program provides this dependency to its stages. A stage that runs a
+/// worker reports through it when the worker ends, and waits through it when
+/// it joins the worker. `branch` and `route` give each sub-pipe a `Supervision`
+/// scoped to them, so that "this sub-pipe wants no more" only becomes "the
+/// pipe wants no more" once it is true of every sub-pipe.
 pub const Supervision = struct {
     signal: *Signal,
-    /// False inside a `branch` or `route` sub-pipe, where one sub-pipe
-    /// wanting no more says nothing about its siblings.
-    whole_pipe: bool,
+    /// The `branch` or `route` this pipe is a sub-pipe of, and which one it is.
+    scope: ?*Scope = null,
+    arm: usize = 0,
 
     pub const Signal = struct {
-        io: Io,
-        wake: Io.Event = .unset,
+        mutex: Io.Mutex = .init,
+        changed: Io.Condition = .init,
+        /// The `Io` of the first worker to start. The run waits with it, so
+        /// that `Io` only has to be provided where a worker needs it.
+        io: ?Io = null,
+        /// The first failure of any worker. It is what the run returns.
+        failure: ?anyerror = null,
+        has_failed: std.atomic.Value(bool) = .init(false),
+        /// Nothing in the pipe wants another item.
+        satisfied: bool = false,
+        source_ended: bool = false,
+
+        fn update(signal: *Signal, io: Io, comptime change: fn (*Signal) void) void {
+            signal.mutex.lockUncancelable(io);
+            defer signal.mutex.unlock(io);
+            change(signal);
+            signal.changed.broadcast(io);
+        }
     };
 
-    /// The worker's side of the pipe failed: the run is over.
-    pub fn failed(supervision: Supervision) void {
-        supervision.signal.wake.set(supervision.signal.io);
+    pub const Scope = struct {
+        parent: Supervision,
+        /// One flag per sub-pipe: it wants no more items.
+        done: []std.atomic.Value(bool),
+    };
+
+    /// A worker is about to start, using `io`.
+    pub fn adopt(supervision: Supervision, io: Io) void {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        if (signal.io == null) signal.io = io;
     }
 
-    /// The worker's side of the pipe wants no more items.
-    pub fn satisfied(supervision: Supervision) void {
-        if (supervision.whole_pipe) supervision.signal.wake.set(supervision.signal.io);
+    /// A worker's side of the pipe failed with `err`: the run is over, and
+    /// unless another worker failed first, `err` is its result.
+    pub fn fail(supervision: Supervision, io: Io, err: anyerror) void {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        if (signal.failure == null) {
+            signal.failure = err;
+            signal.has_failed.store(true, .release);
+        }
+        signal.changed.broadcast(io);
     }
 
-    /// What a stage with sub-pipes provides to them in its place.
-    pub fn nested(supervision: Supervision) Supervision {
-        return .{ .signal = supervision.signal, .whole_pipe = false };
+    /// A worker's side of the pipe wants no more items.
+    pub fn satisfy(supervision: Supervision, io: Io) void {
+        var current = supervision;
+        while (current.scope) |scope| {
+            scope.done[current.arm].store(true, .seq_cst);
+            for (scope.done) |*done| if (!done.load(.seq_cst)) return;
+            current = scope.parent;
+        }
+        current.signal.update(io, struct {
+            fn change(signal: *Signal) void {
+                signal.satisfied = true;
+            }
+        }.change);
     }
 
-    /// `env` as a sub-pipe of a `branch` or `route` should see it.
-    pub fn nest(env: anytype) @TypeOf(env) {
-        if (comptime !di.has(@TypeOf(env), Supervision)) return env;
-        return di.extend(env, di.get(env, Supervision).nested());
+    /// A worker has returned; `ended` is the flag its stage waits on.
+    pub fn workerEnded(supervision: Supervision, io: Io, ended: *bool) void {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        ended.* = true;
+        signal.changed.broadcast(io);
+    }
+
+    /// Whether any worker has failed. Cheap: read before running an effect
+    /// that should not happen once the run has failed.
+    pub fn hasFailed(supervision: Supervision) bool {
+        return supervision.signal.has_failed.load(.acquire);
+    }
+
+    /// Waits for the worker that reports through `ended`. Returns false when
+    /// another worker failed first: the wait is over, the worker is not.
+    pub fn awaitWorker(supervision: Supervision, io: Io, ended: *const bool) Io.Cancelable!bool {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        while (!ended.* and signal.failure == null) try signal.changed.wait(io, &signal.mutex);
+        return ended.*;
     }
 };
+
+/// What `branch` and `route` keep about their `n` sub-pipes: which still want
+/// items and, in a supervised run, the scope their workers report to.
+pub fn Arms(comptime n: usize, comptime Env: type) type {
+    const supervised = di.has(Env, Supervision);
+    return struct {
+        live: if (supervised) void else [n]bool,
+        done: if (supervised) [n]std.atomic.Value(bool) else void,
+        scope: if (supervised) Supervision.Scope else void,
+
+        const Self = @This();
+        pub const Guard = if (supervised) Supervision else void;
+
+        pub fn init(self: *Self, env: Env) void {
+            if (supervised) {
+                self.live = {};
+                for (&self.done) |*done| done.* = .init(false);
+                self.scope = .{ .parent = di.get(env, Supervision), .done = &self.done };
+            } else {
+                self.live = @splat(true);
+                self.done = {};
+                self.scope = {};
+            }
+        }
+
+        /// The environment sub-pipe `i` is built with.
+        pub fn envFor(self: *Self, outer: Env, comptime i: usize) Env {
+            if (!supervised) return outer;
+            return di.extend(outer, Supervision{ .signal = self.scope.parent.signal, .scope = &self.scope, .arm = i });
+        }
+
+        pub fn wants(self: *const Self, comptime i: usize) bool {
+            return if (supervised) !self.done[i].load(.seq_cst) else self.live[i];
+        }
+
+        pub fn finished(self: *Self, comptime i: usize) void {
+            if (supervised) self.done[i].store(true, .seq_cst) else self.live[i] = false;
+        }
+
+        pub fn anyWants(self: *const Self) bool {
+            inline for (0..n) |i| if (self.wants(i)) return true;
+            return false;
+        }
+
+        /// What to hand a sub-pipe's `finish`, so it stops once the run has failed.
+        pub fn guard(self: *const Self) Guard {
+            return if (supervised) self.scope.parent else {};
+        }
+    };
+}
 
 pub fn isOperator(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_operator");
@@ -317,9 +437,17 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 return first.push(item);
             }
 
-            pub fn finish(refs: Refs, tail: anytype) !void {
+            /// `guard` is the run's `Supervision`, or `{}`. With it, once a
+            /// worker has failed no further stage finishes: an effect of a
+            /// normal end must not follow a failure. `error.Canceled` then
+            /// stands for "the run failed elsewhere"; the program returns
+            /// that failure instead.
+            pub fn finish(refs: Refs, tail: anytype, guard: anytype) !void {
                 inline for (0..n) |i| {
                     if (@hasDecl(stages[i], "finish")) {
+                        if (@TypeOf(guard) == Supervision) {
+                            if (guard.hasFailed()) return error.Canceled;
+                        }
                         const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
                         try refs[i].finish(next);
                     }
@@ -393,8 +521,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.push(self.refsOf(), item, tail);
         }
 
-        pub fn finish(self: *Self, tail: anytype) !void {
-            return at.finish(self.refsOf(), tail);
+        pub fn finish(self: *Self, tail: anytype, guard: anytype) !void {
+            return at.finish(self.refsOf(), tail, guard);
         }
 
         pub fn flush(self: *Self) !void {
