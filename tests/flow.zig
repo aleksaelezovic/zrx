@@ -277,6 +277,55 @@ test "once the pipe after a route is done, no case forwards to it again" {
     try std.testing.expectEqual(@as(usize, 1), tapped.count);
 }
 
+/// Emits one value as the run starts, before any item arrives.
+const Herald = struct {
+    value: u32,
+
+    pub const zrx_operator = {};
+    pub const name = "herald";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            value: u32,
+
+            pub fn init(self: *@This(), op: *const Herald, _: Env) !void {
+                self.value = op.value;
+            }
+
+            pub fn start(self: *@This(), down: anytype) !void {
+                _ = try down.push(self.value);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+test "a route remembers that the pipe after it is done, even from before the first item" {
+    var seen: Numbers = .{};
+    var tapped: Pulls = .{};
+    // The first case emits as the run starts and that satisfies take(1):
+    // no item may reach the tap afterwards, through either case.
+    const work = pipe(.{
+        route(.{
+            when(isEven, pipe(.{Herald{ .value = 100 }})),
+            otherwise(pipe(.{map(double)})),
+        }),
+        tap(countPull),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped });
+    try seen.expect(&.{100});
+    try std.testing.expectEqual(@as(usize, 1), tapped.count);
+}
+
 const Threshold = struct { value: u32 };
 fn above(threshold: Threshold, value: u32) bool {
     return value > threshold.value;
