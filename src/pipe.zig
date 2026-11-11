@@ -74,8 +74,8 @@ pub const Supervision = struct {
     pub const Signal = struct {
         mutex: Io.Mutex = .init,
         changed: Io.Condition = .init,
-        /// The `Io` of the first worker to start. The run waits with it, so
-        /// that `Io` only has to be provided where a worker needs it.
+        /// The `Io` of the first stage that will run a worker. The run waits
+        /// with it, so `Io` only has to be provided where a worker needs it.
         io: ?Io = null,
         /// The first stage whose worker failed. The run returns that
         /// stage's `failure`.
@@ -83,6 +83,8 @@ pub const Supervision = struct {
         has_failed: std.atomic.Value(bool) = .init(false),
         /// Nothing in the pipe wants another item.
         satisfied: bool = false,
+        /// The task running the stages' `start` hooks has returned.
+        starting_ended: bool = false,
         /// The task feeding the pipe from the source has returned.
         feeding_ended: bool = false,
         /// The task finishing and flushing the pipe has returned.
@@ -102,7 +104,8 @@ pub const Supervision = struct {
         done: []std.atomic.Value(bool),
     };
 
-    /// A worker is about to start, using `io`.
+    /// This stage will run a worker, using `io`. Called from `init`, so that
+    /// the run has an `Io` to supervise with before any stage is started.
     pub fn adopt(supervision: Supervision, io: Io) void {
         const signal = supervision.signal;
         signal.mutex.lockUncancelable(io);

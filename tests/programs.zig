@@ -349,3 +349,19 @@ test "the error of a failed push is the result even when its source hides it" {
         try std.testing.expectError(error.Two, result);
     }
 }
+
+/// A source whose clean-up fails after its push did.
+fn pushThenFailCleaningUp(out: anytype) !void {
+    _ = out.push(@as(u32, 2)) catch return error.CleanupFailed;
+}
+
+test "without concurrency, a failed push is still the result ahead of what its source returns" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
+    defer backend.deinit();
+    var seen: Numbers = .{};
+    const sources = merge(.{ fromProducer(u32, pushThenFailCleaningUp), fromValue(@as(u32, 9)) });
+    const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ backend.io(), &seen });
+    try std.testing.expectError(error.Two, result);
+    // Nothing is started after the failure.
+    try seen.expect(&.{});
+}

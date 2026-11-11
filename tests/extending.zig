@@ -220,9 +220,6 @@ const Tripwire = struct {
                     .tripped = false,
                     .supervision = zrx.di.get(env, zrx.operator.Supervision),
                 };
-            }
-
-            pub fn start(self: *@This(), _: anytype) !void {
                 self.supervision.adopt(self.io);
             }
 

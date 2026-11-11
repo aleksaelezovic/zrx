@@ -72,10 +72,13 @@ pub fn Program(comptime S: type, comptime P: type) type {
         }
 
         /// The pipe crosses a task boundary, so the run is a group of
-        /// supervised tasks: the workers its stages start, one that feeds the
-        /// pipe from the source, and then one that finishes and flushes it.
-        /// The caller only waits and cancels, so it is always free to act:
+        /// supervised tasks: the workers its stages start, and one after
+        /// another a task that starts the stages, one that feeds the pipe
+        /// from the source, and one that finishes and flushes it. The caller
+        /// only waits and cancels, so it is always free to act:
         ///
+        /// - Starting is a task because a `start` hook can push, and block,
+        ///   once the workers after it are running.
         /// - Feeding is a task so that the source can be cancelled. When a
         ///   worker fails, or nothing wants another item, the source is not
         ///   left to find out at its next push, which for an idle source
@@ -94,16 +97,22 @@ pub fn Program(comptime S: type, comptime P: type) type {
             const env = di.extend(outer, supervision);
             const Env = @TypeOf(env);
             const Frame = P.Stage(Env, S.Item);
-            const Phase = enum { feeding, ending };
+            const Phase = enum { starting, feeding, ending };
             const Tasks = struct {
                 fn ended(wake: *Signal, io: Io, comptime phase: Phase) void {
                     wake.mutex.lockUncancelable(io);
                     defer wake.mutex.unlock(io);
                     switch (phase) {
+                        .starting => wake.starting_ended = true,
                         .feeding => wake.feeding_ended = true,
                         .ending => wake.ending_ended = true,
                     }
                     wake.changed.broadcast(io);
+                }
+
+                fn begin(refs: Frame.Refs, wake: *Signal, io: Io) !void {
+                    defer ended(wake, io, .starting);
+                    return Frame.at.start(refs, Closed{});
                 }
 
                 fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
@@ -125,6 +134,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     defer wake.mutex.unlock(io);
                     while (true) {
                         const returned = switch (phase) {
+                            .starting => wake.starting_ended,
                             .feeding => wake.feeding_ended,
                             .ending => wake.ending_ended,
                         };
@@ -147,26 +157,37 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         Frame.at.stop(refs);
                         Frame.at.deinit(refs);
                     }
-                    try Frame.at.start(refs, Closed{});
-
-                    // Every worker that started gave its `Io`. With none,
-                    // there is nobody to supervise.
+                    // Every stage that will run a worker gave its `Io` in
+                    // `init`. With none, there is nobody to supervise.
                     const entry: Entry(Frame, S.Item) = .{ .refs = refs };
                     const io = wake.io orelse {
+                        try Frame.at.start(refs, Closed{});
                         try body.program.source.run(body.env, entry);
                         try Frame.at.finish(refs, Closed{}, body.supervision);
                         return Frame.at.flush(refs);
                     };
 
+                    // In every phase a worker's failure is resolved first: it
+                    // is the cause, and what the phase itself returned may
+                    // only be its consequence.
+                    var starting = try io.concurrent(Tasks.begin, .{ refs, wake, io });
+                    const started_by_itself = Tasks.wait(wake, io, .starting) catch |err| {
+                        // This task is being cancelled: so is the phase.
+                        starting.cancel(io) catch {};
+                        return err;
+                    };
+                    const started = starting.cancel(io);
+                    try body.failureIfAny(refs, io);
+                    if (started_by_itself) try started else started catch {};
+
                     var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, wake, io });
                     const fed_by_itself = Tasks.wait(wake, io, .feeding) catch |err| {
-                        // This task is being cancelled: so is the source.
                         feeding.cancel(io) catch {};
                         return err;
                     };
                     const fed = feeding.cancel(io);
-                    if (fed_by_itself) try fed else fed catch {};
                     try body.failureIfAny(refs, io);
+                    if (fed_by_itself) try fed else fed catch {};
 
                     var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
                     _ = Tasks.wait(wake, io, .ending) catch |err| {

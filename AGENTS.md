@@ -58,9 +58,15 @@ to this file; edit `AGENTS.md`, not copies.
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
 - **Every task is supervised, and the supervisor only waits.** A stop or a
   failure must not wait for a producer's next push, for a join, or for a
-  handler. A program whose pipe has a queue runs feeding (the source) and
-  then ending (finish and flush) as tasks; the caller waits on `Supervision`
-  and cancels. Never run user code on the task that supervises.
+  handler. A program whose pipe has a queue runs starting (the `start`
+  hooks), feeding (the source) and ending (finish and flush) as tasks, one
+  after another; the caller waits on `Supervision` and cancels. Never run
+  user code on the task that supervises: every hook can block.
+- **The cause comes first.** A worker's failure is published before anything
+  that would react to it is woken (the queue reports, then closes), and it is
+  resolved before any error a phase or a member returned, which may only be
+  its consequence. Members run inline settle through the same `Watch` as
+  concurrent ones.
 - **A failure is acted on where it happens.** Workers report through
   `Supervision.fail(io, stage)`; the first one is the run's result: it cancels
   whichever phase is running and stops further stages from finishing. The

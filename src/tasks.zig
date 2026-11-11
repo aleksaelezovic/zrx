@@ -129,7 +129,14 @@ pub fn all(io: Io, tasks: anytype, watch: anytype) (Errors(@TypeOf(tasks)) || Re
                 // Running it here would block this task. That is only safe
                 // when nothing else is running that it would have to watch.
                 if (so_far.returned != started) return error.ConcurrencyUnavailable;
-                try tasks[i].run();
+                // Its result is settled like any member's: what was reported
+                // while it ran comes first.
+                var result: ?anyerror = null;
+                tasks[i].run() catch |inline_err| {
+                    result = inline_err;
+                };
+                watch.memberReturned(io, result);
+                started += 1;
             },
         }
     }

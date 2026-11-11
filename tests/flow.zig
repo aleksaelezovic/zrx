@@ -622,3 +622,60 @@ test "a branch is done when its last sub-pipe is, whichever kind finished last" 
     try program(zrx.fromProducer(u32, pushThenIdleUnlessDone), work).run(.{ io, &flags, &gate });
     try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
 }
+
+/// Pushes one value into what follows as the run starts, then waits far
+/// longer than a test should take.
+const BlockingHerald = struct {
+    pub const zrx_operator = {};
+    pub const name = "blockingHerald";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            clock: std.Io,
+            flags: *Flags,
+
+            pub fn init(self: *@This(), _: *const BlockingHerald, env: Env) !void {
+                self.* = .{ .clock = zrx.di.get(env, std.Io), .flags = zrx.di.get(env, *Flags) };
+            }
+
+            pub fn start(self: *@This(), down: anytype) !void {
+                _ = try down.push(@as(In, 1));
+                try self.clock.sleep(.fromSeconds(5), .awake);
+                self.flags.woke_by_itself.store(true, .seq_cst);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+test "a failure while a start hook is blocked ends the run" {
+    // The start hook pushes into the queue and then waits. The queued
+    // subscriber fails on that item before any source item exists.
+    var flags: Flags = .{};
+    const work = pipe(.{ BlockingHerald{}, queue(2), subscribe(failAlways) });
+    const result = program(range(u32, 0, 3), work).run(.{ io, &flags });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+/// A source that turns the closed pipe into an error of its own.
+fn complainWhenClosed(out: anytype) !void {
+    var value: u32 = 0;
+    while (true) : (value += 1) {
+        if (try out.push(value) == .done) return error.SourceSawClosed;
+    }
+}
+
+test "the failure that closed a queue is the result, not the producer's reaction to it" {
+    for (0..200) |_| {
+        const result = program(zrx.fromProducer(u32, complainWhenClosed), pipe(.{ queue(2), subscribe(failAlways) })).run(.{io});
+        try std.testing.expectError(error.ConsumerBroke, result);
+    }
+}

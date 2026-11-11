@@ -55,10 +55,10 @@ fn Queue(comptime capacity: usize) type {
                     self.ended_with = null;
                     self.supervision = if (comptime di.has(Env, core.Supervision)) di.get(env, core.Supervision) else null;
                     self.ended = false;
+                    if (self.supervision) |supervision| supervision.adopt(self.io);
                 }
 
                 pub fn start(self: *Self, down: anytype) !void {
-                    if (self.supervision) |supervision| supervision.adopt(self.io);
                     self.consumer = try self.io.concurrent(Consumer(@TypeOf(down)).run, .{ self, down });
                 }
 
@@ -78,18 +78,18 @@ fn Queue(comptime capacity: usize) type {
                                     if (flow == .done) break :consuming .satisfied;
                                 }
                             };
+                            // Tell the run first, then wake the producer. A producer
+                            // that is not pushing would never look; one that is must
+                            // not get to answer for the closed queue before the reason
+                            // it closed is on record.
+                            if (self.supervision) |supervision| switch (ending) {
+                                .drained => {},
+                                .failed => supervision.fail(self.io, self),
+                                .satisfied => supervision.satisfy(self.io),
+                            };
                             // Unblocks a producer waiting for space; it then sees `.done`.
                             self.channel.close(self.io);
-                            // A producer that is not pushing would never look, and a
-                            // run joining another worker would not either: tell the run.
-                            if (self.supervision) |supervision| {
-                                switch (ending) {
-                                    .drained => {},
-                                    .failed => supervision.fail(self.io, self),
-                                    .satisfied => supervision.satisfy(self.io),
-                                }
-                                supervision.workerEnded(self.io, &self.ended);
-                            }
+                            if (self.supervision) |supervision| supervision.workerEnded(self.io, &self.ended);
                         }
                     };
                 }

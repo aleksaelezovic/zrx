@@ -276,10 +276,15 @@ when all of them are done, and the first failure ends it:
 `std.Io` is needed where a queue is, not at `run`: `provide(io)` before the
 queue is enough.
 
-With a queue, your handlers do not run on the task that called `run`: the
-source and the stages before the first queue run on one task, each queue's
-far side on another, and the end of the stream on a third. The caller only
-waits, so that it can always cancel.
+With a queue, your handlers do not run on the task that called `run`. The
+stages' start hooks, then the source with the stages before the first queue,
+then the end of the stream each run on a task of their own, one after
+another, and each queue's far side on another. The caller only waits, so
+that it can always cancel.
+
+When a worker fails, its error is the result of the run even if something
+else then fails because of it: a source that reacts to the closed queue with
+an error of its own, or a clean-up that fails while unwinding.
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:
@@ -387,9 +392,10 @@ const Counted = struct {
 
 A stage may also declare `start`, `finish`, `flush`, `stop`, `deinit` and,
 with `Provides`, `provide`. A stage that runs a task of its own takes part in
-the run's supervision (`zrx.operator.Supervision`): it reports when its worker
-fails and returns that error from `failure(self, down) !void`, so the errors a
-run can end with are known to the compiler; [`src/pipe.zig`](../src/pipe.zig) states the contract and
+the run's supervision (`zrx.operator.Supervision`): it gives its `Io` in `init`
+(`adopt`), reports when its worker fails (before waking anyone who would react
+to it), and returns that error from `failure(self, down) !void`, so the errors
+a run can end with are known to the compiler; [`src/pipe.zig`](../src/pipe.zig) states the contract and
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
 
