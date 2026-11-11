@@ -345,6 +345,27 @@ test "every case starts, but a start emission does not get past a pipe that is d
     try std.testing.expectEqual(@as(usize, 1), tapped.count);
 }
 
+fn evenOrFail(value: u32) error{PredicateFailed}!bool {
+    if (value == 0) return error.PredicateFailed;
+    return value % 2 == 0;
+}
+
+test "a predicate cannot fail the run over an item a done route no longer takes" {
+    var seen: Numbers = .{};
+    // A start emission satisfies take(1). The first source item would make
+    // the predicate fail, but nothing wants that item any more.
+    const work = pipe(.{
+        route(.{
+            when(evenOrFail, pipe(.{Herald{ .value = 100 }})),
+            otherwise(pipe(.{map(double)})),
+        }),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 5), work).run(.{&seen});
+    try seen.expect(&.{100});
+}
+
 const Threshold = struct { value: u32 };
 fn above(threshold: Threshold, value: u32) bool {
     return value > threshold.value;
