@@ -231,6 +231,8 @@ pub fn combined(comptime with_zrx: bool, orders: []const Order, out: *u64) void 
     }
 }
 
+/// `lean`, not `same`: the pipeline reads the whole order once where the loop
+/// reads its two fields separately; the pipeline comes out shorter.
 export fn lean_combinators(ptr: [*]const Order, len: usize, out: *u64) void {
     combined(exported_with_zrx, ptr[0..len], out);
 }
@@ -255,6 +257,175 @@ pub fn taken(comptime with_zrx: bool, items: []const u32, limit: usize, out: *u6
     }
 }
 
+/// `lean`, not `same`: the optimizer picks a different loop form for the
+/// early exit; the machine code is the same length either way.
 export fn lean_take(ptr: [*]const u32, len: usize, limit: usize, out: *u64) void {
     taken(exported_with_zrx, ptr[0..len], limit, out);
+}
+
+// --- scan ---------------------------------------------------------------------------------------
+
+fn addWide(sum: u64, value: u64) u64 {
+    return sum +% value;
+}
+
+/// The sum of all prefix sums.
+pub fn scanned(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ zrx.scan(@as(u64, 0), add), fold(@as(u64, 0), addWide), subscribe(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var prefix: u64 = 0;
+        var sum: u64 = 0;
+        for (items) |value| {
+            prefix +%= value;
+            sum +%= prefix;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_scan(ptr: [*]const u32, len: usize, out: *u64) void {
+    scanned(exported_with_zrx, ptr[0..len], out);
+}
+
+// --- skip ---------------------------------------------------------------------------------------
+
+pub fn skipped(comptime with_zrx: bool, items: []const u32, count: usize, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ zrx.skip(count), fold(@as(u64, 0), add), subscribe(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        var remaining = count;
+        for (items) |value| {
+            if (remaining != 0) {
+                remaining -= 1;
+                continue;
+            }
+            sum +%= value;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_skip(ptr: [*]const u32, len: usize, count: usize, out: *u64) void {
+    skipped(exported_with_zrx, ptr[0..len], count, out);
+}
+
+// --- takeWhile ----------------------------------------------------------------------------------
+
+const Limit = struct { below: u32 };
+
+fn isBelow(limit: Limit, value: u32) bool {
+    return value < limit.below;
+}
+
+pub fn takenWhile(comptime with_zrx: bool, items: []const u32, below: u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ zrx.takeWhile(isBelow), fold(@as(u64, 0), add), subscribe(store) });
+        run(program(fromSlice(items), total), .{ Limit{ .below = below }, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            if (value >= below) break;
+            sum +%= value;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_take_while(ptr: [*]const u32, len: usize, below: u32, out: *u64) void {
+    takenWhile(exported_with_zrx, ptr[0..len], below, out);
+}
+
+// --- batch --------------------------------------------------------------------------------------
+
+/// The largest item of a group, times how many items the group has.
+fn weigh(group: []const u32) u64 {
+    var largest: u32 = 0;
+    for (group) |value| largest = @max(largest, value);
+    return @as(u64, largest) *% group.len;
+}
+
+pub fn batched(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ zrx.batch(4), map(weigh), fold(@as(u64, 0), addWide), subscribe(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        var group: [4]u32 = undefined;
+        var len: usize = 0;
+        for (items) |value| {
+            group[len] = value;
+            len += 1;
+            if (len == group.len) {
+                sum +%= weigh(&group);
+                len = 0;
+            }
+        }
+        if (len != 0) sum +%= weigh(group[0..len]);
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`: both variants are the same size, but the optimizer
+/// unrolls the two differently around the four-item buffer.
+export fn lean_batch(ptr: [*]const u32, len: usize, out: *u64) void {
+    batched(exported_with_zrx, ptr[0..len], out);
+}
+
+// --- resource -----------------------------------------------------------------------------------
+
+const Ledger = struct { opened: *u32, closed: *u32 };
+const Session = struct { bias: u32 };
+
+fn open(ledger: Ledger) Session {
+    ledger.opened.* +%= 1;
+    return .{ .bias = ledger.opened.* };
+}
+fn close(ledger: Ledger, session: Session) void {
+    ledger.closed.* +%= session.bias;
+}
+fn biased(session: Session, value: u32) u32 {
+    return value +% session.bias;
+}
+
+pub fn withResource(comptime with_zrx: bool, items: []const u32, opened: *u32, closed: *u32, out: *u64) void {
+    const ledger: Ledger = .{ .opened = opened, .closed = closed };
+    if (with_zrx) {
+        const total = pipe(.{ zrx.resource(open, close), map(biased), fold(@as(u64, 0), add), subscribe(store) });
+        run(program(fromSlice(items), total), .{ ledger, Result{ .out = out } });
+    } else {
+        const session = open(ledger);
+        defer close(ledger, session);
+        var sum: u64 = 0;
+        for (items) |value| sum +%= value +% session.bias;
+        out.* = sum;
+    }
+}
+
+export fn same_resource(ptr: [*]const u32, len: usize, opened: *u32, closed: *u32, out: *u64) void {
+    withResource(exported_with_zrx, ptr[0..len], opened, closed, out);
+}
+
+// --- print --------------------------------------------------------------------------------------
+
+/// Formatting is a call into `std.Io.Writer` in both variants; what must match
+/// is everything around it.
+pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+    if (with_zrx) {
+        const lines = pipe(.{ filter(isEven), zrx.print(*std.Io.Writer, "{d}\n") });
+        program(fromSlice(items), lines).run(.{writer}) catch return false;
+    } else {
+        for (items) |value| {
+            if (value % 2 != 0) continue;
+            writer.print("{d}\n", .{value}) catch return false;
+        }
+    }
+    return true;
+}
+
+export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
+    return printed(exported_with_zrx, ptr[0..len], writer);
 }

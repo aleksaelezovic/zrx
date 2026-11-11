@@ -14,7 +14,10 @@
 //!
 //! Instructions are compared as a multiset after erasing value and block names,
 //! so two compilations that differ only in naming or block order compare equal
-//! while an extra call, load, store or branch cannot hide.
+//! while an extra call, load, store or branch cannot hide. Two more things the
+//! optimizer chooses freely are made to compare equal: the order of a phi's
+//! incoming values, and which way round a comparison is written (`x > 9` and
+//! `x < 10` are one test with its branches swapped).
 const std = @import("std");
 
 const Function = struct {
@@ -126,7 +129,7 @@ fn parse(arena: std.mem.Allocator, text: []const u8) ![]Function {
         const line = try normalize(arena, raw);
         // Block labels end with a colon once their comment is gone.
         if (line.len == 0 or line[line.len - 1] == ':') continue;
-        try instructions.append(arena, line);
+        try instructions.append(arena, try canonical(arena, line));
     }
     return functions.toOwnedSlice(arena);
 }
@@ -187,6 +190,78 @@ fn normalize(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
         }
     }
     return std.mem.trim(u8, try out.toOwnedSlice(arena), " ");
+}
+
+/// Rewrites a normalized instruction into one spelling among equivalent ones.
+fn canonical(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
+    if (std.mem.indexOf(u8, line, "= phi ")) |at| return canonicalPhi(arena, line, at + "= phi ".len);
+    if (std.mem.indexOf(u8, line, "= icmp ")) |at| return canonicalCompare(arena, line, at + "= icmp ".len);
+    return line;
+}
+
+/// `phi i64 [ %, % ], [ 0, % ]`: sort the incoming `[ value, block ]` pairs.
+fn canonicalPhi(arena: std.mem.Allocator, line: []const u8, start: usize) ![]const u8 {
+    const first = std.mem.indexOfScalarPos(u8, line, start, '[') orelse return line;
+    var pairs: std.ArrayList([]const u8) = .empty;
+    var rest = line[first..];
+    while (std.mem.indexOfScalar(u8, rest, '[')) |open| {
+        const close = std.mem.indexOfScalarPos(u8, rest, open, ']') orelse break;
+        try pairs.append(arena, rest[open .. close + 1]);
+        rest = rest[close + 1 ..];
+    }
+    std.mem.sort([]const u8, pairs.items, {}, lessThan);
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(arena, line[0..first]);
+    for (pairs.items, 0..) |pair, i| {
+        if (i != 0) try out.appendSlice(arena, ", ");
+        try out.appendSlice(arena, pair);
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// `icmp ugt i32 %, 9` and `icmp ult i32 %, 10` are the same test negated, and
+/// `ugt %, %` is `ult %, %` mirrored: reduce each family to one predicate.
+fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize) ![]const u8 {
+    var words = std.mem.tokenizeScalar(u8, line[start..], ' ');
+    var predicate: []const u8 = "";
+    var type_and_left: std.ArrayList(u8) = .empty;
+    var right: []const u8 = "";
+    while (words.next()) |word| {
+        if (predicate.len == 0) {
+            // Flags such as `samesign` come before the predicate.
+            if (isPredicate(word)) predicate = word;
+            continue;
+        }
+        if (right.len != 0) {
+            try type_and_left.appendSlice(arena, right);
+            try type_and_left.append(arena, ' ');
+        }
+        right = word;
+    }
+    if (predicate.len == 0) return line;
+
+    const inclusive_of_constant = std.mem.eql(u8, predicate, "ugt") or std.mem.eql(u8, predicate, "ule") or
+        std.mem.eql(u8, predicate, "sgt") or std.mem.eql(u8, predicate, "sle");
+    var bound = right;
+    if (inclusive_of_constant) {
+        // `> c` is `>= c + 1`, which is `< c + 1` negated.
+        if (std.fmt.parseInt(i128, right, 10)) |constant| {
+            bound = try std.fmt.allocPrint(arena, "{d}", .{constant + 1});
+        } else |_| {}
+    }
+    const family: []const u8 = switch (predicate[0]) {
+        'e', 'n' => "equal",
+        'u' => "unsigned-order",
+        else => "signed-order",
+    };
+    return std.fmt.allocPrint(arena, "{s}{s} {s}{s}", .{ line[0..start], family, type_and_left.items, bound });
+}
+
+fn isPredicate(word: []const u8) bool {
+    for ([_][]const u8{ "eq", "ne", "ugt", "uge", "ult", "ule", "sgt", "sge", "slt", "sle" }) |known| {
+        if (std.mem.eql(u8, word, known)) return true;
+    }
+    return false;
 }
 
 /// The index just past a bare or quoted identifier starting at `start`.

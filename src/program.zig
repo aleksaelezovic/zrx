@@ -44,13 +44,20 @@ pub fn Program(comptime S: type, comptime P: type) type {
             );
 
             const Frame = P.Stage(Env, S.Item);
-            var frame: Frame = undefined;
-            try frame.init(&self.pipe, env);
-            defer frame.deinit();
-            try frame.start(Closed{});
-            try self.source.run(env, Entry(Frame, S.Item){ .frame = &frame });
-            try frame.finish(Closed{});
-            try frame.flush();
+            const Body = struct {
+                program: *const Program(S, P),
+                env: Env,
+
+                pub fn call(body: @This(), refs: Frame.Refs) !void {
+                    try Frame.at.init(refs, &body.program.pipe.ops, body.env);
+                    defer Frame.at.deinit(refs);
+                    try Frame.at.start(refs, Closed{});
+                    try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
+                    try Frame.at.finish(refs, Closed{});
+                    try Frame.at.flush(refs);
+                }
+            };
+            return Frame.withLocals(Body{ .program = self, .env = env });
         }
     };
 }
@@ -58,10 +65,10 @@ pub fn Program(comptime S: type, comptime P: type) type {
 /// The `down` a source pushes into.
 fn Entry(comptime Frame: type, comptime Item: type) type {
     return struct {
-        frame: *Frame,
+        refs: Frame.Refs,
 
         pub fn push(entry: @This(), item: Item) !Flow {
-            return entry.frame.push(item, Closed{});
+            return Frame.at.push(entry.refs, item, Closed{});
         }
     };
 }

@@ -63,14 +63,15 @@ concurrency model, and how to write operators of your own. The
 
 ## Zero overhead, checked
 
-Everything is resolved at compile time: stages are laid out in one struct,
-dependencies are copied into the handlers that asked for them once, and a push
-is a chain of direct calls the optimizer flattens. `zig build zero-overhead`
-compiles each fixture in [`tests/zero_overhead`](tests/zero_overhead/cases.zig)
-twice, as a pipeline and as a hand-written loop, and compares the optimized
-LLVM IR function by function. Six of the eight fixtures are the same
-instructions; the other two differ only in loop shape and are required to be
-free of calls and extra memory traffic.
+Everything is resolved at compile time: every stage is a local variable of
+the run, dependencies are copied into the handlers that asked for them once,
+and a push is a chain of direct calls the optimizer flattens. `zig build
+zero-overhead` compiles each fixture in
+[`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
+as a hand-written loop, and compares the optimized LLVM IR function by
+function. The fixtures cover every synchronous operator. Eleven of the
+fourteen are the same instructions; the other three differ only in loop shape
+and are required to be free of calls and extra memory traffic.
 
 `queue` is the one operator that costs something by design: it is a real
 bounded buffer between two tasks.

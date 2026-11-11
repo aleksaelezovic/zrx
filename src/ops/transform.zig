@@ -311,24 +311,33 @@ const Flatten = struct {
 
 /// Groups items into slices of `size` (the last one may be shorter). A slice
 /// is only valid during the push that delivers it.
-pub fn batch(comptime size: usize) Batch(size) {
-    return .{};
+///
+/// Built from two stages so that each lives in its own local: the counter
+/// stays in a register, and only the buffer (which is indexed, so the
+/// optimizer must keep it in memory) is in memory.
+pub fn batch(comptime size: usize) core.Pipe(@Tuple(&.{ BatchSlots(size), BatchBuffer(size) })) {
+    if (size == 0) @compileError("batch: size must be at least 1");
+    return core.pipe(.{ BatchSlots(size){}, BatchBuffer(size){} });
 }
 
-fn Batch(comptime size: usize) type {
-    if (size == 0) @compileError("batch: size must be at least 1");
+/// What the counter tells the buffer: store `item` at `index` (if any), then
+/// deliver the first `deliver` items (if not zero).
+fn BatchStep(comptime In: type) type {
+    return struct { item: ?In, index: usize, deliver: usize };
+}
+
+fn BatchSlots(comptime size: usize) type {
     return struct {
         const Op = @This();
         pub const zrx_operator = {};
         pub const name = "batch";
 
         pub fn Out(comptime _: type, comptime In: type) type {
-            return []const In;
+            return BatchStep(In);
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {
             return struct {
-                items: [size]In,
                 len: usize,
 
                 pub fn init(self: *@This(), _: *const Op, _: Env) !void {
@@ -336,18 +345,47 @@ fn Batch(comptime size: usize) type {
                 }
 
                 pub fn push(self: *@This(), item: In, down: anytype) !Flow {
-                    self.items[self.len] = item;
-                    self.len += 1;
-                    if (self.len < size) return .more;
-                    self.len = 0;
-                    return down.push(&self.items);
+                    const index = self.len;
+                    const full = index + 1 == size;
+                    self.len = if (full) 0 else index + 1;
+                    return down.push(.{ .item = item, .index = index, .deliver = if (full) size else 0 });
                 }
 
                 pub fn finish(self: *@This(), down: anytype) !void {
                     if (self.len == 0) return;
-                    const pending = self.items[0..self.len];
+                    const pending = self.len;
                     self.len = 0;
-                    _ = try down.push(pending);
+                    _ = try down.push(.{ .item = null, .index = 0, .deliver = pending });
+                }
+            };
+        }
+    };
+}
+
+fn BatchBuffer(comptime size: usize) type {
+    return struct {
+        const Op = @This();
+        pub const zrx_operator = {};
+        pub const name = "batch";
+
+        fn Item(comptime Step: type) type {
+            return @typeInfo(@FieldType(Step, "item")).optional.child;
+        }
+
+        pub fn Out(comptime _: type, comptime Step: type) type {
+            return []const Item(Step);
+        }
+
+        pub fn Stage(comptime Env: type, comptime Step: type) type {
+            return struct {
+                items: [size]Item(Step),
+
+                pub fn init(_: *@This(), _: *const Op, _: Env) !void {}
+
+                pub fn push(self: *@This(), step: Step, down: anytype) !Flow {
+                    if (step.item) |item| self.items[step.index] = item;
+                    if (step.deliver == 0) return .more;
+                    return down.push(self.items[0..step.deliver]);
                 }
             };
         }

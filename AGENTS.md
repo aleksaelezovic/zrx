@@ -66,12 +66,20 @@ to this file; edit `AGENTS.md`, not copies.
 - Claim only what is checked. `zig build zero-overhead` compares optimized LLVM
   IR of pipelines and hand-written loops (`tests/zero_overhead`,
   `tools/same_code.zig`). When adding or changing a synchronous operator, add
-  or extend a fixture; a new fixture is `same_*` unless the difference is only
-  loop shape, then `lean_*` with the reason in a comment.
+  or extend a fixture (every synchronous operator has one); a new fixture is
+  `same_*` unless the difference is only loop shape, then `lean_*` with the
+  reason in a comment.
 - Do not force inlining. Keep stages free of hidden memory: return
   `down.push(x)` directly or compare its result and return a constant; never
   store a `Flow` and later select between it and a constant (it defeats the
   optimizer; `lean_take` exists because of this).
+- Each stage of a program is its own local (`Chain.withLocals`); nested pipes
+  are spliced so this holds for them too. Sub-pipes of `branch` and `route`
+  are stored as one value. A stage that indexes into an array it owns cannot
+  be kept in registers at all, so give such a buffer a stage of its own and
+  keep counters in another (see `batch`).
+- `tools/same_code.zig` ignores value and block names, phi input order and
+  comparison polarity, nothing else. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
 
 ## Diagnostics

@@ -363,7 +363,8 @@ zero-overhead` compiles the file once per variant, in ReleaseFast for
 of every exported function:
 
 - `same_*` functions must be the same multiset of instructions once value and
-  block names are erased;
+  block names are erased (the order of a phi's inputs and which way round a
+  comparison is written are also ignored);
 - `lean_*` functions may differ in loop shape, but the zrx variant must contain
   no calls, no stack slots, no more loads or stores than the hand-written one,
   and at most a quarter more instructions;
@@ -374,9 +375,21 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
+Every synchronous operator has a fixture. Eleven are `same`; `take`, `batch`
+and the handler combinators are `lean`, each with the reason next to it.
+
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. It is evidence for those shapes with this
 compiler, not a proof for every pipeline. `queue` is deliberately outside it.
+
+Two things make it work, and are worth knowing when writing an operator:
+
+- Each stage of a program is its own local variable, so the optimizer keeps
+  each in registers independently. Stages inside a `branch` or `route`
+  sub-pipe are stored together with it.
+- A stage that indexes into an array it owns stays in memory as a whole. Keep
+  such a buffer in a stage of its own, away from counters and accumulators:
+  `batch` is a counter stage followed by a buffer stage for this reason.
 
 ## Not here yet
 
