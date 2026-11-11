@@ -315,9 +315,9 @@ const Flatten = struct {
 /// Built from two stages so that each lives in its own local: the counter
 /// stays in a register, and only the buffer (which is indexed, so the
 /// optimizer must keep it in memory) is in memory.
-pub fn batch(comptime size: usize) core.Pipe(@Tuple(&.{ BatchSlots(size), BatchBuffer(size) })) {
+pub fn batch(comptime size: usize) core.Spliced("batch", @Tuple(&.{ BatchSlots(size), BatchBuffer(size) })) {
     if (size == 0) @compileError("batch: size must be at least 1");
-    return core.pipe(.{ BatchSlots(size){}, BatchBuffer(size){} });
+    return .{ .ops = .{ BatchSlots(size){}, BatchBuffer(size){} } };
 }
 
 /// What the counter tells the buffer: store `item` at `index` (if any), then

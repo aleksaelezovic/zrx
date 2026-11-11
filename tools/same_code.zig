@@ -16,8 +16,8 @@
 //! so two compilations that differ only in naming or block order compare equal
 //! while an extra call, load, store or branch cannot hide. Two more things the
 //! optimizer chooses freely are made to compare equal: the order of a phi's
-//! incoming values, and which way round a comparison is written (`x > 9` and
-//! `x < 10` are one test with its branches swapped).
+//! incoming values, and a comparison with its negation (`x > 9` and `x < 10`
+//! are one test with its two outcomes swapped). See `canonicalCompare`.
 const std = @import("std");
 
 const Function = struct {
@@ -219,8 +219,18 @@ fn canonicalPhi(arena: std.mem.Allocator, line: []const u8, start: usize) ![]con
     return out.toOwnedSlice(arena);
 }
 
-/// `icmp ugt i32 %, 9` and `icmp ult i32 %, 10` are the same test negated, and
-/// `ugt %, %` is `ult %, %` mirrored: reduce each family to one predicate.
+/// A comparison and its negation compare equal, and nothing else does:
+/// `icmp ult` with `icmp uge`, `ugt` with `ule`, `eq` with `ne` (and the signed
+/// pairs). The negated form is the same test with its two outcomes swapped,
+/// and which outcome a branch takes is something this tool cannot see anyway,
+/// since block names are erased; `behavior.zig` is what holds both variants to
+/// the same results. Against a constant, `> c` is first rewritten to the
+/// identical `>= c + 1` (and `<= c` to `< c + 1`), so that `x > 9` and
+/// `x < 10` meet as a negated pair.
+///
+/// Predicates that are only related by swapping operands (`ult` and `ugt`)
+/// stay distinct: with value names erased the swap cannot be checked, and
+/// `ult` and `ule` on the same operands are different tests.
 fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize) ![]const u8 {
     var words = std.mem.tokenizeScalar(u8, line[start..], ' ');
     var predicate: []const u8 = "";
@@ -240,21 +250,26 @@ fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize) ![
     }
     if (predicate.len == 0) return line;
 
-    const inclusive_of_constant = std.mem.eql(u8, predicate, "ugt") or std.mem.eql(u8, predicate, "ule") or
-        std.mem.eql(u8, predicate, "sgt") or std.mem.eql(u8, predicate, "sle");
     var bound = right;
-    if (inclusive_of_constant) {
-        // `> c` is `>= c + 1`, which is `< c + 1` negated.
+    const strict_above = std.mem.eql(u8, predicate, "ugt") or std.mem.eql(u8, predicate, "sgt");
+    const at_most = std.mem.eql(u8, predicate, "ule") or std.mem.eql(u8, predicate, "sle");
+    if (strict_above or at_most) {
         if (std.fmt.parseInt(i128, right, 10)) |constant| {
             bound = try std.fmt.allocPrint(arena, "{d}", .{constant + 1});
+            // `> c` is `>= c + 1`; `<= c` is `< c + 1`.
+            predicate = if (predicate[0] == 'u')
+                (if (strict_above) "uge" else "ult")
+            else
+                (if (strict_above) "sge" else "slt");
         } else |_| {}
     }
-    const family: []const u8 = switch (predicate[0]) {
-        'e', 'n' => "equal",
-        'u' => "unsigned-order",
-        else => "signed-order",
-    };
-    return std.fmt.allocPrint(arena, "{s}{s} {s}{s}", .{ line[0..start], family, type_and_left.items, bound });
+    const pair: []const u8 = for ([_][2][]const u8{
+        .{ "eq", "ne" }, .{ "ult", "uge" }, .{ "ugt", "ule" }, .{ "slt", "sge" }, .{ "sgt", "sle" },
+    }) |negated| {
+        if (std.mem.eql(u8, predicate, negated[0]) or std.mem.eql(u8, predicate, negated[1]))
+            break try std.fmt.allocPrint(arena, "{s}|{s}", .{ negated[0], negated[1] });
+    } else predicate;
+    return std.fmt.allocPrint(arena, "{s}{s} {s}{s}", .{ line[0..start], pair, type_and_left.items, bound });
 }
 
 fn isPredicate(word: []const u8) bool {

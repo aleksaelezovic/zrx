@@ -258,6 +258,25 @@ test "a case keeps its own state and finishes with the stream" {
     try seen.expect(&.{ 1, 12 });
 }
 
+test "once the pipe after a route is done, no case forwards to it again" {
+    var seen: Numbers = .{};
+    var tapped: Pulls = .{};
+    // Both cases emit one final value when the stream ends; only the first
+    // may reach what follows the route.
+    const work = pipe(.{
+        route(.{
+            when(isEven, pipe(.{fold(@as(u32, 0), add)})),
+            otherwise(pipe(.{fold(@as(u32, 100), add)})),
+        }),
+        tap(countPull),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped });
+    try seen.expect(&.{6});
+    try std.testing.expectEqual(@as(usize, 1), tapped.count);
+}
+
 const Threshold = struct { value: u32 };
 fn above(threshold: Threshold, value: u32) bool {
     return value > threshold.value;

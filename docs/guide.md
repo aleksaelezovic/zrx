@@ -303,7 +303,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
 | `createFile(Role, path, n, .{})` | Creates the file and provides a writer to it as `Role`; `.{ .exclusive = true }` refuses to replace an existing one. |
 | `lines(Role)` | Source: lines of the reader keyed by `Role`. |
-| `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes. |
+| `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
 Whoever owns a writer flushes it. The operators above flush the writers they
 create when the stream ends (a failed flush fails the run) and once more, best
