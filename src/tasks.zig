@@ -81,10 +81,16 @@ pub fn Watch(comptime Reported: type) type {
 ///
 /// Tasks are started with `Io.concurrent`, never run on the caller's task
 /// while others are running: the caller has to stay free to see a failure and
-/// cancel the rest. An `Io` that cannot run anything concurrently runs the
-/// tasks one after another instead, and does not start one once the outcome
-/// is settled. An `Io` that ran some tasks concurrently and then cannot start
-/// another fails with `error.ConcurrencyUnavailable`.
+/// cancel the rest. An `Io` that ran some tasks concurrently and then cannot
+/// start another fails with `error.ConcurrencyUnavailable`.
+///
+/// An `Io` that cannot run anything concurrently runs the tasks one after
+/// another on the caller's task instead. That fallback keeps the order of
+/// outcomes (the first thing reported or returned is the result, and no task
+/// starts once it is settled) but not the cancellation: there is no second
+/// task to cancel from, so a task that is running runs until it returns,
+/// whatever it reported and however long it takes. Acting on a failure at
+/// once needs an `Io` with concurrency.
 pub fn all(io: Io, tasks: anytype, watch: anytype) (Errors(@TypeOf(tasks)) || ReportedBy(@TypeOf(watch)))!void {
     const Tasks = @TypeOf(tasks);
     const n = comptime di.types(Tasks).len;
@@ -126,9 +132,13 @@ pub fn all(io: Io, tasks: anytype, watch: anytype) (Errors(@TypeOf(tasks)) || Re
             started += 1;
         } else |err| switch (err) {
             error.ConcurrencyUnavailable => {
+                // A member may have settled the outcome while the launch was
+                // failing: that, not the failed launch, is the result.
+                const now = watch.current(io);
+                if (now.outcome) |settled| return resolve(settled);
                 // Running it here would block this task. That is only safe
                 // when nothing else is running that it would have to watch.
-                if (so_far.returned != started) return error.ConcurrencyUnavailable;
+                if (now.returned != started) return error.ConcurrencyUnavailable;
                 // Its result is settled like any member's: what was reported
                 // while it ran comes first.
                 var result: ?anyerror = null;

@@ -33,6 +33,11 @@
 //! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
 //! still using a stage when that stage, or one after it, is torn down.
 //!
+//! When the pipe is already done before startup is over (a `start` hook
+//! pushed, and that was all anything wanted), startup is cut short and the
+//! source is never run: `finish` can then reach a stage whose `start` was
+//! interrupted or never ran, and has to cope with that.
+//!
 //! A stage that runs a task takes part in the run's `Supervision` (see below):
 //! it reports when its worker ends and why, and joins it through the
 //! supervision so that the join gives way to a failure elsewhere.
@@ -135,6 +140,14 @@ pub const Supervision = struct {
             signal.has_failed.store(true, .release);
         }
         signal.changed.broadcast(io);
+    }
+
+    /// Whether nothing in the pipe wants another item.
+    pub fn isSatisfied(supervision: Supervision, io: Io) bool {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        return signal.satisfied;
     }
 
     /// The stage whose worker failed first, if any has.

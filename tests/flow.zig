@@ -700,3 +700,79 @@ test "the failure that closed a queue is the result, not the producer's reaction
         try std.testing.expectError(error.ConsumerBroke, result);
     }
 }
+
+/// As the run starts: pushes one item, waits until the pipe has said it
+/// wants no more, and then either returns or blocks.
+const SatisfyingHerald = struct {
+    then_block: bool,
+
+    pub const zrx_operator = {};
+    pub const name = "satisfyingHerald";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            clock: std.Io,
+            flags: *Flags,
+            supervision: zrx.operator.Supervision,
+            then_block: bool,
+
+            pub fn init(self: *@This(), op: *const SatisfyingHerald, env: Env) !void {
+                self.* = .{
+                    .clock = zrx.di.get(env, std.Io),
+                    .flags = zrx.di.get(env, *Flags),
+                    .supervision = zrx.di.get(env, zrx.operator.Supervision),
+                    .then_block = op.then_block,
+                };
+            }
+
+            pub fn start(self: *@This(), down: anytype) !void {
+                _ = try down.push(@as(In, 1));
+                if (self.then_block) {
+                    try self.clock.sleep(.fromSeconds(5), .awake);
+                    self.flags.woke_by_itself.store(true, .seq_cst);
+                    return;
+                }
+                // Return only once the worker has reported that the pipe is done.
+                const signal = self.supervision.signal;
+                try signal.mutex.lock(self.clock);
+                defer signal.mutex.unlock(self.clock);
+                while (!signal.satisfied) try signal.changed.wait(self.clock, &signal.mutex);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+const Ran = struct { source: std.atomic.Value(bool) = .init(false) };
+fn recordingSource(ran: *Ran, out: anytype) !void {
+    ran.source.store(true, .seq_cst);
+    _ = try out.push(@as(u32, 7));
+}
+
+test "a pipe that is done during startup ends a start hook that is blocked" {
+    var flags: Flags = .{};
+    var seen: Numbers = .{};
+    var ran: Ran = .{};
+    const work = pipe(.{ SatisfyingHerald{ .then_block = true }, queue(2), take(1), subscribe(record) });
+    try program(zrx.fromProducer(u32, recordingSource), work).run(.{ io, &flags, &seen, &ran });
+    try seen.expect(&.{1});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+    try std.testing.expect(!ran.source.load(.seq_cst));
+}
+
+test "a pipe that is done when startup returns never runs its source" {
+    var flags: Flags = .{};
+    var seen: Numbers = .{};
+    var ran: Ran = .{};
+    const work = pipe(.{ SatisfyingHerald{ .then_block = false }, queue(2), take(1), subscribe(record) });
+    try program(zrx.fromProducer(u32, recordingSource), work).run(.{ io, &flags, &seen, &ran });
+    try seen.expect(&.{1});
+    try std.testing.expect(!ran.source.load(.seq_cst));
+}

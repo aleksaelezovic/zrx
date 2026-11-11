@@ -90,11 +90,15 @@ all have finished. The first failure cancels the others and is returned. A
 system is itself runnable, so systems nest.
 
 Programs are started with `Io.concurrent`, each on a task of its own, so the
-system stays free to notice a failure and cancel the rest. An `Io` that cannot
-run anything concurrently runs them one after another instead, and does not
-start one after an earlier one has failed. An `Io` that runs out of
-concurrency part-way fails the system with `error.ConcurrencyUnavailable`
-rather than run a program where it could block the others.
+system stays free to notice a failure and cancel the rest. An `Io` that runs
+out of concurrency part-way fails the system with
+`error.ConcurrencyUnavailable` rather than run a program where it could block
+the others.
+
+An `Io` with no concurrency at all runs the programs one after another
+instead, and does not start one after an earlier one has failed. That is all
+it can do: with a single task nothing can be cancelled, so each program runs
+until it returns. The same holds for the sources of a `merge`.
 
 ## Sources
 
@@ -266,7 +270,8 @@ when all of them are done, and the first failure ends it:
 - **A pipe that is done stops its source** the same way (`take` after a
   `queue`). Inside `branch` and `route` that means every sub-pipe: one being
   done says nothing about its siblings, so the source is stopped when the
-  last one is.
+  last one is. If the pipe is already done before the first item (a stage
+  emitted as the run started), the source is not run at all.
 - **Every task is cancelled and joined before any resource is released**, so
   a handler never runs against a released resource.
 - **Cancellation is cooperative**: it takes effect where a task calls into

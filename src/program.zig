@@ -78,7 +78,8 @@ pub fn Program(comptime S: type, comptime P: type) type {
         /// only waits and cancels, so it is always free to act:
         ///
         /// - Starting is a task because a `start` hook can push, and block,
-        ///   once the workers after it are running.
+        ///   once the workers after it are running. If that push is all the
+        ///   pipe wanted, starting is cut short and the source never runs.
         /// - Feeding is a task so that the source can be cancelled. When a
         ///   worker fails, or nothing wants another item, the source is not
         ///   left to find out at its next push, which for an idle source
@@ -127,8 +128,9 @@ pub fn Program(comptime S: type, comptime P: type) type {
                 }
 
                 /// Waits until the task of `phase` has returned or the run
-                /// needs it to: a worker failed, or (while feeding) nothing
-                /// wants another item. Returns whether it returned by itself.
+                /// needs it to: a worker failed, or, before the end of the
+                /// stream, nothing wants another item. Returns whether it
+                /// returned by itself.
                 fn wait(wake: *Signal, io: Io, comptime phase: Phase) Io.Cancelable!bool {
                     wake.mutex.lockUncancelable(io);
                     defer wake.mutex.unlock(io);
@@ -140,7 +142,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         };
                         if (returned) return true;
                         if (wake.failed_stage != null) return false;
-                        if (phase == .feeding and wake.satisfied) return false;
+                        if (phase != .ending and wake.satisfied) return false;
                         try wake.changed.wait(io, &wake.mutex);
                     }
                 }
@@ -180,14 +182,18 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     try body.failureIfAny(refs, io);
                     if (started_by_itself) try started else started catch {};
 
-                    var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, wake, io });
-                    const fed_by_itself = Tasks.wait(wake, io, .feeding) catch |err| {
-                        feeding.cancel(io) catch {};
-                        return err;
-                    };
-                    const fed = feeding.cancel(io);
-                    try body.failureIfAny(refs, io);
-                    if (fed_by_itself) try fed else fed catch {};
+                    // If starting already gave the pipe all it wanted, the
+                    // source is not run at all.
+                    if (!body.supervision.isSatisfied(io)) {
+                        var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, wake, io });
+                        const fed_by_itself = Tasks.wait(wake, io, .feeding) catch |err| {
+                            feeding.cancel(io) catch {};
+                            return err;
+                        };
+                        const fed = feeding.cancel(io);
+                        try body.failureIfAny(refs, io);
+                        if (fed_by_itself) try fed else fed catch {};
+                    }
 
                     var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
                     _ = Tasks.wait(wake, io, .ending) catch |err| {

@@ -62,6 +62,15 @@ to this file; edit `AGENTS.md`, not copies.
   hooks), feeding (the source) and ending (finish and flush) as tasks, one
   after another; the caller waits on `Supervision` and cancels. Never run
   user code on the task that supervises: every hook can block.
+- **Done before the first item is still done.** If starting satisfies the
+  pipe, starting is cut short and feeding is skipped; `finish` may then reach
+  a stage whose `start` did not run. In a `route`, a predicate's failure is
+  ignored once the route is done (the check sits on the failure path: a check
+  ahead of the per-item work makes the optimizer peel the loop).
+- **The sequential fallback orders outcomes; it cannot cancel.** On an `Io`
+  with no concurrency a member runs on the caller's task until it returns.
+  Do not promise immediate cancellation there. After a failed launch, re-read
+  the `Watch` before deciding anything.
 - **The cause comes first.** A worker's failure is published before anything
   that would react to it is woken (the queue reports, then closes), and it is
   resolved before any error a phase or a member returned, which may only be

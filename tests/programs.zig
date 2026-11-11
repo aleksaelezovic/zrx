@@ -365,3 +365,39 @@ test "without concurrency, a failed push is still the result ahead of what its s
     // Nothing is started after the failure.
     try seen.expect(&.{});
 }
+
+/// An `Io` whose second attempt to start a member fails, a moment after the
+/// first member has had time to fail.
+const SecondLaunchFails = struct {
+    var inner: std.Io = undefined;
+    var launches: usize = 0;
+
+    fn groupConcurrent(
+        userdata: ?*anyopaque,
+        group: *std.Io.Group,
+        context: []const u8,
+        context_alignment: std.mem.Alignment,
+        start: *const fn (context: *const anyopaque) void,
+    ) std.Io.ConcurrentError!void {
+        launches += 1;
+        if (launches == 1) return inner.vtable.groupConcurrent(userdata, group, context, context_alignment, start);
+        inner.sleep(.fromMilliseconds(100), .awake) catch {};
+        return error.ConcurrencyUnavailable;
+    }
+};
+
+test "a failed launch does not hide the failure a running member already had" {
+    SecondLaunchFails.inner = io;
+    SecondLaunchFails.launches = 0;
+    var vtable = io.vtable.*;
+    vtable.groupConcurrent = SecondLaunchFails.groupConcurrent;
+    const staged: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
+
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
+    const later = program(fromValue(@as(u32, 9)), pipe(.{subscribe(toRight)}));
+    const result = system(.{ failing, later }).run(.{ staged, Left{ .seen = &left }, Right{ .seen = &right } });
+    try std.testing.expectError(error.Two, result);
+    try right.expect(&.{});
+}
