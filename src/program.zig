@@ -72,16 +72,20 @@ pub fn Program(comptime S: type, comptime P: type) type {
         }
 
         /// The pipe crosses a task boundary, so the run is a group of
-        /// supervised tasks: the workers its stages start, and the source.
+        /// supervised tasks: the workers its stages start, one that feeds the
+        /// pipe from the source, and then one that finishes and flushes it.
+        /// The caller only waits and cancels, so it is always free to act:
         ///
-        /// - The source is a task so that it can be cancelled. When a worker
-        ///   fails, or nothing wants another item, the source is not left to
-        ///   find out at its next push, which for an idle source might never
-        ///   come. What a source returns after being interrupted is a
-        ///   consequence, not a result.
-        /// - The first failure of a worker is the result of the run. Once
-        ///   there is one, no stage finishes and no join waits: an effect of
-        ///   a normal end must not follow a failure.
+        /// - Feeding is a task so that the source can be cancelled. When a
+        ///   worker fails, or nothing wants another item, the source is not
+        ///   left to find out at its next push, which for an idle source
+        ///   might never come. What a source returns after being interrupted
+        ///   is a consequence, not a result.
+        /// - Ending is a task for the same reason: a final value's handler
+        ///   can block too, and a failure elsewhere must still end the run.
+        /// - The first failure of a worker is the result of the run. It is
+        ///   returned by the stage that failed (`failureOf`), not carried
+        ///   here as a value, so the run's error set stays inferred.
         /// - `stop` then cancels and joins every worker before anything is
         ///   torn down.
         fn runSupervised(self: *const @This(), outer: anytype) !void {
@@ -90,15 +94,45 @@ pub fn Program(comptime S: type, comptime P: type) type {
             const env = di.extend(outer, supervision);
             const Env = @TypeOf(env);
             const Frame = P.Stage(Env, S.Item);
-            const Feed = struct {
-                fn run(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
-                    defer {
-                        wake.mutex.lockUncancelable(io);
-                        wake.source_ended = true;
-                        wake.changed.broadcast(io);
-                        wake.mutex.unlock(io);
+            const Phase = enum { feeding, ending };
+            const Tasks = struct {
+                fn ended(wake: *Signal, io: Io, comptime phase: Phase) void {
+                    wake.mutex.lockUncancelable(io);
+                    defer wake.mutex.unlock(io);
+                    switch (phase) {
+                        .feeding => wake.feeding_ended = true,
+                        .ending => wake.ending_ended = true,
                     }
+                    wake.changed.broadcast(io);
+                }
+
+                fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
+                    defer ended(wake, io, .feeding);
                     return source.run(feed_env, entry);
+                }
+
+                fn end(refs: Frame.Refs, guard: Supervision, wake: *Signal, io: Io) !void {
+                    defer ended(wake, io, .ending);
+                    try Frame.at.finish(refs, Closed{}, guard);
+                    try Frame.at.flush(refs);
+                }
+
+                /// Waits until the task of `phase` has returned or the run
+                /// needs it to: a worker failed, or (while feeding) nothing
+                /// wants another item. Returns whether it returned by itself.
+                fn wait(wake: *Signal, io: Io, comptime phase: Phase) Io.Cancelable!bool {
+                    wake.mutex.lockUncancelable(io);
+                    defer wake.mutex.unlock(io);
+                    while (true) {
+                        const returned = switch (phase) {
+                            .feeding => wake.feeding_ended,
+                            .ending => wake.ending_ended,
+                        };
+                        if (returned) return true;
+                        if (wake.failed_stage != null) return false;
+                        if (phase == .feeding and wake.satisfied) return false;
+                        try wake.changed.wait(io, &wake.mutex);
+                    }
                 }
             };
             const Body = struct {
@@ -118,60 +152,46 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // Every worker that started gave its `Io`. With none,
                     // there is nobody to supervise.
                     const entry: Entry(Frame, S.Item) = .{ .refs = refs };
-                    if (wake.io) |io| {
-                        var source = try io.concurrent(Feed.run, .{ &body.program.source, body.env, entry, wake, io });
-                        const ended_by_itself = sourceOrSignal(wake, io) catch |err| {
-                            // This task is being cancelled: so is the source.
-                            source.cancel(io) catch {};
-                            return err;
-                        };
-                        const outcome = source.cancel(io);
-                        if (ended_by_itself) try outcome else outcome catch {};
-                    } else {
+                    const io = wake.io orelse {
                         try body.program.source.run(body.env, entry);
-                    }
+                        try Frame.at.finish(refs, Closed{}, body.supervision);
+                        return Frame.at.flush(refs);
+                    };
 
-                    const Failure = @typeInfo(@TypeOf(Frame.at.finish(refs, Closed{}, body.supervision))).error_union.error_set;
-                    if (wake.failure) |first| return recast(Failure, first);
-                    Frame.at.finish(refs, Closed{}, body.supervision) catch |err| {
-                        // Whatever cut the end short, the failure that caused it is the result.
-                        if (firstFailure(wake)) |first| return recast(Failure, first);
+                    var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, wake, io });
+                    const fed_by_itself = Tasks.wait(wake, io, .feeding) catch |err| {
+                        // This task is being cancelled: so is the source.
+                        feeding.cancel(io) catch {};
                         return err;
                     };
-                    try Frame.at.flush(refs);
+                    const fed = feeding.cancel(io);
+                    if (fed_by_itself) try fed else fed catch {};
+                    try body.failureIfAny(refs, io);
+
+                    var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
+                    _ = Tasks.wait(wake, io, .ending) catch |err| {
+                        ending.cancel(io) catch {};
+                        return err;
+                    };
+                    const finished = ending.cancel(io);
+                    // Whatever cut the end short, the failure that caused it is the result.
+                    try body.failureIfAny(refs, io);
+                    try finished;
                 }
 
-                /// Waits until the source has ended or the run needs it to:
-                /// a worker failed, or nothing wants another item. Returns
-                /// whether the source ended by itself.
-                fn sourceOrSignal(wake: *Signal, io: Io) Io.Cancelable!bool {
-                    wake.mutex.lockUncancelable(io);
-                    defer wake.mutex.unlock(io);
-                    while (!wake.source_ended and wake.failure == null and !wake.satisfied) {
-                        try wake.changed.wait(io, &wake.mutex);
-                    }
-                    return wake.source_ended;
-                }
-
-                /// Read after workers may still be running, so under the lock.
-                fn firstFailure(wake: *Signal) ?anyerror {
-                    const io = wake.io orelse return wake.failure;
-                    wake.mutex.lockUncancelable(io);
-                    defer wake.mutex.unlock(io);
-                    return wake.failure;
+                /// Returns the failure of the first worker that failed, as
+                /// that worker's stage returns it.
+                fn failureIfAny(body: @This(), refs: Frame.Refs, io: Io) !void {
+                    const who = body.supervision.failedStage(io) orelse return;
+                    try Frame.at.failureOf(refs, Closed{}, who);
+                    // A stage reported a failure and then returned none. The
+                    // run still must not look like a success.
+                    return error.Canceled;
                 }
             };
             return Frame.withLocals(Body{ .program = self, .env = env, .supervision = supervision });
         }
     };
-}
-
-/// An error a worker recorded, as a member of the error set `E` it came from.
-fn recast(comptime E: type, err: anyerror) E {
-    const names = comptime @typeInfo(E).error_set.error_names;
-    if (comptime names == null) return err; // anyerror
-    if (comptime names.?.len == 0) unreachable;
-    return @errorCast(err);
 }
 
 /// The `down` a source pushes into.
@@ -226,7 +246,8 @@ pub fn System(comptime Ps: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .program = &self.programs[i], .env = env };
-            return tasks.all(di.get(env, Io), group, null);
+            var watch: tasks.Watch(error{}) = .{};
+            return tasks.all(di.get(env, Io), group, &watch);
         }
     };
 }

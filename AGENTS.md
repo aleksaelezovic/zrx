@@ -56,22 +56,33 @@ to this file; edit `AGENTS.md`, not copies.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
-- **Every task is supervised.** A stop or a failure must not wait for a
-  producer's next push, nor for a join. A program whose pipe has a queue runs
-  its source as a task; workers report through `Supervision`, which records
-  the first failure. That failure is the run's result: it cancels the source,
-  ends any wait for another worker, and stops further stages from finishing.
-  What an interrupted source returns is ignored. "Done" is aggregated per
+- **Every task is supervised, and the supervisor only waits.** A stop or a
+  failure must not wait for a producer's next push, for a join, or for a
+  handler. A program whose pipe has a queue runs feeding (the source) and
+  then ending (finish and flush) as tasks; the caller waits on `Supervision`
+  and cancels. Never run user code on the task that supervises.
+- **A failure is acted on where it happens.** Workers report through
+  `Supervision.fail(io, stage)`; the first one is the run's result: it cancels
+  whichever phase is running and stops further stages from finishing. The
+  error is not passed as a value: the program asks the stage for it
+  (`failure(self, down) !void`, found with `failureOf`), so the run's error
+  set stays inferred and nothing is `@errorCast` from `anyerror`. What an
+  interrupted source or ending returns is ignored. All reads of supervision
+  state take its mutex.
+- **"Done" is one question, asked after the fact.** It is aggregated per
   `branch`/`route` scope (`Arms`) and stops the source when it holds for the
-  whole pipe. `Supervision` takes its `Io` from the first worker, so `Io` may
-  be provided mid-pipe.
+  whole pipe. Ask `anyWants()` after dispatching an item, never sum it up
+  along the way: a queued sub-pipe can become done meanwhile. `Supervision`
+  takes its `Io` from the first worker, so `Io` may be provided mid-pipe.
 - **Members never run on the supervising task.** `system` and `merge` use
   `tasks.all`: `Io.concurrent`, fail fast, cancel the rest. Only an `Io` with
   no concurrency at all runs members one after another; running out part-way
   is `error.ConcurrencyUnavailable`. Do not use `Io.async` for a member: it
-  may run inline and block the supervisor. A failure and a "done" are separate
-  signals; never let one flag stand for both. A program without a queue stays
-  a plain loop on the caller's task.
+  may run inline and block the supervisor. Members share a `tasks.Watch`; a
+  member that knows the group has failed or is done says so there, typed, and
+  is not waited for (`merge` does at its push boundary). A failure and a
+  "done" are separate outcomes; never let one flag stand for both. A program
+  without a queue stays a plain loop on the caller's task.
 - **Lifecycle.** `init` in order, `start` in reverse, pushes, then on a normal
   end `finish` in order and `flush` in reverse; always `stop` in order, then
   `deinit` in reverse. A stage that runs a task joins it in `stop`, never in
@@ -97,8 +108,9 @@ to this file; edit `AGENTS.md`, not copies.
   are stored as one value. A stage that indexes into an array it owns cannot
   be kept in registers at all, so give such a buffer a stage of its own and
   keep counters in another (see `batch`).
-- `tools/same_code.zig` ignores value and block names, phi input order and
-  comparison polarity, nothing else. Do not widen it to make a fixture pass.
+- `tools/same_code.zig` ignores value and block names, phi input order, and
+  the polarity of a comparison that is only branched on; nothing else. It has
+  tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
 
 ## Diagnostics

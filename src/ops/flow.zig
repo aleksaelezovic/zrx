@@ -38,8 +38,9 @@ fn Queue(comptime capacity: usize) type {
                 buffer: [capacity]In,
                 channel: Io.Queue(In),
                 consumer: ?Io.Future(void),
-                /// The error that stopped the consumer; read only after it is joined.
-                failure: ?anyerror,
+                /// The error that stopped the consumer. Written by the
+                /// consumer before it reports or ends; read after that.
+                ended_with: ?anyerror,
                 supervision: ?core.Supervision,
                 /// The consumer has returned. Guarded by the supervision.
                 ended: bool,
@@ -51,7 +52,7 @@ fn Queue(comptime capacity: usize) type {
                     self.io = di.get(env, Io);
                     self.channel = .init(&self.buffer);
                     self.consumer = null;
-                    self.failure = null;
+                    self.ended_with = null;
                     self.supervision = if (comptime di.has(Env, core.Supervision)) di.get(env, core.Supervision) else null;
                     self.ended = false;
                 }
@@ -71,7 +72,7 @@ fn Queue(comptime capacity: usize) type {
                                 const count = self.channel.get(self.io, &ready, 1) catch break .drained;
                                 for (ready[0..count]) |item| {
                                     const flow = down.push(item) catch |err| {
-                                        self.failure = err;
+                                        self.ended_with = err;
                                         break :consuming .failed;
                                     };
                                     if (flow == .done) break :consuming .satisfied;
@@ -84,7 +85,7 @@ fn Queue(comptime capacity: usize) type {
                             if (self.supervision) |supervision| {
                                 switch (ending) {
                                     .drained => {},
-                                    .failed => supervision.fail(self.io, self.failure.?),
+                                    .failed => supervision.fail(self.io, self),
                                     .satisfied => supervision.satisfy(self.io),
                                 }
                                 supervision.workerEnded(self.io, &self.ended);
@@ -102,7 +103,6 @@ fn Queue(comptime capacity: usize) type {
                 }
 
                 pub fn finish(self: *Self, down: anytype) !void {
-                    const Failure = @typeInfo(@TypeOf(down.push(@as(In, undefined)))).error_union.error_set;
                     self.channel.close(self.io);
                     if (self.consumer) |*consumer| {
                         if (self.supervision) |supervision| {
@@ -114,13 +114,18 @@ fn Queue(comptime capacity: usize) type {
                         consumer.await(self.io);
                         self.consumer = null;
                     }
-                    if (self.failure) |err| {
-                        // `failure` only ever holds an error that `down.push` returned.
-                        // (`anyerror` has no list of names; it can hold anything.)
-                        const names = comptime @typeInfo(Failure).error_set.error_names;
-                        if (comptime names != null and names.?.len == 0) unreachable;
-                        return @as(Failure, @errorCast(err));
-                    }
+                    return self.failure(down);
+                }
+
+                /// The error the consumer ended with, if it failed: one that
+                /// `down.push` returned, so it is returned as such.
+                pub fn failure(self: *Self, down: anytype) !void {
+                    const Failure = @typeInfo(@TypeOf(down.push(@as(In, undefined)))).error_union.error_set;
+                    const err = self.ended_with orelse return;
+                    // (`anyerror` has no list of names; it can hold anything.)
+                    const names = comptime @typeInfo(Failure).error_set.error_names;
+                    if (comptime names != null and names.?.len == 0) unreachable;
+                    return @as(Failure, @errorCast(err));
                 }
 
                 /// After a failure the consumer may still be running handlers
@@ -210,17 +215,19 @@ fn Branch(comptime Ps: type) type {
                 }
 
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
-                    var wanted = false;
                     inline for (0..n) |i| {
                         if (self.arms.wants(i)) {
-                            if (try self.chains[i].push(item, Closed{}) == .done) {
-                                self.arms.finished(i);
-                            } else {
-                                wanted = true;
-                            }
+                            if (try self.chains[i].push(item, Closed{}) == .done) self.arms.finished(i);
                         }
                     }
-                    return if (wanted) .more else .done;
+                    // Asked after every sub-pipe has had the item, not summed
+                    // up along the way: a queued sub-pipe can become done
+                    // while a later one is still working on this item.
+                    return if (self.arms.anyWants()) .more else .done;
+                }
+
+                pub fn failureOf(self: *@This(), _: anytype, who: *const anyopaque) !void {
+                    inline for (0..n) |i| try self.chains[i].failureOf(Closed{}, who);
                 }
 
                 pub fn finish(self: *@This(), _: anytype) !void {
@@ -379,7 +386,7 @@ fn Route(comptime Cs: type) type {
                             if (at_end and self.route.downstream_done) return .done;
                             if (try self.down.push(item) == .done) {
                                 self.route.downstream_done = true;
-                                self.route.live = @splat(false);
+                                self.route.arms.finishAll();
                                 return .done;
                             }
                             return .more;
@@ -435,6 +442,12 @@ fn Route(comptime Cs: type) type {
 
                 pub fn flush(self: *Self) !void {
                     inline for (0..n) |i| try self.chains[n - 1 - i].flush();
+                }
+
+                pub fn failureOf(self: *Self, down: anytype, who: *const anyopaque) !void {
+                    // Only terminating cases can contain a worker.
+                    if (rejoins) return;
+                    inline for (0..n) |i| try self.chains[i].failureOf(self.tail(down, false), who);
                 }
 
                 pub fn stop(self: *Self) void {

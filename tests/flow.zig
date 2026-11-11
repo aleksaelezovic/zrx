@@ -545,3 +545,61 @@ fn evenOddThenIdle(clock: std.Io, flags: *Flags, out: anytype) !void {
     flags.woke_by_itself.store(true, .seq_cst);
     _ = try out.push(@as(u32, 3));
 }
+
+const Gate = struct { opened: std.Io.Event = .unset };
+
+/// A final value's handler that blocks, after saying it has started.
+fn announceThenBlock(clock: std.Io, gate: *Gate, flags: *Flags, _: u32) !void {
+    gate.opened.set(clock);
+    try clock.sleep(.fromSeconds(5), .awake);
+    flags.woke_by_itself.store(true, .seq_cst);
+}
+fn failOnceAnnounced(clock: std.Io, gate: *Gate, _: u32) !void {
+    try gate.opened.wait(clock);
+    return error.ConsumerBroke;
+}
+
+test "a failure while a final value's handler is blocked ends the run" {
+    // The source is finite and has ended. The fold's final value is being
+    // delivered, and its handler is waiting, when the queued sibling fails.
+    var flags: Flags = .{};
+    var gate: Gate = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ fold(@as(u32, 0), add), subscribe(announceThenBlock) }),
+        pipe(.{ queue(2), subscribe(failOnceAnnounced) }),
+    })});
+    const result = program(range(u32, 0, 2), work).run(.{ io, &flags, &gate });
+    try std.testing.expectError(error.ConsumerBroke, result);
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+/// The synchronous branch's handler: lets the queued branch finish with the
+/// same item first.
+fn afterTheQueuedBranch(clock: std.Io, gate: *Gate, value: u32) !void {
+    _ = value;
+    try gate.opened.wait(clock);
+    // The queued branch marks itself done just after its handler returns.
+    try clock.sleep(.fromMilliseconds(20), .awake);
+}
+fn openTheGate(clock: std.Io, gate: *Gate, _: u32) void {
+    gate.opened.set(clock);
+}
+/// Stops when told, and otherwise waits far longer than a test should take.
+fn pushThenIdleUnlessDone(clock: std.Io, flags: *Flags, out: anytype) !void {
+    if (try out.push(@as(u32, 1)) == .done) return;
+    try clock.sleep(.fromSeconds(5), .awake);
+    flags.woke_by_itself.store(true, .seq_cst);
+}
+
+test "a branch is done when its last sub-pipe is, whichever kind finished last" {
+    // The queued branch becomes done while the synchronous one is still
+    // working on the same item; then that one is done too.
+    var flags: Flags = .{};
+    var gate: Gate = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(2), take(1), subscribe(openTheGate) }),
+        pipe(.{ take(1), subscribe(afterTheQueuedBranch) }),
+    })});
+    try program(zrx.fromProducer(u32, pushThenIdleUnlessDone), work).run(.{ io, &flags, &gate });
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}

@@ -204,8 +204,11 @@ fn Merge(comptime Ss: type) type {
             if (comptime !di.has(Env, Io)) @compileError("merge: needs `std.Io` to run sources together; pass `io` to `run(.{ io, ... })`");
             const io = di.get(env, Io);
 
-            var turn: Turn = .{ .mutex = .init, .done = .init(false), .failed = false };
-            const Gate = Serialized(Item, @TypeOf(down));
+            // What a push into the pipe can fail with: the errors a source may
+            // report on the pipe's behalf.
+            const PushError = @typeInfo(@TypeOf(down.push(@as(Item, undefined)))).error_union.error_set;
+            const Gate = Serialized(Item, @TypeOf(down), PushError);
+            var turn: Gate.Turn = .{};
             const gate: Gate = .{ .io = io, .turn = &turn, .down = down };
 
             const list = comptime blk: {
@@ -215,36 +218,43 @@ fn Merge(comptime Ss: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .source = &self.sources[i], .env = env, .gate = gate };
-            // Once the pipe wants no more, a source still waiting for its own
-            // next item is cancelled rather than waited for. A failed push is
-            // not that: its error comes back as the failing source's result.
-            return tasks.all(io, group, &turn.done);
+            return tasks.all(io, group, &turn.watch);
         }
     };
 }
 
-const Turn = struct {
-    mutex: Io.Mutex,
-    /// The pipe wants no more: every source stops, and that is a success.
-    done: std.atomic.Value(bool),
-    /// A push failed: no source pushes again, and the run fails with that
-    /// error. Guarded by `mutex`.
-    failed: bool,
-};
-
-fn Serialized(comptime T: type, comptime Down: type) type {
+/// The `down` each merged source pushes into: one push at a time, and the
+/// place where the pipe's answer becomes the outcome of the whole merge.
+fn Serialized(comptime T: type, comptime Down: type, comptime PushError: type) type {
     return struct {
         io: Io,
         turn: *Turn,
         down: Down,
 
+        pub const Turn = struct {
+            mutex: Io.Mutex = .init,
+            /// The pipe is done or has failed: no source pushes again.
+            closed: bool = false,
+            watch: tasks.Watch(PushError) = .{},
+        };
+
         pub fn push(gate: @This(), item: T) !Flow {
             try gate.turn.mutex.lock(gate.io);
             defer gate.turn.mutex.unlock(gate.io);
-            if (gate.turn.failed or gate.turn.done.load(.acquire)) return .done;
-            errdefer gate.turn.failed = true;
-            if (try gate.down.push(item) == .done) {
-                gate.turn.done.store(true, .release);
+            if (gate.turn.closed) return .done;
+            const flow = gate.down.push(item) catch |err| {
+                // The merge has failed here and now, with this error. The
+                // other sources are cancelled without waiting for this one to
+                // return, and whatever it returns later changes nothing.
+                gate.turn.closed = true;
+                gate.turn.watch.fail(gate.io, err);
+                return err;
+            };
+            if (flow == .done) {
+                // Nothing more is wanted: sources still waiting for their own
+                // next item are cancelled rather than waited for.
+                gate.turn.closed = true;
+                gate.turn.watch.satisfy(gate.io);
                 return .done;
             }
             return .more;

@@ -314,3 +314,38 @@ test "running out of concurrency part-way is an error, not a member run inline" 
     try std.testing.expectError(error.ConcurrencyUnavailable, result);
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
+
+/// A source that, when its push fails, does cancellable clean-up before
+/// returning: far longer than a test should take.
+fn pushThenCleanUpSlowly(clock: std.Io, idle: *Idle, out: anytype) !void {
+    _ = out.push(@as(u32, 2)) catch |err| {
+        clock.sleep(.fromSeconds(5), .awake) catch return err;
+        idle.woke_by_itself.store(true, .seq_cst);
+        return err;
+    };
+}
+
+test "a failed push under merge ends the run without waiting for its source to return" {
+    var seen: Numbers = .{};
+    var idle: Idle = .{};
+    const sources = merge(.{ fromProducer(u32, pushThenCleanUpSlowly), fromProducer(u32, idleThenPush) });
+    const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen, &idle });
+    try std.testing.expectError(error.Two, result);
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+/// Swallows the failure of its push: what it returns says nothing about it.
+fn pushAndShrug(out: anytype) void {
+    _ = out.push(@as(u32, 2)) catch {};
+}
+
+test "the error of a failed push is the result even when its source hides it" {
+    var seen: Numbers = .{};
+    const sources = merge(.{ fromProducer(u32, pushAndShrug), fromValue(@as(u32, 9)) });
+    for (0..50) |_| {
+        const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen });
+        // Either the 9 was pushed first and the 2 then failed, or the 2 failed
+        // first: the run fails with that error both ways.
+        try std.testing.expectError(error.Two, result);
+    }
+}

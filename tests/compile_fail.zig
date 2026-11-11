@@ -36,6 +36,7 @@ pub const cases = .{
     .{ "route_predicate", "when: predicate must return `bool` or `E!bool`, got `u32`" },
     .{ "route_queue_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a queue; put the queue after the route" },
     .{ "scan_reducer", "scan: reducer must return `u64` or `E!u64`, got `u32`" },
+    .{ "supervision_failure_contract", "Supervision.fail: `supervision_failure_contract.Silent.Stage(struct { Io, pipe.Supervision },u32)` reports a worker failure, so it must declare `pub fn failure(self: *Stage, down: anytype) !void` returning the error its worker ended with" },
     .{ "system_not_program", "system: element 0 is not a program (got `pipe.Pipe(struct { ops.sink.Subscribe((function 'ignore')) })`); build one with program(source, pipe(...))" },
     .{ "system_without_io", "system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`" },
     .{ "unterminated", "program: the pipe must terminate, but it still emits `u32`; end it with subscribe(...), drain() or another terminal operator" },

@@ -105,7 +105,7 @@ rather than run a program where it could block the others.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io` at `run`. Once the pipe is done, sources still waiting are cancelled; a failed push fails the run. Sources are started like the programs of a `system`. |
+| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io` at `run`. Once the pipe is done, sources still waiting are cancelled. A push that fails ends the merge with that error at once, whatever its source goes on to do or return. Sources are started like the programs of a `system`. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -259,8 +259,8 @@ when all of them are done, and the first failure ends it:
 - **A failure behind a queue is the result of the run.** It cancels the
   source at once, even one that is waiting for its next item and not pushing,
   and whatever the interrupted source then returns is ignored. If the source
-  had already ended and the run is waiting for another queue to drain, that
-  wait ends too.
+  had already ended, it cancels the end of the stream instead: a wait for
+  another queue to drain, or a final value's handler that is blocked.
 - **Nothing finishes normally after a failure.** Once a worker has failed, no
   further stage emits its final value or flushes.
 - **A pipe that is done stops its source** the same way (`take` after a
@@ -275,6 +275,11 @@ when all of them are done, and the first failure ends it:
 
 `std.Io` is needed where a queue is, not at `run`: `provide(io)` before the
 queue is enough.
+
+With a queue, your handlers do not run on the task that called `run`: the
+source and the stages before the first queue run on one task, each queue's
+far side on another, and the end of the stream on a third. The caller only
+waits, so that it can always cancel.
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:
@@ -381,7 +386,10 @@ const Counted = struct {
 ```
 
 A stage may also declare `start`, `finish`, `flush`, `stop`, `deinit` and,
-with `Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
+with `Provides`, `provide`. A stage that runs a task of its own takes part in
+the run's supervision (`zrx.operator.Supervision`): it reports when its worker
+fails and returns that error from `failure(self, down) !void`, so the errors a
+run can end with are known to the compiler; [`src/pipe.zig`](../src/pipe.zig) states the contract and
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
 

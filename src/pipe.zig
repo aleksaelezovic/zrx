@@ -18,6 +18,7 @@
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
 //!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
 //!     pub fn stop(self: *Stage) void                     // optional: cancel and join any task this stage runs
+//!     pub fn failure(self: *Stage, down: anytype) !void  // with a worker: the error it ended with, if any
 //!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
 //!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
@@ -76,12 +77,16 @@ pub const Supervision = struct {
         /// The `Io` of the first worker to start. The run waits with it, so
         /// that `Io` only has to be provided where a worker needs it.
         io: ?Io = null,
-        /// The first failure of any worker. It is what the run returns.
-        failure: ?anyerror = null,
+        /// The first stage whose worker failed. The run returns that
+        /// stage's `failure`.
+        failed_stage: ?*const anyopaque = null,
         has_failed: std.atomic.Value(bool) = .init(false),
         /// Nothing in the pipe wants another item.
         satisfied: bool = false,
-        source_ended: bool = false,
+        /// The task feeding the pipe from the source has returned.
+        feeding_ended: bool = false,
+        /// The task finishing and flushing the pipe has returned.
+        ending_ended: bool = false,
 
         fn update(signal: *Signal, io: Io, comptime change: fn (*Signal) void) void {
             signal.mutex.lockUncancelable(io);
@@ -105,17 +110,36 @@ pub const Supervision = struct {
         if (signal.io == null) signal.io = io;
     }
 
-    /// A worker's side of the pipe failed with `err`: the run is over, and
-    /// unless another worker failed first, `err` is its result.
-    pub fn fail(supervision: Supervision, io: Io, err: anyerror) void {
+    /// The worker of `stage` (a pointer to it) failed: the run is over, and
+    /// unless another worker failed first, its result is what
+    /// `stage.failure(down)` returns.
+    ///
+    /// The error itself is not passed here. It is returned by the stage, from
+    /// a function of the stage's own type, so the compiler knows which errors
+    /// a run can end with; a stage that reports a failure it cannot return
+    /// does not compile.
+    pub fn fail(supervision: Supervision, io: Io, stage: anytype) void {
+        const Stage = @typeInfo(@TypeOf(stage)).pointer.child;
+        if (comptime !@hasDecl(Stage, "failure")) @compileError(
+            "Supervision.fail: `" ++ @typeName(Stage) ++ "` reports a worker failure, so it must declare " ++
+                "`pub fn failure(self: *Stage, down: anytype) !void` returning the error its worker ended with",
+        );
         const signal = supervision.signal;
         signal.mutex.lockUncancelable(io);
         defer signal.mutex.unlock(io);
-        if (signal.failure == null) {
-            signal.failure = err;
+        if (signal.failed_stage == null) {
+            signal.failed_stage = @ptrCast(stage);
             signal.has_failed.store(true, .release);
         }
         signal.changed.broadcast(io);
+    }
+
+    /// The stage whose worker failed first, if any has.
+    pub fn failedStage(supervision: Supervision, io: Io) ?*const anyopaque {
+        const signal = supervision.signal;
+        signal.mutex.lockUncancelable(io);
+        defer signal.mutex.unlock(io);
+        return signal.failed_stage;
     }
 
     /// A worker's side of the pipe wants no more items.
@@ -154,7 +178,7 @@ pub const Supervision = struct {
         const signal = supervision.signal;
         signal.mutex.lockUncancelable(io);
         defer signal.mutex.unlock(io);
-        while (!ended.* and signal.failure == null) try signal.changed.wait(io, &signal.mutex);
+        while (!ended.* and signal.failed_stage == null) try signal.changed.wait(io, &signal.mutex);
         return ended.*;
     }
 };
@@ -195,6 +219,11 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
 
         pub fn finished(self: *Self, comptime i: usize) void {
             if (supervised) self.done[i].store(true, .seq_cst) else self.live[i] = false;
+        }
+
+        /// The pipe after a rejoining route is done: no sub-pipe is handed another item.
+        pub fn finishAll(self: *Self) void {
+            inline for (0..n) |i| self.finished(i);
         }
 
         pub fn anyWants(self: *const Self) bool {
@@ -463,6 +492,20 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 }
             }
 
+            /// Returns the failure of the stage `who` points to, which is one
+            /// of these stages or lies within one of them. Each stage returns
+            /// its own error from its own `failure`, so the error set of a run
+            /// is inferred like any other and nothing is cast.
+            pub fn failureOf(refs: Refs, tail: anytype, who: *const anyopaque) !void {
+                inline for (0..n) |i| {
+                    const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                    if (@hasDecl(stages[i], "failure")) {
+                        if (@as(*const anyopaque, @ptrCast(refs[i])) == who) return refs[i].failure(next);
+                    }
+                    if (@hasDecl(stages[i], "failureOf")) try refs[i].failureOf(next, who);
+                }
+            }
+
             /// Before any `deinit`: every task a stage runs is cancelled and joined.
             pub fn stop(refs: Refs) void {
                 inline for (0..n) |i| {
@@ -527,6 +570,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         pub fn flush(self: *Self) !void {
             return at.flush(self.refsOf());
+        }
+
+        pub fn failureOf(self: *Self, tail: anytype, who: *const anyopaque) !void {
+            return at.failureOf(self.refsOf(), tail, who);
         }
 
         pub fn stop(self: *Self) void {

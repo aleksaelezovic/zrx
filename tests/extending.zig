@@ -186,3 +186,73 @@ test "a custom composite handler forwards dependencies" {
     try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), subscribe(record) })).run(.{ &seen, Limit{ .max = 3 } });
     try seen.expect(&.{ 0, 1, 2 });
 }
+
+// --- a stage that reports a failure of its own -------------------------------------
+
+/// Trips on a value it does not like, the way a stage with a worker reports
+/// that its worker failed. It takes part in the run's supervision, and what it
+/// reports is what its `failure` returns.
+const Tripwire = struct {
+    limit: u32,
+
+    pub const zrx_operator = {};
+    pub const name = "tripwire";
+
+    pub fn Out(comptime Env: type, comptime In: type) type {
+        if (!zrx.di.has(Env, std.Io)) @compileError("tripwire: needs `std.Io`");
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            io: std.Io,
+            limit: u32,
+            tripped: bool,
+            supervision: zrx.operator.Supervision,
+
+            /// Makes the program supervise this run.
+            pub const zrx_boundary = {};
+
+            pub fn init(self: *@This(), op: *const Tripwire, env: Env) !void {
+                self.* = .{
+                    .io = zrx.di.get(env, std.Io),
+                    .limit = op.limit,
+                    .tripped = false,
+                    .supervision = zrx.di.get(env, zrx.operator.Supervision),
+                };
+            }
+
+            pub fn start(self: *@This(), _: anytype) !void {
+                self.supervision.adopt(self.io);
+            }
+
+            pub fn push(self: *@This(), item: In, down: anytype) !zrx.Flow {
+                if (item > self.limit) {
+                    self.tripped = true;
+                    self.supervision.fail(self.io, self);
+                    return .done;
+                }
+                return down.push(item);
+            }
+
+            pub fn failure(self: *@This(), _: anytype) error{Tripped}!void {
+                if (self.tripped) return error.Tripped;
+            }
+        };
+    }
+};
+
+test "a custom stage's reported failure is the run's result, with its own error set" {
+    var seen: Numbers = .{};
+    const guarded = program(range(u32, 0, 10), pipe(.{ Tripwire{ .limit = 2 }, subscribe(record) }));
+    try std.testing.expectError(error.Tripped, guarded.run(.{ std.testing.io, &seen }));
+    try seen.expect(&.{ 0, 1, 2 });
+
+    const Result = @TypeOf(guarded.run(.{ std.testing.io, &seen }));
+    const names = comptime @typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names.?;
+    comptime var found = false;
+    inline for (names) |error_name| {
+        if (comptime std.mem.eql(u8, error_name, "Tripped")) found = true;
+    }
+    try std.testing.expect(found);
+}
