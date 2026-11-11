@@ -19,6 +19,7 @@ pub const cases = .{
     .{ "not_handler", "map: expected a handler (a comptime-known function), got `comptime_int`" },
     .{ "not_operator", "pipe: element 1 is not an operator (got `fn (u32) u32`); a pipe holds operators such as map(...), filter(...) or another pipe" },
     .{ "predicates_result", "all: every predicate must return `bool` or `E!bool`, got `u32`" },
+    .{ "or_else_fallback_errors", "orElse: the fallback takes `error{Odd}` but the handler can fail with `error{Odd,TooBig}`" },
     .{ "or_else_infallible", "orElse: the handler returns `u32`, which cannot fail; there is nothing to fall back from" },
     .{ "print_missing", "print: needs dependency `io.Stdout`, which is not provided here; provided: (nothing)" },
     .{ "print_role", "print: `u32` is not a writer role; use `*std.Io.Writer` or a struct with a `writer: *std.Io.Writer` field" },

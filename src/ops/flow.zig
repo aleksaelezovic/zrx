@@ -362,21 +362,24 @@ fn Route(comptime Cs: type) type {
 
                 /// The `down` given to a rejoining case: forwards and remembers `.done`.
                 ///
-                /// While items flow, a `.done` from the pipe after the route
-                /// goes straight back to the source, which stops. What is
-                /// left is what the cases emit as the stream ends: with
-                /// `at_end`, a case's final value is not forwarded once that
-                /// pipe is done. (Checking on every push as well would cost
-                /// nothing per item but makes the optimizer peel the loop.)
+                /// Once the pipe after the route is done, nothing is forwarded
+                /// to it again, whenever the answer came (a case may emit as
+                /// the run starts, as items flow, or as the stream ends):
+                /// - every case is marked as wanting no more, which `push`
+                ///   already checks before handing a case an item;
+                /// - with `at_end`, what a case emits as the stream ends is
+                ///   dropped. (Checking the flag itself on every push would
+                ///   cost nothing per item but makes the optimizer peel the loop.)
                 fn Rejoin(comptime Down: type, comptime at_end: bool) type {
                     return struct {
                         down: Down,
-                        done: *bool,
+                        route: *Self,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            if (at_end and self.done.*) return .done;
+                            if (at_end and self.route.downstream_done) return .done;
                             if (try self.down.push(item) == .done) {
-                                self.done.* = true;
+                                self.route.downstream_done = true;
+                                self.route.live = @splat(false);
                                 return .done;
                             }
                             return .more;
@@ -389,7 +392,7 @@ fn Route(comptime Cs: type) type {
                 }
 
                 fn tail(self: *Self, down: anytype, comptime at_end: bool) Tail(@TypeOf(down), at_end) {
-                    return if (rejoins) .{ .down = down, .done = &self.downstream_done } else .{};
+                    return if (rejoins) .{ .down = down, .route = self } else .{};
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {
