@@ -220,7 +220,8 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
 // ---------------------------------------------------------------------------
 
 /// The lines of the reader keyed by `Role`, without their `\n`. A line is only
-/// valid until the next one is read, and must fit the reader's buffer.
+/// valid until the next one is read. A line and its `\n` must fit the reader's
+/// buffer, so a buffer of `n + 1` bytes reads lines of up to `n`.
 pub fn lines(comptime Role: type) Lines(Role) {
     return .{};
 }
@@ -244,19 +245,22 @@ fn pushLines(reader: *Io.Reader, down: anytype) !void {
     }
 }
 
-/// The lines of standard input; a line may be at most `buffer_size` bytes. Needs `std.Io`.
-pub fn stdinLines(comptime buffer_size: usize) StdinLines(buffer_size) {
+/// The lines of standard input. A line may be at most `max_line_bytes` long,
+/// not counting its `\n`; a longer one fails the run with
+/// `error.StreamTooLong`. Needs `std.Io`.
+pub fn stdinLines(comptime max_line_bytes: usize) StdinLines(max_line_bytes) {
     return .{};
 }
 
-fn StdinLines(comptime buffer_size: usize) type {
+fn StdinLines(comptime max_line_bytes: usize) type {
     return struct {
         pub const zrx_source = {};
         pub const Item = []const u8;
 
         pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
             comptime expectProvided("stdinLines", @TypeOf(env), Io);
-            var buffer: [buffer_size]u8 = undefined;
+            // Room for the longest line and the newline that ends it.
+            var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = Io.File.stdin().readerStreaming(di.get(env, Io), &buffer);
             return pushLines(&reader.interface, down);
         }
@@ -264,12 +268,13 @@ fn StdinLines(comptime buffer_size: usize) type {
 }
 
 /// The lines of the file at `path`, opened when the program runs and closed
-/// when it ends; a line may be at most `buffer_size` bytes. Needs `std.Io`.
-pub fn fileLines(path: []const u8, comptime buffer_size: usize) FileLines(buffer_size) {
+/// when it ends. A line may be at most `max_line_bytes` long, not counting
+/// its `\n`; a longer one fails the run with `error.StreamTooLong`. Needs `std.Io`.
+pub fn fileLines(path: []const u8, comptime max_line_bytes: usize) FileLines(max_line_bytes) {
     return .{ .path = path };
 }
 
-fn FileLines(comptime buffer_size: usize) type {
+fn FileLines(comptime max_line_bytes: usize) type {
     return struct {
         path: []const u8,
 
@@ -281,7 +286,8 @@ fn FileLines(comptime buffer_size: usize) type {
             const io = di.get(env, Io);
             const file = try Io.Dir.cwd().openFile(io, self.path, .{});
             defer file.close(io);
-            var buffer: [buffer_size]u8 = undefined;
+            // Room for the longest line and the newline that ends it.
+            var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = file.reader(io, &buffer);
             return pushLines(&reader.interface, down);
         }
