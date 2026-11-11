@@ -91,6 +91,11 @@ to this file; edit `AGENTS.md`, not copies.
   (and the guide's example) honest.
 - Examples are small, use function aliases at the top (`const map = zrx.map;`),
   and have their exact output asserted in `build.zig`.
+- In examples, apps and documentation, write a pipe with one operator per line
+  (end the tuple with a trailing comma so `zig fmt` keeps it that way), and do
+  the same for the sub-pipes of `branch` and the cases of `route`. A pipe with
+  a single operator stays on one line. Name sub-pipes rather than nesting
+  multi-line pipes deeply. Tests may keep short pipes on one line.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on

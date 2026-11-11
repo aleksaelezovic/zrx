@@ -21,27 +21,30 @@ fn count(lines: usize, _: []const u8) usize {
     return lines + 1;
 }
 
-pub fn copy(input: []const u8, output: []const u8) @TypeOf(program(fileLines(input, 4096), pipe(.{
-    filter(isNotEmpty),
-    branch(.{
-        pipe(.{ createFile(Copy, output, 4096), print(Copy, "{s}\n") }),
-        pipe(.{ fold(0, count), stdout(64), print(zrx.Stdout, "copied {d} lines\n") }),
-    }),
-}))) {
-    return program(fileLines(input, 4096), pipe(.{
-        filter(isNotEmpty),
-        branch(.{
-            pipe(.{ createFile(Copy, output, 4096), print(Copy, "{s}\n") }),
-            pipe(.{ fold(0, count), stdout(64), print(zrx.Stdout, "copied {d} lines\n") }),
-        }),
-    }));
-}
-
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3) {
         std.debug.print("usage: copy-lines INPUT OUTPUT\n", .{});
         std.process.exit(2);
     }
-    try copy(args[1], args[2]).run(.{init.io});
+    const input = args[1];
+    const output = args[2];
+
+    const write = pipe(.{
+        createFile(Copy, output, 4096),
+        print(Copy, "{s}\n"),
+    });
+    const report = pipe(.{
+        fold(0, count),
+        stdout(64),
+        print(zrx.Stdout, "copied {d} lines\n"),
+    });
+    const copy = program(fileLines(input, 4096), pipe(.{
+        filter(isNotEmpty),
+        branch(.{
+            write,
+            report,
+        }),
+    }));
+    try copy.run(.{init.io});
 }

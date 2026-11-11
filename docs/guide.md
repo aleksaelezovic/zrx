@@ -50,8 +50,16 @@ Rules:
 it, reuse it, put it inside another pipe.
 
 ```zig
-const parse = pipe(.{ map(trim), filter(isNotEmpty), map(toNumber) });
-const total = pipe(.{ parse, fold(0, add), print(Stdout, "{d}\n") });
+const parse = pipe(.{
+    map(trim),
+    filter(isNotEmpty),
+    map(toNumber),
+});
+const total = pipe(.{
+    parse,
+    fold(0, add),
+    print(Stdout, "{d}\n"),
+});
 ```
 
 Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
@@ -197,7 +205,12 @@ returning an error fails the run.
 ```zig
 fn reject(log: Log, err: ParseError, line: []const u8) void { ... }
 
-pipe(.{ recover(reject), map(parse), map(validate), subscribe(save) })
+pipe(.{
+    recover(reject),
+    map(parse),
+    map(validate),
+    subscribe(save),
+})
 ```
 
 - The handler's error parameter selects what it handles: an error set handles
@@ -230,8 +243,16 @@ concurrent by starting with a queue:
 
 ```zig
 branch(.{
-    pipe(.{ queue(64), map(slowWrite), drain() }),
-    pipe(.{ queue(64), batch(10), subscribe(report) }),
+    pipe(.{
+        queue(64),
+        map(slowWrite),
+        drain(),
+    }),
+    pipe(.{
+        queue(64),
+        batch(10),
+        subscribe(report),
+    }),
 })
 ```
 

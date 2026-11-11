@@ -35,6 +35,10 @@ pub const records = pipe(.{
 
 pub fn main(init: std.process.Init) !void {
     const input = [_][]const u8{ "21", "", "4", "four" };
-    const app = program(fromSlice(&input), pipe(.{ stdout(256), stderr(256), records }));
+    const app = program(fromSlice(&input), pipe(.{
+        stdout(256),
+        stderr(256),
+        records,
+    }));
     try app.run(.{init.io});
 }

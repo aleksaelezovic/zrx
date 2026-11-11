@@ -50,7 +50,10 @@ const revenue = pipe(.{
 });
 
 /// Every order as it arrives.
-const journal = pipe(.{ map(idAndCents), print(zrx.Stdout, "order {d}: {d}\n") });
+const journal = pipe(.{
+    map(idAndCents),
+    print(zrx.Stdout, "order {d}: {d}\n"),
+});
 
 pub fn main(init: std.process.Init) !void {
     const orders = [_]Order{
@@ -58,6 +61,12 @@ pub fn main(init: std.process.Init) !void {
         .{ .id = 2, .kind = .sale, .cents = 25_000 },
         .{ .id = 3, .kind = .refund, .cents = 4_000 },
     };
-    const app = program(fromSlice(&orders), pipe(.{ stdout(256), branch(.{ journal, revenue }) }));
+    const app = program(fromSlice(&orders), pipe(.{
+        stdout(256),
+        branch(.{
+            journal,
+            revenue,
+        }),
+    }));
     try app.run(.{init.io});
 }
