@@ -374,7 +374,16 @@ fn Route(comptime Cs: type) type {
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
                     inline for (0..n) |i| {
-                        const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
+                        // A predicate must not fail the run over an item nobody
+                        // takes any more: if the route is done, that is the
+                        // answer. (Asking that before every predicate instead
+                        // would be the obvious way, but a check ahead of the
+                        // work makes the optimizer peel the loop; this one
+                        // sits on the failure path only.)
+                        const taken = if (cases[i].is_otherwise) true else lift(self.tests[i].call(.{item})) catch |err| {
+                            if (self.verdict() == .done) return .done;
+                            return err;
+                        };
                         if (taken) {
                             if (self.live[i]) {
                                 if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.live[i] = false;
