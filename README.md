@@ -59,7 +59,8 @@ stream, an operator after a terminal one, a pipe that never ends.
 
 Read the **[guide](docs/guide.md)** for every operator, the error and
 concurrency model, and how to write operators of your own. The
-[examples](examples) are small and each is run and checked by the build.
+[examples](examples) are small and each is run and checked by the build;
+[examples/apps](examples/apps/README.md) holds a complete application.
 
 ## Zero overhead, checked
 

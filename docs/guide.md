@@ -394,5 +394,7 @@ Two things make it work, and are worth knowing when writing an operator:
 ## Not here yet
 
 Present in the previous implementation and not ported: HTTP serving, signals
-(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and the
-standalone example applications.
+(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of
+the three standalone example applications. The
+[record processor](../examples/apps/record-processor/README.md) is ported, and
+its README lists what the port needed that the library does not have yet.

@@ -104,6 +104,9 @@ to this file; edit `AGENTS.md`, not copies.
   the same for the sub-pipes of `branch` and the cases of `route`. A pipe with
   a single operator stays on one line. Name sub-pipes rather than nesting
   multi-line pipes deeply. Tests may keep short pipes on one line.
+- `examples/apps/` holds independent projects that depend on zrx by path and
+  have their own CI job; see `examples/apps/README.md`. A gap found while
+  writing an app is recorded in that app's README, not fixed in passing.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
