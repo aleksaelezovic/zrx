@@ -429,3 +429,25 @@ pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writ
 export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
     return printed(exported_with_zrx, ptr[0..len], writer);
 }
+
+// --- orElse -------------------------------------------------------------------------------------
+
+fn halved(_: error{TooSmall}, value: u32) u32 {
+    return value / 2;
+}
+
+/// Small values count for half instead of being dropped.
+pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(zrx.orElse(checked, halved)), fold(@as(u64, 0), add), subscribe(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| sum +%= if (value < 10) value / 2 else value;
+        out.* = sum;
+    }
+}
+
+export fn same_or_else(ptr: [*]const u32, len: usize, out: *u64) void {
+    fellBack(exported_with_zrx, ptr[0..len], out);
+}

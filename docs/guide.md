@@ -181,6 +181,7 @@ they are built from.
 |---|---|
 | `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
+| `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
 | `eq(v)`, `ne(v)`, `lt(v)`, `le(v)`, `gt(v)`, `ge(v)` | Comparison with a comptime value. |
@@ -197,7 +198,11 @@ after every resource has been released. `run`'s error set is inferred from your
 handlers and the operators you used; it is never `anyerror`, and a program
 whose handlers cannot fail has an empty one.
 
-To handle errors per item, put `recover(handler)` before the operators that may
+There are two ways to handle an error instead. To keep the item as a value of
+your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
+`rejected(deps..., err, item)` when `parse` fails and passes its result on.
+
+To drop the item, put `recover(handler)` before the operators that may
 fail. When one of them fails for an item, the handler receives the error and
 the item as it was at the `recover`. Returning normally skips the item;
 returning an error fails the run.
@@ -276,7 +281,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 |---|---|
 | `print(Role, "fmt")` | Terminal. Formats every item; a tuple item supplies several arguments. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
-| `createFile(Role, path, n)` | Creates the file and provides a writer to it as `Role`. |
+| `createFile(Role, path, n, .{})` | Creates the file and provides a writer to it as `Role`; `.{ .exclusive = true }` refuses to replace an existing one. |
 | `lines(Role)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes. |
 
@@ -375,7 +380,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Eleven are `same`; `take`, `batch`
+Every synchronous operator has a fixture. Twelve are `same`; `take`, `batch`
 and the handler combinators are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there

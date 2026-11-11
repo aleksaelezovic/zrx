@@ -115,6 +115,55 @@ pub fn compose(comptime handlers: anytype) type {
     };
 }
 
+/// `handler`, with a failure turned into a value: when `handler` returns an
+/// error, the result is `fallback(deps..., err, item)` instead. Where `recover`
+/// skips an item that failed, this keeps it, as whatever the fallback makes.
+pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
+    return struct {
+        pub const zrx_handler = {};
+
+        pub fn requires(comptime arity: usize) []const type {
+            return di.merge(di.requires("orElse", handler, arity), di.requires("orElse", fallback, arity + 1));
+        }
+
+        pub fn call(env: anytype, args: anytype) Fallen(di.types(@TypeOf(args))) {
+            return di.invoke(handler, env, args) catch |err| {
+                var with_error: @Tuple(WithError(di.types(@TypeOf(args)))) = undefined;
+                with_error[0] = err;
+                inline for (0..args.len) |i| with_error[i + 1] = args[i];
+                return di.invoke(fallback, env, with_error);
+            };
+        }
+
+        fn Failure(comptime Args: []const type) type {
+            const R = di.Result("orElse", handler, Args);
+            if (!Fallible(R)) @compileError("orElse: the handler returns `" ++ @typeName(R) ++ "`, which cannot fail; there is nothing to fall back from");
+            return @typeInfo(R).error_union.error_set;
+        }
+
+        /// The fallback's data: the error, then the handler's own data.
+        fn WithError(comptime Args: []const type) []const type {
+            return &[_]type{Failure(Args)} ++ Args;
+        }
+
+        /// What the fallback returns, which must be what the handler would have.
+        fn Fallen(comptime Args: []const type) type {
+            @setEvalBranchQuota(di.quota);
+            const Wanted = di.Payload(di.Result("orElse", handler, Args));
+            if (di.Param(fallback, Args.len + 1, 0)) |Takes| {
+                if (!di.accepts(Takes, Failure(Args))) @compileError(
+                    "orElse: the fallback takes `" ++ @typeName(Takes) ++ "` but the handler can fail with `" ++ @typeName(Failure(Args)) ++ "`",
+                );
+            }
+            const F = di.Result("orElse", fallback, WithError(Args));
+            if (di.Payload(F) != Wanted) @compileError(
+                "orElse: the fallback must return `" ++ @typeName(Wanted) ++ "` like the handler, got `" ++ @typeName(F) ++ "`",
+            );
+            return F;
+        }
+    };
+}
+
 /// Projects a struct item to one of its fields: `map(field(.price))`.
 pub fn field(comptime name: @EnumLiteral()) type {
     return struct {

@@ -155,3 +155,13 @@ test "printed" {
     var without: std.Io.Writer = .fixed(&small_without);
     try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
 }
+
+test "fellBack" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.fellBack(true, items, &with);
+        cases.fellBack(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}

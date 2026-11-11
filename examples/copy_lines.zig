@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     const output = args[2];
 
     const write = pipe(.{
-        createFile(Copy, output, 4096),
+        createFile(Copy, output, 4096, .{}),
         print(Copy, "{s}\n"),
     });
     const report = pipe(.{

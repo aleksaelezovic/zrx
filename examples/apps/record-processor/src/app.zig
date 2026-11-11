@@ -33,7 +33,7 @@ fn reportInvalid(io: Io) !void {
     try writer.interface.flush();
 }
 
-/// Opens the input and creates the output `config` names, then processes.
+/// Opens the input `config` names and processes it into a new output file.
 /// The output is created exclusively: an existing file is never overwritten.
 pub fn process(io: Io, config: commands.Config, rules: records.Rules) !summaries.Summary {
     // A line of the maximum length and its LF must fit.
@@ -42,25 +42,17 @@ pub fn process(io: Io, config: commands.Config, rules: records.Rules) !summaries
     defer if (!config.readsStdin()) input_file.close(io);
     var input = input_file.readerStreaming(io, &input_buffer);
 
-    const output_file = try Io.Dir.cwd().createFile(io, config.output, .{ .exclusive = true });
-    defer output_file.close(io);
-    var output_buffer: [4096]u8 = undefined;
-    var output = output_file.writer(io, &output_buffer);
-    // A successful run has already flushed (and checked it). After a failure
-    // this leaves whole records in the file rather than a cut-off buffer.
-    defer output.interface.flush() catch {};
-
     var summary: summaries.Summary = .{};
     const production = zrx.program(zrx.lines(composition.Input), pipe(.{
         zrx.stdout(256),
         zrx.stderr(1024),
+        zrx.createFile(composition.Accepted, config.output, 4096, .{ .exclusive = true }),
         composition.records_pipe,
     }));
     try production.run(.{
         io,
         rules,
         composition.Input{ .reader = &input.interface },
-        composition.Accepted{ .writer = &output.interface },
         &summary,
     });
     return summary;

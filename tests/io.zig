@@ -91,13 +91,33 @@ test "createFile and fileLines round-trip through the file system" {
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines.txt", .{tmp.sub_path});
 
     const words = [_][]const u8{ "red", "green", "blue" };
-    try program(fromSlice(&words), pipe(.{ createFile(Report, path, 16), print(Report, "{s}\n") })).run(.{io});
+    try program(fromSlice(&words), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     var scratch: [32]u8 = undefined;
     try program(fileLines(path, 64), pipe(.{ map(shout), print(Log, "{s},") })).run(.{ io, &scratch, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("RED,GREEN,BLUE,", writer.buffered());
+}
+
+test "createFile replaces an existing file unless asked to be exclusive" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const first = [_][]const u8{ "old", "old" };
+    const second = [_][]const u8{"new"};
+    const third = [_][]const u8{"never written"};
+
+    try program(fromSlice(&first), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
+    try program(fromSlice(&second), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
+    const exclusive = program(fromSlice(&third), pipe(.{ createFile(Report, path, 16, .{ .exclusive = true }), print(Report, "{s}\n") }));
+    try std.testing.expectError(error.PathAlreadyExists, exclusive.run(.{io}));
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(path, 64), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("new,", writer.buffered());
 }
 
 test "a missing file fails the run before any item" {

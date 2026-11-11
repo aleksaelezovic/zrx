@@ -70,8 +70,8 @@ and a push is a chain of direct calls the optimizer flattens. `zig build
 zero-overhead` compiles each fixture in
 [`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
 as a hand-written loop, and compares the optimized LLVM IR function by
-function. The fixtures cover every synchronous operator. Eleven of the
-fourteen are the same instructions; the other three differ only in loop shape
+function. The fixtures cover every synchronous operator. Twelve of the
+fifteen are the same instructions; the other three differ only in loop shape
 and are required to be free of calls and extra memory traffic.
 
 `queue` is the one operator that costs something by design: it is a real

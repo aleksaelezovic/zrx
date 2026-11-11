@@ -9,7 +9,6 @@ const zrx = @import("zrx");
 const records = @import("domain/records.zig");
 const validation = @import("domain/validation.zig");
 const summaries = @import("domain/summary.zig");
-const orElse = @import("handlers.zig").orElse;
 
 const pipe = zrx.pipe;
 const map = zrx.map;
@@ -20,6 +19,7 @@ const fold = zrx.fold;
 const branch = zrx.branch;
 const print = zrx.print;
 const compose = zrx.compose;
+const orElse = zrx.orElse;
 
 const Numbered = records.Numbered;
 const Outcome = records.Outcome;
@@ -34,6 +34,11 @@ pub const Diagnostics = zrx.Stderr;
 /// Where the summary goes.
 pub const Console = zrx.Stdout;
 
+/// A line that breaks a rule is still a record: a rejected one.
+fn rejected(reason: records.ValidationError, _: []const u8) Outcome {
+    return .reject(reason);
+}
+
 /// The schema, stage by stage; the first rule a line breaks becomes its outcome.
 const validated = orElse(compose(.{
     validation.parseFields,
@@ -41,7 +46,7 @@ const validated = orElse(compose(.{
     validation.normalizeName,
     validation.validateAmount,
     Outcome.accept,
-}), Outcome.reject);
+}), rejected);
 
 /// Record output reaches its destinations before a summary claims success.
 fn flushRecords(accepted: Accepted, diagnostics: Diagnostics, _: Summary) !void {
