@@ -374,16 +374,18 @@ fn Route(comptime Cs: type) type {
                 /// the run starts, as items flow, or as the stream ends):
                 /// - every case is marked as wanting no more, which `push`
                 ///   already checks before handing a case an item;
-                /// - with `at_end`, what a case emits as the stream ends is
-                ///   dropped. (Checking the flag itself on every push would
+                /// - with `guarded`, an emission is dropped: that is how cases
+                ///   are started and finished, where each one still runs but
+                ///   what it emits must not get past a pipe that is done.
+                ///   (Checking the flag itself on every push as well would
                 ///   cost nothing per item but makes the optimizer peel the loop.)
-                fn Rejoin(comptime Down: type, comptime at_end: bool) type {
+                fn Rejoin(comptime Down: type, comptime guarded: bool) type {
                     return struct {
                         down: Down,
                         route: *Self,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            if (at_end and self.route.downstream_done) return .done;
+                            if (guarded and self.route.downstream_done) return .done;
                             if (try self.down.push(item) == .done) {
                                 self.route.downstream_done = true;
                                 self.route.arms.finishAll();
@@ -394,11 +396,11 @@ fn Route(comptime Cs: type) type {
                     };
                 }
 
-                fn Tail(comptime Down: type, comptime at_end: bool) type {
-                    return if (rejoins) Rejoin(Down, at_end) else Closed;
+                fn Tail(comptime Down: type, comptime guarded: bool) type {
+                    return if (rejoins) Rejoin(Down, guarded) else Closed;
                 }
 
-                fn tail(self: *Self, down: anytype, comptime at_end: bool) Tail(@TypeOf(down), at_end) {
+                fn tail(self: *Self, down: anytype, comptime guarded: bool) Tail(@TypeOf(down), guarded) {
                     return if (rejoins) .{ .down = down, .route = self } else .{};
                 }
 
@@ -415,7 +417,7 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn start(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(self.tail(down, false));
+                    inline for (0..n) |i| try self.chains[i].start(self.tail(down, true));
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {

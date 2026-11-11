@@ -71,8 +71,10 @@ zero-overhead` compiles each fixture in
 [`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
 as a hand-written loop, and compares the optimized LLVM IR function by
 function. The fixtures cover every synchronous operator. Twelve of the
-fifteen are the same instructions; the other three differ only in loop shape
-and are required to be free of calls and extra memory traffic.
+fifteen consist of the same instructions (the same multiset, once value and
+block names are erased); the other three differ only in loop shape and are
+required to be free of calls and extra memory traffic. A separate test runs
+both variants of every fixture and requires equal results.
 
 `queue` is the one operator that costs something by design: it is a real
 bounded buffer between two tasks.

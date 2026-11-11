@@ -411,8 +411,8 @@ zero-overhead` compiles the file once per variant, in ReleaseFast for
 of every exported function:
 
 - `same_*` functions must be the same multiset of instructions once value and
-  block names are erased (the order of a phi's inputs and which way round a
-  comparison is written are also ignored);
+  block names are erased. The order of a phi's inputs is ignored, and `x > c`
+  matches the identical `x >= c + 1`; a comparison does not match its negation;
 - `lean_*` functions may differ in loop shape, but the zrx variant must contain
   no calls, no stack slots, no more loads or stores than the hand-written one,
   and at most a quarter more instructions;
@@ -427,8 +427,11 @@ Every synchronous operator has a fixture. Twelve are `same`; `take`, `batch`
 and the handler combinators are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
-compile to the code of the loop. It is evidence for those shapes with this
-compiler, not a proof for every pipeline. `queue` is deliberately outside it.
+compile to the code of the loop. The comparison is of instruction shape: it
+cannot hide an extra call, load, store, branch or comparison, but it does not
+check how the instructions are wired together, which is why the behaviour test
+exists alongside it. It is evidence for those shapes with this compiler, not
+a proof for every pipeline. `queue` is deliberately outside it.
 
 Two things make it work, and are worth knowing when writing an operator:
 

@@ -108,9 +108,12 @@ to this file; edit `AGENTS.md`, not copies.
   are stored as one value. A stage that indexes into an array it owns cannot
   be kept in registers at all, so give such a buffer a stage of its own and
   keep counters in another (see `batch`).
-- `tools/same_code.zig` ignores value and block names, phi input order, and
-  the polarity of a comparison that is only branched on; nothing else. It has
-  tests of its own. Do not widen it to make a fixture pass.
+- `tools/same_code.zig` compares instruction shape: the multiset of
+  instructions with value and block names erased, phi inputs in any order, and
+  `> c` equal to `>= c + 1`. Nothing else is equated; a comparison never
+  matches its negation. Say "the same instructions" for a `same_*` fixture,
+  not "the same program": wiring is not compared, `behavior.zig` covers
+  results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
 
 ## Diagnostics

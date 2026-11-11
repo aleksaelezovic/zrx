@@ -12,13 +12,17 @@
 //! instructions. Any function present in only one file fails: a pipeline stage
 //! that was not inlined shows up that way.
 //!
-//! Instructions are compared as a multiset after erasing value and block names,
-//! so two compilations that differ only in naming or block order compare equal
-//! while an extra call, load, store or branch cannot hide. Two more things the
-//! optimizer chooses freely are made to compare equal: the order of a phi's
-//! incoming values, and, for a comparison that is only branched on, its
-//! negation (`x > 9` and `x < 10` are one test with the two successors
-//! swapped). See `canonicalCompare`.
+//! What "the same instructions" means here: the two functions contain the
+//! same multiset of instructions once the names of values and blocks are
+//! erased. That is a match of instruction shape. It cannot hide an extra call,
+//! load, store, branch or comparison, and it tells a comparison from its
+//! negation; it does not check which instruction feeds which, or which
+//! successor a branch takes. That both variants compute the same results is
+//! `tests/zero_overhead/behavior.zig`'s job, not this tool's.
+//!
+//! Two spellings the optimizer chooses freely, and which denote the same
+//! thing, are made to compare equal: the order of a phi's incoming values,
+//! and `x > c` against the identical `x >= c + 1`. Nothing else is.
 const std = @import("std");
 
 const Function = struct {
@@ -129,7 +133,7 @@ fn parse(arena: std.mem.Allocator, text: []const u8) ![]Function {
             const normalized = try normalize(arena, line);
             // Block labels end with a colon once their comment is gone.
             if (normalized.len == 0 or normalized[normalized.len - 1] == ':') continue;
-            try instructions.append(arena, try canonical(arena, normalized, onlyBranchedOn(body.items, line)));
+            try instructions.append(arena, try canonical(arena, normalized));
         }
         const owned = try instructions.toOwnedSlice(arena);
         std.mem.sort([]const u8, owned, {}, lessThan);
@@ -138,33 +142,6 @@ fn parse(arena: std.mem.Allocator, text: []const u8) ![]Function {
         body.clearRetainingCapacity();
     }
     return functions.toOwnedSlice(arena);
-}
-
-/// Whether the value `line` defines is used, and only as the condition of
-/// conditional branches. Works on the original text, where values still have names.
-fn onlyBranchedOn(body: []const []const u8, line: []const u8) bool {
-    const trimmed = std.mem.trimStart(u8, line, " \t");
-    if (trimmed.len == 0 or trimmed[0] != '%') return false;
-    const name = trimmed[0..skipName(trimmed, 1)];
-    var uses: usize = 0;
-    for (body) |other| {
-        if (other.ptr == line.ptr) continue;
-        const text = std.mem.trimStart(u8, other, " \t");
-        var from: usize = 0;
-        while (std.mem.indexOfPos(u8, text, from, name)) |at| {
-            from = at + name.len;
-            // `%4` is not a use of `%4` inside `%42`.
-            if (from < text.len and isNameChar(text[from]) and name[name.len - 1] != '"') continue;
-            uses += 1;
-            const condition = "br i1 ";
-            if (!(std.mem.startsWith(u8, text, condition) and at == condition.len)) return false;
-        }
-    }
-    return uses != 0;
-}
-
-fn isNameChar(char: u8) bool {
-    return std.ascii.isAlphanumeric(char) or char == '_' or char == '.' or char == '$' or char == '-';
 }
 
 /// `define internal fastcc void @cases.same_route(ptr %0)` is `same_route`.
@@ -225,11 +202,10 @@ fn normalize(arena: std.mem.Allocator, raw: []const u8) ![]const u8 {
     return std.mem.trim(u8, try out.toOwnedSlice(arena), " ");
 }
 
-/// Rewrites a normalized instruction into one spelling among equivalent ones.
-/// `branch_only`: the value it defines is only ever a branch condition.
-fn canonical(arena: std.mem.Allocator, line: []const u8, branch_only: bool) ![]const u8 {
+/// Rewrites a normalized instruction into one spelling among identical ones.
+fn canonical(arena: std.mem.Allocator, line: []const u8) ![]const u8 {
     if (std.mem.indexOf(u8, line, "= phi ")) |at| return canonicalPhi(arena, line, at + "= phi ".len);
-    if (std.mem.indexOf(u8, line, "= icmp ")) |at| return canonicalCompare(arena, line, at + "= icmp ".len, branch_only);
+    if (std.mem.indexOf(u8, line, "= icmp ")) |at| return canonicalCompare(arena, line, at + "= icmp ".len);
     return line;
 }
 
@@ -253,22 +229,15 @@ fn canonicalPhi(arena: std.mem.Allocator, line: []const u8, start: usize) ![]con
     return out.toOwnedSlice(arena);
 }
 
-/// Two rewrites, and nothing else:
+/// One rewrite: against a constant, `> c` becomes the identical `>= c + 1`,
+/// and `<= c` becomes `< c + 1`, except where `c + 1` does not exist in the
+/// operand type. Both forms have the same value for every input.
 ///
-/// - Against a constant, `> c` becomes the identical `>= c + 1`, and `<= c`
-///   becomes `< c + 1`. This is the same value, so it is always applied,
-///   except where `c + 1` does not exist in the operand type.
-/// - A comparison and its negation (`ult` with `uge`, `ugt` with `ule`, `eq`
-///   with `ne`, and the signed pairs) compare equal, but only when the result
-///   is used as a branch condition and nothing else (`branch_only`). There the
-///   negated form is the same test with its two successors swapped, and the
-///   order of a branch's successors is something this tool does not see in
-///   any case, since block names are erased. Anywhere else the result is a
-///   value (returned, selected on, stored) and its polarity is kept.
-///
-/// Predicates that are only related by swapping operands (`ult` and `ugt`)
-/// stay distinct: with value names erased the swap cannot be checked.
-fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize, branch_only: bool) ![]const u8 {
+/// A comparison is never matched with its negation (`ult` with `uge`): that
+/// would be the same test only if the branch using it had its successors
+/// swapped, which this tool cannot check. Predicates related by swapping
+/// operands (`ult` and `ugt`) stay distinct for the same reason.
+fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize) ![]const u8 {
     var words = std.mem.tokenizeScalar(u8, line[start..], ' ');
     var predicate: []const u8 = "";
     var operand_type: []const u8 = "";
@@ -302,13 +271,7 @@ fn canonicalCompare(arena: std.mem.Allocator, line: []const u8, start: usize, br
                 (if (strict_above) "sge" else "slt");
         }
     }
-    const spelled: []const u8 = if (!branch_only) predicate else for ([_][2][]const u8{
-        .{ "eq", "ne" }, .{ "ult", "uge" }, .{ "ugt", "ule" }, .{ "slt", "sge" }, .{ "sgt", "sle" },
-    }) |negated| {
-        if (std.mem.eql(u8, predicate, negated[0]) or std.mem.eql(u8, predicate, negated[1]))
-            break try std.fmt.allocPrint(arena, "{s}|{s}", .{ negated[0], negated[1] });
-    } else predicate;
-    return std.fmt.allocPrint(arena, "{s}{s} {s}{s}", .{ line[0..start], spelled, type_and_left.items, bound });
+    return std.fmt.allocPrint(arena, "{s}{s} {s}{s}", .{ line[0..start], predicate, type_and_left.items, bound });
 }
 
 /// `constant + 1` when `text` is an integer constant of `operand_type` (`i32`)
@@ -392,25 +355,15 @@ test "names, block order and phi input order do not matter" {
     try expectSame(false, "  %a = add i32 %x, 1", "  %a = add i32 %x, 1\n  %b = add i32 %a, 1");
 }
 
-test "a comparison that is only branched on equals its negation" {
-    try expectSame(true,
+test "a comparison is never matched with its negation" {
+    // Same shape, opposite test, same successors: different results.
+    try expectSame(false,
         \\  %c = icmp ult i32 %x, %y
         \\  br i1 %c, label %a, label %b
     ,
         \\  %c = icmp uge i32 %x, %y
-        \\  br i1 %c, label %b, label %a
-    );
-    // `x > 9` is `x >= 10`, the negation of `x < 10`.
-    try expectSame(true,
-        \\  %c = icmp ugt i32 %x, 9
         \\  br i1 %c, label %a, label %b
-    ,
-        \\  %c = icmp ult i32 %x, 10
-        \\  br i1 %c, label %b, label %a
     );
-}
-
-test "a comparison whose result is a value keeps its polarity" {
     try expectSame(false,
         \\  %c = icmp ult i32 %x, %y
         \\  ret i1 %c
@@ -425,27 +378,25 @@ test "a comparison whose result is a value keeps its polarity" {
         \\  %c = icmp ne i32 %x, %y
         \\  %s = select i1 %c, i32 %x, i32 %y
     );
-    // Branched on, but also used as a value.
+    // `x > 9` is `x >= 10`, not `x < 10`.
     try expectSame(false,
-        \\  %c = icmp ult i32 %x, %y
+        \\  %c = icmp ugt i32 %x, 9
         \\  br i1 %c, label %a, label %b
-        \\  %z = zext i1 %c to i32
     ,
-        \\  %c = icmp uge i32 %x, %y
+        \\  %c = icmp ult i32 %x, 10
         \\  br i1 %c, label %a, label %b
-        \\  %z = zext i1 %c to i32
     );
-    // A use of %c1 is not a use of %c.
-    try expectSame(false,
+}
+
+test "what it cannot see: the same instructions wired differently" {
+    // A match of shape, not of meaning: the successors of a branch are block
+    // names, which are erased. `behavior.zig` exists because of this.
+    try expectSame(true,
         \\  %c = icmp ult i32 %x, %y
-        \\  %c1 = icmp ult i32 %y, %x
-        \\  br i1 %c1, label %a, label %b
-        \\  ret i1 %c
+        \\  br i1 %c, label %a, label %b
     ,
-        \\  %c = icmp uge i32 %x, %y
-        \\  %c1 = icmp ult i32 %y, %x
-        \\  br i1 %c1, label %a, label %b
-        \\  ret i1 %c
+        \\  %c = icmp ult i32 %x, %y
+        \\  br i1 %c, label %b, label %a
     );
 }
 
