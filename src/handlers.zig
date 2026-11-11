@@ -132,8 +132,11 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
                 if (comptime canCancel(Failure(di.types(@TypeOf(args))))) {
                     if (@as(anyerror, err) == error.Canceled) return error.Canceled;
                 }
-                var with_error: @Tuple(WithError(di.types(@TypeOf(args)))) = undefined;
-                with_error[0] = err;
+                const Args = comptime di.types(@TypeOf(args));
+                var with_error: @Tuple(WithError(Args)) = undefined;
+                // A cancellation never gets here, so the error fits the
+                // fallback's parameter even when that leaves `Canceled` out.
+                with_error[0] = if (comptime Given(Args) == Failure(Args)) err else @errorCast(err);
                 inline for (0..args.len) |i| with_error[i + 1] = args[i];
                 return di.invoke(fallback, env, with_error);
             };
@@ -145,9 +148,29 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
             return @typeInfo(R).error_union.error_set;
         }
 
+        /// The type the fallback's error parameter is given: the one it
+        /// declares, or the handler's whole error set when it is generic.
+        fn Given(comptime Args: []const type) type {
+            return di.Param(fallback, Args.len + 1, 0) orelse Failure(Args);
+        }
+
         /// The fallback's data: the error, then the handler's own data.
         fn WithError(comptime Args: []const type) []const type {
-            return &[_]type{Failure(Args)} ++ Args;
+            return &[_]type{Given(Args)} ++ Args;
+        }
+
+        /// Whether the fallback's error parameter takes every error it can be
+        /// handed: all the handler's, except `Canceled`, which is never handed over.
+        fn takesAll(comptime Takes: type, comptime E: type) bool {
+            if (@typeInfo(Takes) != .error_set) return false;
+            const takes = @typeInfo(Takes).error_set.error_names orelse return true; // anyerror
+            const names = @typeInfo(E).error_set.error_names orelse return false;
+            next: for (names) |name| {
+                if (std.mem.eql(u8, name, "Canceled")) continue;
+                for (takes) |have| if (std.mem.eql(u8, have, name)) continue :next;
+                return false;
+            }
+            return true;
         }
 
         /// Whether the handler can report a cancellation, which is not a failure to fall back from.
@@ -162,11 +185,9 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
         fn Fallen(comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
             const Wanted = di.Payload(di.Result("orElse", handler, Args));
-            if (di.Param(fallback, Args.len + 1, 0)) |Takes| {
-                if (!di.accepts(Takes, Failure(Args))) @compileError(
-                    "orElse: the fallback takes `" ++ @typeName(Takes) ++ "` but the handler can fail with `" ++ @typeName(Failure(Args)) ++ "`",
-                );
-            }
+            if (!takesAll(Given(Args), Failure(Args))) @compileError(
+                "orElse: the fallback takes `" ++ @typeName(Given(Args)) ++ "` but the handler can fail with `" ++ @typeName(Failure(Args)) ++ "`",
+            );
             const F = di.Result("orElse", fallback, WithError(Args));
             if (di.Payload(F) != Wanted) @compileError(
                 "orElse: the fallback must return `" ++ @typeName(Wanted) ++ "` like the handler, got `" ++ @typeName(F) ++ "`",

@@ -161,6 +161,20 @@ test "orElse falls back from failures but never from a cancellation" {
     try std.testing.expectEqual(@as(u32, 1), fallbacks);
 }
 
+fn narrowFallback(_: error{Odd}, _: u32) u32 {
+    fallbacks += 1;
+    return 0;
+}
+
+test "a fallback need not name Canceled, which it is never given" {
+    var seen: Numbers = .{};
+    fallbacks = 0;
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, narrowFallback)), subscribe(record) })).run(.{&seen});
+    try std.testing.expectError(error.Canceled, result);
+    try seen.expect(&.{ 0, 0 });
+    try std.testing.expectEqual(@as(u32, 1), fallbacks);
+}
+
 test "constant replaces every item" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 3), pipe(.{ map(constant(@as(u32, 9))), subscribe(record) })).run(.{&seen});
