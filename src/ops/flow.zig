@@ -325,16 +325,16 @@ fn Route(comptime Cs: type) type {
                 /// While items flow, a `.done` from the pipe after the route
                 /// goes straight back to the source, which stops. What is
                 /// left is what the cases emit as the stream ends: with
-                /// `ending`, a case's final value is not forwarded once that
+                /// `at_end`, a case's final value is not forwarded once that
                 /// pipe is done. (Checking on every push as well would cost
                 /// nothing per item but makes the optimizer peel the loop.)
-                fn Rejoin(comptime Down: type, comptime ending: bool) type {
+                fn Rejoin(comptime Down: type, comptime at_end: bool) type {
                     return struct {
                         down: Down,
                         done: *bool,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            if (ending and self.done.*) return .done;
+                            if (at_end and self.done.*) return .done;
                             if (try self.down.push(item) == .done) {
                                 self.done.* = true;
                                 return .done;
@@ -344,11 +344,11 @@ fn Route(comptime Cs: type) type {
                     };
                 }
 
-                fn Tail(comptime Down: type, comptime ending: bool) type {
-                    return if (rejoins) Rejoin(Down, ending) else Closed;
+                fn Tail(comptime Down: type, comptime at_end: bool) type {
+                    return if (rejoins) Rejoin(Down, at_end) else Closed;
                 }
 
-                fn tail(self: *Self, down: anytype, comptime ending: bool) Tail(@TypeOf(down), ending) {
+                fn tail(self: *Self, down: anytype, comptime at_end: bool) Tail(@TypeOf(down), at_end) {
                     return if (rejoins) .{ .down = down, .done = &self.downstream_done } else .{};
                 }
 
