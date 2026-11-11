@@ -327,9 +327,15 @@ fn Route(comptime Cs: type) type {
                         done: *bool,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            const flow = try self.down.push(item);
-                            if (flow == .done) self.done.* = true;
-                            return flow;
+                            // Once the pipe after the route is done, no case
+                            // forwards to it again: not another case later on,
+                            // nor a value a case emits as the stream ends.
+                            if (self.done.*) return .done;
+                            if (try self.down.push(item) == .done) {
+                                self.done.* = true;
+                                return .done;
+                            }
+                            return .more;
                         }
                     };
                 }

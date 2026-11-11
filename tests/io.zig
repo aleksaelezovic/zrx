@@ -120,6 +120,27 @@ test "createFile replaces an existing file unless asked to be exclusive" {
     try std.testing.expectEqualStrings("new,", writer.buffered());
 }
 
+test "the line limit counts the line, not its newline" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "fits", .data = "ABCD\nEF\nGHIJ" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "too-long", .data = "AB\nABCDE\n" });
+    var path_bytes: [128]u8 = undefined;
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const fits = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/fits", .{tmp.sub_path});
+    try program(fileLines(fits, 4), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("ABCD,EF,GHIJ,", writer.buffered());
+
+    var second: [64]u8 = undefined;
+    var rejected: std.Io.Writer = .fixed(&second);
+    const too_long = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/too-long", .{tmp.sub_path});
+    const result = program(fileLines(too_long, 4), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &rejected } });
+    try std.testing.expectError(error.StreamTooLong, result);
+    try std.testing.expectEqualStrings("AB,", rejected.buffered());
+}
+
 test "a missing file fails the run before any item" {
     var buffer: [8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
