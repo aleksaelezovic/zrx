@@ -373,16 +373,22 @@ fn Route(comptime Cs: type) type {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
                 arms: core.Arms(n, Env),
+                /// A case's value was answered `.done` by the pipe after the
+                /// route. Written where that answer arrives and read only
+                /// before a case emits as the run starts or the stream ends.
+                output_done: bool,
+
                 const Self = @This();
 
                 pub const has_boundary = anyBoundary(&chains);
 
                 /// The `down` given to a rejoining case. When the pipe after
                 /// the route answers `.done`, every case is marked as wanting
-                /// no more, so the route is done as well. Keeping what a case
-                /// emits later (as the run starts, as the stream ends) from
-                /// reaching that pipe again is not done here: `down` is the
-                /// chain's own handle, which already does.
+                /// no more, so the route is done as well, and the answer is
+                /// remembered: a case's chain asks (`isDone`) before it emits
+                /// as the run starts or the stream ends, so nothing reaches
+                /// that pipe again and no stage of a case runs for a value
+                /// that would get nowhere.
                 fn Rejoin(comptime Down: type) type {
                     return struct {
                         down: Down,
@@ -392,21 +398,21 @@ fn Route(comptime Cs: type) type {
 
                         pub fn push(self: @This(), item: anytype) !Flow {
                             if (try self.down.push(item) == .done) {
+                                self.route.output_done = true;
                                 self.route.arms.finishAll();
                                 return .done;
                             }
                             return .more;
                         }
 
-                        /// Asked by a case's chain before it emits as the run
-                        /// starts or the stream ends: whether the pipe after
-                        /// the route is done. Then a case's value is dropped
-                        /// where it is emitted, and no stage of the case runs
-                        /// for it. Only a `down` that says it can answer is
-                        /// asked (`core.answersDone`): the chain's handle for
-                        /// starting and finishing does; a handle of someone
-                        /// else's, which may be a pointer, is left alone.
+                        /// Whether the pipe after the route is done: it said so
+                        /// to a case's value, or `down` knows (the chain's
+                        /// handle does, also for an answer given to an item
+                        /// that did not come through a case). A `down` of
+                        /// someone else's is anything with a `push` and is not
+                        /// asked, which is why the route remembers for itself.
                         pub fn isDone(self: @This()) bool {
+                            if (self.route.output_done) return true;
                             if (comptime !core.answersDone(Down)) return false;
                             return self.down.isDone();
                         }
@@ -423,6 +429,7 @@ fn Route(comptime Cs: type) type {
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {
                     self.arms.init(env);
+                    self.output_done = false;
                     inline for (0..n) |i| {
                         self.tests[i] = if (cases[i].is_otherwise) {} else .init(env);
                         self.chains[i].init(&op.cases[i].pipe, self.arms.envFor(env, i)) catch |err| {

@@ -49,7 +49,9 @@ to this file; edit `AGENTS.md`, not copies.
 - **A `down` is anything with a `push`.** An operator may run another one
   with a handle of its own, a pointer included (`tests/extending.zig`). Never
   probe a handle for a plain name: ask only what declares a `zrx_*` marker
-  (`answersDone` for `isDone`), and check the type is a struct first.
+  (`answersDone` for `isDone`), and check the type is a struct first. Since
+  such a handle cannot be asked, whoever is answered `.done` by it remembers
+  (`route` keeps `output_done`).
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is

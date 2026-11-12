@@ -273,6 +273,9 @@ const sums_by_parity = zrx.route(.{
 /// What it gives the route as `down` is its own: anything with a `push`.
 fn Collected(comptime by_pointer: bool) type {
     return struct {
+        /// Whether the receiver answers `.done` to whatever it gets.
+        satisfied_by_one: bool = false,
+
         const Op = @This();
         const Inner = @TypeOf(sums_by_parity);
 
@@ -286,22 +289,24 @@ fn Collected(comptime by_pointer: bool) type {
 
         const ByPointer = struct {
             seen: *Numbers,
+            satisfied_by_one: bool,
 
             pub fn push(self: *ByPointer, item: u32) !zrx.Flow {
                 self.seen.add(item);
-                return .more;
+                return if (self.satisfied_by_one) .done else .more;
             }
         };
 
         const ByValue = struct {
             seen: *Numbers,
+            satisfied_by_one: bool,
 
             /// Nothing the library should mistake for something of its own.
             pub const isDone = false;
 
             pub fn push(self: ByValue, item: u32) !zrx.Flow {
                 self.seen.add(item);
-                return .more;
+                return if (self.satisfied_by_one) .done else .more;
             }
         };
 
@@ -316,8 +321,8 @@ fn Collected(comptime by_pointer: bool) type {
                     return if (by_pointer) &self.receiver else self.receiver;
                 }
 
-                pub fn init(self: *Self, _: *const Op, env: Env) !void {
-                    self.receiver = .{ .seen = zrx.di.get(env, *Numbers) };
+                pub fn init(self: *Self, op: *const Op, env: Env) !void {
+                    self.receiver = .{ .seen = zrx.di.get(env, *Numbers), .satisfied_by_one = op.satisfied_by_one };
                     try self.inner.init(&sums_by_parity, env);
                 }
 
@@ -349,4 +354,16 @@ test "an operator can run a built-in one with a `down` of its own" {
     var by_value: Numbers = .{};
     try program(range(u32, 1, 6), pipe(.{Collected(false){}})).run(.{&by_value});
     try by_value.expect(&.{ 9, 6 });
+}
+
+test "a `down` of its own that answers done is not pushed to again" {
+    // Each case of the route emits a final value. The receiver is satisfied
+    // by the first; it has only a `push`, so the route has to remember.
+    var by_pointer: Numbers = .{};
+    try program(range(u32, 1, 6), pipe(.{Collected(true){ .satisfied_by_one = true }})).run(.{&by_pointer});
+    try by_pointer.expect(&.{9});
+
+    var by_value: Numbers = .{};
+    try program(range(u32, 1, 6), pipe(.{Collected(false){ .satisfied_by_one = true }})).run(.{&by_value});
+    try by_value.expect(&.{9});
 }
