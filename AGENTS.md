@@ -91,7 +91,9 @@ to this file; edit `AGENTS.md`, not copies.
   nothing.
 - **A `route` that is done asks no predicate**, and once it is done while
   starting, no later case is started (a case that is done by itself leaves
-  the others to start). What `push` asks first is one flag (`Arms.idle`),
+  the others to start). Before starting each case it asks whether the pipe
+  after it is done: a case's emission can be refused without anything being
+  pushed, which looks like the case being done by itself. What `push` asks first is one flag (`Arms.idle`),
   kept up to date where a sub-pipe finishes: walking the cases ahead of the
   per-item work makes the optimizer reshape the loop.
 - **The sequential fallback orders outcomes; it cannot cancel.** On an `Io`

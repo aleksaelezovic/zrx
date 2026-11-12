@@ -367,3 +367,140 @@ test "a `down` of its own that answers done is not pushed to again" {
     try program(range(u32, 1, 6), pipe(.{Collected(false){ .satisfied_by_one = true }})).run(.{&by_value});
     try by_value.expect(&.{9});
 }
+
+// --- a `down` that can say it is done ---------------------------------------------
+
+/// Emits one value as the run starts.
+const Opening = struct {
+    pub const zrx_operator = {};
+    pub const name = "opening";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const Opening, _: Env) !void {}
+
+            pub fn start(_: *@This(), down: anytype) !zrx.Flow {
+                return down.push(@as(In, 1));
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+/// Must not be started: its start hook fails.
+const Tripping = struct {
+    pub const zrx_operator = {};
+    pub const name = "tripping";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const Tripping, _: Env) !void {}
+
+            pub fn start(_: *@This(), _: anytype) error{StartedAfterDone}!zrx.Flow {
+                return error.StartedAfterDone;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+const opening_then_tripping = zrx.route(.{
+    zrx.when(isOdd, pipe(.{Opening{}})),
+    zrx.otherwise(pipe(.{Tripping{}})),
+});
+
+/// Runs a route with a `down` that says when it is done: from the start, or
+/// after it has been asked `open_for` times.
+const Shut = struct {
+    open_for: usize = 0,
+
+    const Inner = @TypeOf(opening_then_tripping);
+
+    pub const zrx_operator = {};
+    pub const name = "shut";
+
+    pub fn Out(comptime Env: type, comptime In: type) type {
+        if (Inner.Out(Env, In) != u32) @compileError("shut: items must be u32");
+        return zrx.End;
+    }
+
+    const Receiver = struct {
+        seen: *Numbers,
+        asked: *usize,
+        open_for: usize,
+
+        pub const zrx_answers_done = {};
+
+        pub fn isDone(self: Receiver) bool {
+            defer self.asked.* += 1;
+            return self.asked.* >= self.open_for;
+        }
+
+        pub fn push(self: Receiver, item: u32) !zrx.Flow {
+            self.seen.add(item);
+            return .done;
+        }
+    };
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            inner: Inner.Stage(Env, In),
+            receiver: Receiver,
+            asked: usize,
+
+            const Self = @This();
+
+            pub fn init(self: *Self, op: *const Shut, env: Env) !void {
+                self.asked = 0;
+                self.receiver = .{ .seen = zrx.di.get(env, *Numbers), .asked = &self.asked, .open_for = op.open_for };
+                try self.inner.init(&opening_then_tripping, env);
+            }
+
+            pub fn start(self: *Self, _: anytype) !zrx.Flow {
+                return self.inner.start(self.receiver);
+            }
+
+            pub fn push(self: *Self, item: In, _: anytype) !zrx.Flow {
+                return self.inner.push(item, self.receiver);
+            }
+
+            pub fn finish(self: *Self, _: anytype) !void {
+                try self.inner.finish(self.receiver);
+            }
+
+            pub fn deinit(self: *Self) void {
+                self.inner.deinit();
+            }
+        };
+    }
+};
+
+test "a `down` that says it is done keeps a route from starting another case" {
+    // Nothing was pushed, so the route has no answer to remember: it asks.
+    // With the pipe after it done, no case is started, and the second
+    // one's start hook would have failed the run.
+    var seen: Numbers = .{};
+    try program(range(u32, 0, 4), pipe(.{Shut{}})).run(.{&seen});
+    try seen.expect(&.{});
+
+    // Here the receiver is done by the time the first case emits. That
+    // emission is refused where it is made, which is not the case being
+    // done by itself: the route asks again before starting the next one.
+    var later: Numbers = .{};
+    try program(range(u32, 0, 4), pipe(.{Shut{ .open_for = 1 }})).run(.{&later});
+    try later.expect(&.{});
+}

@@ -441,15 +441,26 @@ fn Route(comptime Cs: type) type {
 
                 pub fn start(self: *Self, down: anytype) !Flow {
                     inline for (0..n) |i| {
-                        if (try self.chains[i].start(self.tail(down)) == .done) self.arms.finished(i);
+                        // Once the pipe after the route is done, no case is
+                        // started: nothing it emitted would get anywhere,
+                        // and its hook could block or fail.
+                        if (self.outputIsDone(down)) return .done;
                         // A case that is done by itself leaves the others to
-                        // start. Once the route is done (the pipe after it
-                        // is, or this was the last case), no later case is
-                        // started: nothing it emitted would get anywhere, and
-                        // its hook could block.
+                        // start, unless it was the last one wanting items.
+                        if (try self.chains[i].start(self.tail(down)) == .done) self.arms.finished(i);
                         if (self.verdict() == .done) return .done;
                     }
-                    return .more;
+                    return if (self.outputIsDone(down)) .done else .more;
+                }
+
+                /// Whether the pipe after the route is done, however that
+                /// became known: answered to a case, or said by `down`
+                /// without anything being pushed. Then so is every case.
+                fn outputIsDone(self: *Self, down: anytype) bool {
+                    if (!rejoins) return false;
+                    if (!self.tail(down).isDone()) return false;
+                    self.arms.finishAll();
+                    return true;
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
