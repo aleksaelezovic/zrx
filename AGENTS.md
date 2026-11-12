@@ -96,9 +96,13 @@ to this file; edit `AGENTS.md`, not copies.
   answer or by a worker's, starting is cut short and the source is not run,
   with or without a queue. `finish` may then reach a stage whose `start` did
   not run: a `queue` that was never started answers `.done` and buffers
-  nothing. A worker's answer is checked before each stage is started
-  (`Supervision.wantsNoMore`, per sub-pipe inside `branch` and `route`), not
-  left to cancellation, which a hook that never blocks would not notice.
+  nothing. Before each stage is started, startup checks what workers have
+  said (`Supervision.hasFailed`, `Supervision.wantsNoMore`), and does not
+  leave it to cancellation, which a hook that never blocks would not notice
+  and which never comes for a sub-pipe whose sibling still wants items.
+  `wantsNoMore` looks at the sub-pipe and every pipe it lies in. A hook that
+  is already blocked for reasons of its own is only cancelled when the whole
+  pipe is done or has failed.
 - **A `route` that is done asks no predicate**, and once it is done while
   starting, no later case is started (a case that is done by itself leaves
   the others to start). It asks whether the pipe after it is done before

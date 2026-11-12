@@ -1202,3 +1202,141 @@ test "the same for the next case of a route, and for the rest of a sub-pipe" {
         try std.testing.expectEqual(@as(usize, 0), started.count);
     }
 }
+
+// --- startup, wherever it is and whatever happens meanwhile ----------------------
+//
+// One stage emits as the run starts and returns only once a worker has
+// reported: that the sub-pipe ending in the queue wants no more, or that it
+// failed. Everything that startup would still get to after that stage (the
+// stage before it, the next case of every route around it, the stages before
+// those routes) must not be started, however deep the stage sits.
+
+/// As the run starts: pushes one item and waits, without calling into
+/// `std.Io`, until a worker has reported.
+const Until = struct {
+    wait: enum { satisfied, failed },
+    /// How many routes lie between this stage and the pipe the queue is in.
+    levels: usize,
+
+    pub const zrx_operator = {};
+    pub const name = "until";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            supervision: zrx.operator.Supervision,
+            wait: @FieldType(Until, "wait"),
+            levels: usize,
+
+            pub fn init(self: *@This(), op: *const Until, env: Env) !void {
+                self.* = .{ .supervision = zrx.di.get(env, zrx.operator.Supervision), .wait = op.wait, .levels = op.levels };
+            }
+
+            /// Whether the pipe the queue is in wants no more: the whole
+            /// pipe, or the arm of a branch. Read from the scopes
+            /// themselves, not through the function startup uses.
+            fn queuedPipeIsSatisfied(self: *const @This()) bool {
+                var at = self.supervision;
+                for (0..self.levels) |_| at = at.scope.?.parent;
+                if (at.scope) |scope| return scope.done[at.arm].load(.seq_cst);
+                return at.signal.has_satisfied.load(.acquire);
+            }
+
+            pub fn start(self: *@This(), down: anytype) !zrx.Flow {
+                _ = try down.push(@as(In, 1));
+                switch (self.wait) {
+                    .satisfied => while (!self.queuedPipeIsSatisfied()) std.Thread.yield() catch {},
+                    .failed => while (!self.supervision.hasFailed()) std.Thread.yield() catch {},
+                }
+                return .more;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+/// What comes before the queue, with the waiting stage `depth` routes deep
+/// and a stage that must not be started at every place startup still passes.
+fn beforeTheQueue(comptime depth: usize, comptime wait: @FieldType(Until, "wait")) Nesting(depth, depth, wait).Pipe {
+    return Nesting(depth, depth, wait).inside;
+}
+
+fn Nesting(comptime remaining: usize, comptime depth: usize, comptime wait: @FieldType(Until, "wait")) type {
+    return struct {
+        const inside = if (remaining == 0) pipe(.{ StartMark{}, Until{ .wait = wait, .levels = depth } }) else pipe(.{
+            StartMark{},
+            route(.{
+                when(isEven, Nesting(remaining - 1, depth, wait).inside),
+                otherwise(pipe(.{StartMark{}})),
+            }),
+        });
+        const Pipe = @TypeOf(inside);
+    };
+}
+
+test "a sub-pipe that is done stops startup at any depth inside it" {
+    inline for (0..4) |depth| {
+        for (0..25) |_| {
+            // The whole pipe: the source is never run.
+            var seen: Numbers = .{};
+            var started: Started = .{};
+            const whole = pipe(.{ beforeTheQueue(depth, .satisfied), queue(2), take(1), subscribe(record) });
+            try program(zrx.fromProducer(u32, mustNotRun), whole).run(.{ io, &seen, &started });
+            try seen.expect(&.{1});
+            try std.testing.expectEqual(@as(usize, 0), started.count);
+
+            // One arm of a branch whose other arm wants every item: nothing
+            // cancels startup here, so nothing but the check stops it.
+            var left: Numbers = .{};
+            var right: Numbers = .{};
+            const arm = pipe(.{branch(.{
+                pipe(.{ beforeTheQueue(depth, .satisfied), queue(2), take(1), subscribe(toLeft) }),
+                pipe(.{subscribe(toRight)}),
+            })});
+            try program(range(u32, 5, 8), arm).run(.{ io, &started, Left{ .seen = &left }, Right{ .seen = &right } });
+            try left.expect(&.{1});
+            try right.expect(&.{ 5, 6, 7 });
+            try std.testing.expectEqual(@as(usize, 0), started.count);
+
+            // The same arm one branch further in.
+            var inner_left: Numbers = .{};
+            var inner_right: Numbers = .{};
+            const nested = pipe(.{branch(.{
+                pipe(.{branch(.{
+                    pipe(.{ beforeTheQueue(depth, .satisfied), queue(2), take(1), subscribe(toLeft) }),
+                    pipe(.{drain()}),
+                })}),
+                pipe(.{subscribe(toRight)}),
+            })});
+            try program(range(u32, 5, 8), nested).run(.{ io, &started, Left{ .seen = &inner_left }, Right{ .seen = &inner_right } });
+            try inner_left.expect(&.{1});
+            try inner_right.expect(&.{ 5, 6, 7 });
+            try std.testing.expectEqual(@as(usize, 0), started.count);
+        }
+    }
+}
+
+test "a worker's failure stops startup at any depth" {
+    inline for (0..4) |depth| {
+        for (0..25) |_| {
+            var started: Started = .{};
+            const whole = pipe(.{ beforeTheQueue(depth, .failed), queue(2), subscribe(failAlways) });
+            try std.testing.expectError(error.ConsumerBroke, program(zrx.fromProducer(u32, mustNotRun), whole).run(.{ io, &started }));
+            try std.testing.expectEqual(@as(usize, 0), started.count);
+
+            var right: Numbers = .{};
+            const arm = pipe(.{branch(.{
+                pipe(.{ beforeTheQueue(depth, .failed), queue(2), subscribe(failAlways) }),
+                pipe(.{subscribe(toRight)}),
+            })});
+            try std.testing.expectError(error.ConsumerBroke, program(range(u32, 5, 8), arm).run(.{ io, &started, Right{ .seen = &right } }));
+            try std.testing.expectEqual(@as(usize, 0), started.count);
+        }
+    }
+}

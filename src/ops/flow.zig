@@ -457,14 +457,10 @@ fn Route(comptime Cs: type) type {
                         // without anything being pushed, and that looks
                         // like the case being done by itself.
                         if (self.outputIsDone(down)) return .done;
-                        // The same once a worker has said that the pipe the
-                        // route is in wants no more: that is not an answer
-                        // to anything a case pushed.
-                        if (self.arms.pipeWantsNoMore()) {
-                            self.arms.finishAll();
-                            return .done;
-                        }
-                        // A case that is done by itself leaves the others to start.
+                        // A case that is done by itself leaves the others to
+                        // start. (A worker's word that the pipe wants no
+                        // more needs nothing here: each case's own guard
+                        // looks at every pipe the case lies in.)
                         if (try self.chains[i].start(self.tail(down), self.arms.guardOf(i)) == .done) self.arms.finished(i);
                     }
                     return if (self.outputIsDone(down)) .done else self.verdict();

@@ -221,12 +221,18 @@ pub const Supervision = struct {
         return supervision.signal.has_failed.load(.acquire);
     }
 
-    /// Whether this pipe (in a `branch` or `route`: this sub-pipe) wants no
-    /// more items, as far as its workers have said. Cheap: read before
-    /// starting a stage, which nothing should do for a pipe that is done.
+    /// Whether this pipe wants no more items, as far as workers have said:
+    /// this sub-pipe of a `branch` or `route`, or any pipe it lies in (an
+    /// arm that is done takes nothing for anything inside it, however
+    /// deep). Cheap: read before starting a stage, which nothing should do
+    /// for a pipe that is done.
     pub fn wantsNoMore(supervision: Supervision) bool {
-        if (supervision.scope) |scope| return scope.done[supervision.arm].load(.seq_cst);
-        return supervision.signal.has_satisfied.load(.acquire);
+        var current = supervision;
+        while (current.scope) |scope| {
+            if (scope.done[current.arm].load(.seq_cst)) return true;
+            current = scope.parent;
+        }
+        return current.signal.has_satisfied.load(.acquire);
     }
 
     /// Waits for the worker that reports through `ended`. Returns false when
@@ -281,12 +287,6 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
         pub fn guardOf(self: *Self, comptime i: usize) Guard {
             if (!supervised) return {};
             return .{ .signal = self.scope.parent.signal, .scope = &self.scope, .arm = i };
-        }
-
-        /// Whether the pipe these sub-pipes belong to wants no more items,
-        /// as far as its workers have said.
-        pub fn pipeWantsNoMore(self: *const Self) bool {
-            return if (supervised) self.scope.parent.wantsNoMore() else false;
         }
 
         pub fn wants(self: *const Self, comptime i: usize) bool {
@@ -614,15 +614,18 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// from what follows it closes that.
             ///
             /// `guard` is this pipe's `Supervision`, or `{}`. With it, no
-            /// stage is started once a worker has said the pipe wants no
-            /// more: a stage already started is behind a queue that has, so
-            /// the same holds as for an answer, for this stage as well.
+            /// stage is started once a worker has failed (`error.Canceled`
+            /// then stands for "the run failed elsewhere", as in `finish`),
+            /// nor once a worker has said the pipe wants no more: a stage
+            /// already started is behind a queue that has, so the same
+            /// holds as for an answer, for this stage as well.
             pub fn start(refs: Refs, tail: anytype, guard: anytype) !Flow {
                 comptime var i = n;
                 inline while (i > 0) {
                     i -= 1;
                     if (@hasDecl(stages[i], "start")) {
                         if (@TypeOf(guard) == Supervision) {
+                            if (guard.hasFailed()) return error.Canceled;
                             if (guard.wantsNoMore()) {
                                 closeFrom(refs, i + 1);
                                 return .done;
