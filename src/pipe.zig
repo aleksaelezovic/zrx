@@ -14,7 +14,7 @@
 //!
 //!     pub fn init(self: *Stage, op: *const Op, env: Env) !void
 //!     pub fn push(self: *Stage, item: In, down: anytype) !Flow
-//!     pub fn start(self: *Stage, down: anytype) !void    // optional: after every stage is initialized
+//!     pub fn start(self: *Stage, down: anytype) !Flow    // optional: after every stage is initialized
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
 //!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
 //!     pub fn stop(self: *Stage) void                     // optional: cancel and join any task this stage runs
@@ -33,10 +33,12 @@
 //! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
 //! still using a stage when that stage, or one after it, is torn down.
 //!
-//! When the pipe is already done before startup is over (a `start` hook
-//! pushed, and that was all anything wanted), startup is cut short and the
-//! source is never run: `finish` can then reach a stage whose `start` was
-//! interrupted or never ran, and has to cope with that.
+//! `start` answers like a push: `.done` when nothing after the stage wants an
+//! item, which a stage learns from a push it made (`return down.push(x)`), and
+//! `.more` otherwise. When the pipe is done before startup is over, startup
+//! is cut short there and the source is never run: `finish` can then reach a
+//! stage whose `start` was interrupted or never ran, and has to cope with
+//! that (an unstarted `queue` takes nothing).
 //!
 //! A stage that runs a task takes part in the run's `Supervision` (see below):
 //! it reports when its worker ends and why, and joins it through the
@@ -476,15 +478,24 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 return provideFrom(i + 1, refs, next);
             }
 
-            pub fn start(refs: Refs, tail: anytype) !void {
+            /// Starts the stages, last first. `.done` when a stage answered
+            /// that nothing after it wants an item: then no source item can
+            /// get anywhere either, and the stages before it are not started.
+            pub fn start(refs: Refs, tail: anytype) !Flow {
                 comptime var i = n;
                 inline while (i > 0) {
                     i -= 1;
                     if (@hasDecl(stages[i], "start")) {
                         const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        try refs[i].start(next);
+                        const answer = try refs[i].start(next);
+                        if (comptime @TypeOf(answer) != Flow) @compileError(
+                            "pipe: `" ++ ops[i].name ++ "` has a `start` that returns `" ++ @typeName(@TypeOf(answer)) ++
+                                "`; it must return `!Flow`: what a push it made was answered (`return down.push(x)`), or `.more`",
+                        );
+                        if (answer == .done) return .done;
                     }
                 }
+                return .more;
             }
 
             pub fn push(refs: Refs, item: In, tail: anytype) !Flow {
@@ -582,7 +593,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.provide(self.refsOf(), env);
         }
 
-        pub fn start(self: *Self, tail: anytype) !void {
+        pub fn start(self: *Self, tail: anytype) !Flow {
             return at.start(self.refsOf(), tail);
         }
 

@@ -58,8 +58,9 @@ fn Queue(comptime capacity: usize) type {
                     if (self.supervision) |supervision| supervision.adopt(self.io);
                 }
 
-                pub fn start(self: *Self, down: anytype) !void {
+                pub fn start(self: *Self, down: anytype) !Flow {
                     self.consumer = try self.io.concurrent(Consumer(@TypeOf(down)).run, .{ self, down });
+                    return .more;
                 }
 
                 fn Consumer(comptime Down: type) type {
@@ -95,6 +96,10 @@ fn Queue(comptime capacity: usize) type {
                 }
 
                 pub fn push(self: *Self, item: In, _: anytype) !Flow {
+                    // Never started: the pipe was done before startup got
+                    // here. With no consumer, an item put in the buffer would
+                    // stay there, and the next one would wait for space forever.
+                    if (self.consumer == null) return .done;
                     self.channel.putOne(self.io, item) catch |err| switch (err) {
                         error.Closed => return .done,
                         error.Canceled => return error.Canceled,
@@ -210,8 +215,16 @@ fn Branch(comptime Ps: type) type {
                     }
                 }
 
-                pub fn start(self: *@This(), _: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(Closed{});
+                pub fn start(self: *@This(), _: anytype) !Flow {
+                    inline for (0..n) |i| {
+                        if (try self.chains[i].start(Closed{}) == .done) {
+                            self.arms.finished(i);
+                            // Only a sub-pipe that has been started can be
+                            // done, so if none wants an item, all were.
+                            if (!self.arms.anyWants()) return .done;
+                        }
+                    }
+                    return .more;
                 }
 
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
@@ -416,8 +429,11 @@ fn Route(comptime Cs: type) type {
                     }
                 }
 
-                pub fn start(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(self.tail(down, true));
+                pub fn start(self: *Self, down: anytype) !Flow {
+                    inline for (0..n) |i| {
+                        if (try self.chains[i].start(self.tail(down, true)) == .done) self.arms.finished(i);
+                    }
+                    return self.verdict();
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {

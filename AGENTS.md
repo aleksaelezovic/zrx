@@ -62,11 +62,18 @@ to this file; edit `AGENTS.md`, not copies.
   hooks), feeding (the source) and ending (finish and flush) as tasks, one
   after another; the caller waits on `Supervision` and cancels. Never run
   user code on the task that supervises: every hook can block.
-- **Done before the first item is still done.** If starting satisfies the
-  pipe, starting is cut short and feeding is skipped; `finish` may then reach
-  a stage whose `start` did not run. In a `route`, a predicate's failure is
-  ignored once the route is done (the check sits on the failure path: a check
-  ahead of the per-item work makes the optimizer peel the loop).
+- **Done before the first item is still done.** A stage's `start` answers
+  like a push (`!Flow`: `return down.push(x)`, or `.more`), and `branch` and
+  `route` answer for their sub-pipes. If starting satisfies the pipe, by that
+  answer or by a worker's, starting is cut short and the source is not run,
+  with or without a queue. `finish` may then reach a stage whose `start` did
+  not run: a `queue` that was never started answers `.done` and buffers
+  nothing.
+- **A stage that is done runs no user code for an item.** A `route` that is
+  done asks no predicate. What it asks first is one flag (`Arms.idle`), kept
+  up to date where a sub-pipe finishes: walking the cases ahead of the
+  per-item work makes the optimizer reshape the loop. For the same reason a
+  `start` reads no state on the path where nothing answered `.done`.
 - **The sequential fallback orders outcomes; it cannot cancel.** On an `Io`
   with no concurrency a member runs on the caller's task until it returns.
   Do not promise immediate cancellation there. After a failed launch, re-read

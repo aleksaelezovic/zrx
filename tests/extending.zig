@@ -84,8 +84,9 @@ const Echoed = struct {
                 self.journal.add('i');
             }
 
-            pub fn start(self: *@This(), _: anytype) !void {
+            pub fn start(self: *@This(), _: anytype) !zrx.Flow {
                 self.journal.add('s');
+                return .more;
             }
 
             pub fn push(self: *@This(), item: In, down: anytype) !zrx.Flow {

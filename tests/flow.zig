@@ -296,8 +296,8 @@ const Herald = struct {
                 self.value = op.value;
             }
 
-            pub fn start(self: *@This(), down: anytype) !void {
-                _ = try down.push(self.value);
+            pub fn start(self: *@This(), down: anytype) !zrx.Flow {
+                return down.push(self.value);
             }
 
             pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
@@ -719,10 +719,11 @@ const BlockingHerald = struct {
                 self.* = .{ .clock = zrx.di.get(env, std.Io), .flags = zrx.di.get(env, *Flags) };
             }
 
-            pub fn start(self: *@This(), down: anytype) !void {
+            pub fn start(self: *@This(), down: anytype) !zrx.Flow {
                 _ = try down.push(@as(In, 1));
                 try self.clock.sleep(.fromSeconds(5), .awake);
                 self.flags.woke_by_itself.store(true, .seq_cst);
+                return .more;
             }
 
             pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
@@ -785,18 +786,19 @@ const SatisfyingHerald = struct {
                 };
             }
 
-            pub fn start(self: *@This(), down: anytype) !void {
+            pub fn start(self: *@This(), down: anytype) !zrx.Flow {
                 _ = try down.push(@as(In, 1));
                 if (self.then_block) {
                     try self.clock.sleep(.fromSeconds(5), .awake);
                     self.flags.woke_by_itself.store(true, .seq_cst);
-                    return;
+                    return .more;
                 }
                 // Return only once the worker has reported that the pipe is done.
                 const signal = self.supervision.signal;
                 try signal.mutex.lock(self.clock);
                 defer signal.mutex.unlock(self.clock);
                 while (!signal.satisfied) try signal.changed.wait(self.clock, &signal.mutex);
+                return .more;
             }
 
             pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
@@ -831,4 +833,78 @@ test "a pipe that is done when startup returns never runs its source" {
     try program(zrx.fromProducer(u32, recordingSource), work).run(.{ io, &flags, &seen, &ran });
     try seen.expect(&.{1});
     try std.testing.expect(!ran.source.load(.seq_cst));
+}
+
+fn mustNotRun(_: anytype) error{SourceRan}!void {
+    return error.SourceRan;
+}
+
+test "a start emission that is all the pipe wanted keeps the source from running, queue or not" {
+    // The answer comes back to the start hook itself: no worker ever sees it.
+    var queued: Numbers = .{};
+    const with_queue = pipe(.{ Herald{ .value = 1 }, take(1), queue(2), subscribe(record) });
+    try program(zrx.fromProducer(u32, mustNotRun), with_queue).run(.{ io, &queued });
+    try queued.expect(&.{1});
+
+    var direct: Numbers = .{};
+    const without = pipe(.{ Herald{ .value = 1 }, take(1), subscribe(record) });
+    try program(zrx.fromProducer(u32, mustNotRun), without).run(.{&direct});
+    try direct.expect(&.{1});
+}
+
+test "inside a branch, startup has satisfied the pipe only when it has satisfied every sub-pipe" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const both = pipe(.{branch(.{
+        pipe(.{ Herald{ .value = 100 }, take(1), subscribe(toLeft) }),
+        pipe(.{ Herald{ .value = 200 }, take(1), queue(2), subscribe(toRight) }),
+    })});
+    try program(zrx.fromProducer(u32, mustNotRun), both).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{100});
+    try right.expect(&.{200});
+
+    var first: Numbers = .{};
+    var second: Numbers = .{};
+    const one = pipe(.{branch(.{
+        pipe(.{ Herald{ .value = 100 }, take(1), subscribe(toLeft) }),
+        pipe(.{subscribe(toRight)}),
+    })});
+    try program(range(u32, 0, 3), one).run(.{ Left{ .seen = &first }, Right{ .seen = &second } });
+    try first.expect(&.{100});
+    try second.expect(&.{ 0, 1, 2 });
+}
+
+test "a queue that was never started takes nothing at the end of the stream" {
+    // The start emission satisfies the pipe, so startup is cut short before
+    // the first queue is started. The two stages before it still emit at the
+    // end of the stream: with nobody to take them, one would fill the queue
+    // and the other would wait for space forever.
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        Trailer{ .value = 8 },
+        Trailer{ .value = 9 },
+        queue(1),
+        Herald{ .value = 1 },
+        take(1),
+        subscribe(record),
+    });
+    try program(zrx.fromProducer(u32, mustNotRun), work).run(.{ io, &seen });
+    try seen.expect(&.{1});
+}
+
+test "the same when a worker's answer cut startup short" {
+    var flags: Flags = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        Trailer{ .value = 8 },
+        Trailer{ .value = 9 },
+        queue(1),
+        SatisfyingHerald{ .then_block = true },
+        queue(2),
+        take(1),
+        subscribe(record),
+    });
+    try program(zrx.fromProducer(u32, mustNotRun), work).run(.{ io, &flags, &seen });
+    try seen.expect(&.{1});
+    try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
 }

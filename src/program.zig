@@ -62,8 +62,10 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         Frame.at.stop(refs);
                         Frame.at.deinit(refs);
                     }
-                    try Frame.at.start(refs, Closed{});
-                    try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
+                    // If starting already gave the pipe all it wanted, the
+                    // source is not run at all.
+                    if (try Frame.at.start(refs, Closed{}) == .more)
+                        try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
                     try Frame.at.finish(refs, Closed{}, {});
                     try Frame.at.flush(refs);
                 }
@@ -79,7 +81,8 @@ pub fn Program(comptime S: type, comptime P: type) type {
         ///
         /// - Starting is a task because a `start` hook can push, and block,
         ///   once the workers after it are running. If that push is all the
-        ///   pipe wanted, starting is cut short and the source never runs.
+        ///   pipe wanted, starting is cut short and the source never runs,
+        ///   whether the answer came back to the hook or from a worker.
         /// - Feeding is a task so that the source can be cancelled. When a
         ///   worker fails, or nothing wants another item, the source is not
         ///   left to find out at its next push, which for an idle source
@@ -111,9 +114,11 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     wake.changed.broadcast(io);
                 }
 
-                fn begin(refs: Frame.Refs, wake: *Signal, io: Io) !void {
+                fn begin(refs: Frame.Refs, whole: Supervision, wake: *Signal, io: Io) !void {
                     defer ended(wake, io, .starting);
-                    return Frame.at.start(refs, Closed{});
+                    // A worker says so itself; an answer that came back to a
+                    // start hook is on record before this task is seen to end.
+                    if (try Frame.at.start(refs, Closed{}) == .done) whole.satisfy(io);
                 }
 
                 fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
@@ -163,8 +168,8 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // `init`. With none, there is nobody to supervise.
                     const entry: Entry(Frame, S.Item) = .{ .refs = refs };
                     const io = wake.io orelse {
-                        try Frame.at.start(refs, Closed{});
-                        try body.program.source.run(body.env, entry);
+                        if (try Frame.at.start(refs, Closed{}) == .more)
+                            try body.program.source.run(body.env, entry);
                         try Frame.at.finish(refs, Closed{}, body.supervision);
                         return Frame.at.flush(refs);
                     };
@@ -172,7 +177,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // In every phase a worker's failure is resolved first: it
                     // is the cause, and what the phase itself returned may
                     // only be its consequence.
-                    var starting = try io.concurrent(Tasks.begin, .{ refs, wake, io });
+                    var starting = try io.concurrent(Tasks.begin, .{ refs, body.supervision, wake, io });
                     const started_by_itself = Tasks.wait(wake, io, .starting) catch |err| {
                         // This task is being cancelled: so is the phase.
                         starting.cancel(io) catch {};

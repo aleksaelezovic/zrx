@@ -109,7 +109,7 @@ until it returns. The same holds for the sources of a `merge`.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io` at `run`. Once the pipe is done, sources still waiting are cancelled. A push that fails ends the merge with that error at once, whatever its source goes on to do or return. Sources are started like the programs of a `system`. |
+| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io` at `run`. Once the pipe is done, sources still waiting are cancelled. A push that fails ends the merge with that error, whatever its source goes on to do or return: at once where the `Io` has concurrency, and otherwise when the source that is running returns. Sources are started like the programs of a `system`. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -248,6 +248,11 @@ another item. `take` and `takeWhile` answer `.done`; sources stop when they see
 it; `branch` and `route` answer `.done` once every sub-pipe has. The stream then
 finishes normally: `fold` emits, writers flush.
 
+A pipe can be done before the first item: a stage emitted as the run started
+and that was all anything wanted. Its source is then never run. What is done
+runs none of your code for an item that still arrives (a final value from a
+stage before it): a `route` that is done asks no predicate.
+
 ## Concurrency and backpressure
 
 Without `queue`, a program is one loop on the caller's task. `queue(n)` is the
@@ -270,8 +275,8 @@ when all of them are done, and the first failure ends it:
 - **A pipe that is done stops its source** the same way (`take` after a
   `queue`). Inside `branch` and `route` that means every sub-pipe: one being
   done says nothing about its siblings, so the source is stopped when the
-  last one is. If the pipe is already done before the first item (a stage
-  emitted as the run started), the source is not run at all.
+  last one is. A pipe that is done before the first item never runs its
+  source here either, whether a stage or a worker found that out.
 - **Every task is cancelled and joined before any resource is released**, so
   a handler never runs against a released resource.
 - **Cancellation is cooperative**: it takes effect where a task calls into
@@ -396,7 +401,8 @@ const Counted = struct {
 ```
 
 A stage may also declare `start`, `finish`, `flush`, `stop`, `deinit` and,
-with `Provides`, `provide`. A stage that runs a task of its own takes part in
+with `Provides`, `provide`. `start(self, down) !Flow` answers like a push:
+`return down.push(x)` if it emits, `.more` if it does not. A stage that runs a task of its own takes part in
 the run's supervision (`zrx.operator.Supervision`): it gives its `Io` in `init`
 (`adopt`), reports when its worker fails (before waking anyone who would react
 to it), and returns that error from `failure(self, down) !void`, so the errors
