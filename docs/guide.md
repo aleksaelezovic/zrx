@@ -251,9 +251,8 @@ finishes normally: `fold` emits, writers flush.
 Done is final. Whoever is answered `.done` stops pushing, and a value that
 an earlier stage emits afterwards (a final value as the stream ends) is
 dropped where it is emitted: no handler between that stage and the one that
-is done runs for it. The answer has to have come back through a push, so
-across a `queue` this starts at the near side's next push; until then such a
-value still passes the stages before the queue.
+is done runs for it. That holds across a `queue` too: once its far side is
+done, a final value emitted before the queue is dropped as well.
 
 A pipe can be done before the first item: a stage emitted as the run started
 and that was all anything wanted. Its source is then never run. A `route`
@@ -283,6 +282,14 @@ when all of them are done, and the first failure ends it:
   done says nothing about its siblings, so the source is stopped when the
   last one is. A pipe that is done before the first item never runs its
   source here either, whether a stage or a worker found that out.
+- **What comes before a queue that is done is not waited for.** A producer
+  waiting for space in an earlier queue moves on, and a worker stuck in a
+  handler between two queues is cancelled at the end of the stream instead
+  of awaited: its item is one nobody takes.
+- **A failure over something nobody takes is not the run's failure.** If a
+  handler, a predicate, a start hook or the source fails after a worker has
+  said that its pipe (or sub-pipe) wants no more, that failure is dropped.
+  Being cancelled is never dropped.
 - **Every task is cancelled and joined before any resource is released**, so
   a handler never runs against a released resource.
 - **Cancellation is cooperative**: it takes effect where a task calls into

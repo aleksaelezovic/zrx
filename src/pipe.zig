@@ -19,6 +19,8 @@
 //!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
 //!     pub fn stop(self: *Stage) void                     // optional: cancel and join any task this stage runs
 //!     pub fn failure(self: *Stage, down: anytype) !void  // with a worker: the error it ended with, if any
+//!     pub fn takesNoMore(self: *Stage) bool              // optional: would answer `.done`, without being pushed to
+//!     pub fn settle(self: *Stage, after_is_done: bool) void // optional: told whether what follows it takes no more
 //!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
 //!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
@@ -48,6 +50,14 @@
 //! A stage that runs a task takes part in the run's `Supervision` (see below):
 //! it reports when its worker ends and why, and joins it through the
 //! supervision so that the join gives way to a failure elsewhere.
+//!
+//! `takesNoMore` and `settle` are how "done" travels against the flow when
+//! nothing is being pushed. Both are called from whichever task needs to
+//! know, the supervising one included, so they must be safe to call from any
+//! task and must not block. `queue` answers `takesNoMore` once its far side
+//! is done, and on `settle(true)` stops taking items and lets go of its
+//! worker; `branch` and `route` answer for their sub-pipes and pass `settle`
+//! on to them.
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -120,6 +130,9 @@ pub const Supervision = struct {
         /// Nothing in the pipe wants another item.
         satisfied: bool = false,
         has_satisfied: std.atomic.Value(bool) = .init(false),
+        /// Counts what workers have said about being done, at any depth:
+        /// the run settles the pipe again when this has moved.
+        news: usize = 0,
         /// The task running the stages' `start` hooks has returned.
         starting_ended: bool = false,
         /// The task feeding the pipe from the source has returned.
@@ -190,19 +203,36 @@ pub const Supervision = struct {
         return signal.failed_stage;
     }
 
-    /// A worker's side of the pipe wants no more items.
+    /// A worker's side of the pipe wants no more items. Whether that makes
+    /// the whole pipe done or only a sub-pipe, the run is told: what comes
+    /// before that worker may be working, or waiting, for nothing.
     pub fn satisfy(supervision: Supervision, io: Io) void {
         var current = supervision;
         while (current.scope) |scope| {
             scope.done[current.arm].store(true, .seq_cst);
-            for (scope.done) |*done| if (!done.load(.seq_cst)) return;
+            for (scope.done) |*done| if (!done.load(.seq_cst)) {
+                return current.signal.update(io, struct {
+                    fn change(signal: *Signal) void {
+                        signal.news += 1;
+                    }
+                }.change);
+            };
             current = scope.parent;
         }
         current.signal.update(io, struct {
             fn change(signal: *Signal) void {
                 signal.satisfied = true;
                 signal.has_satisfied.store(true, .release);
+                signal.news += 1;
             }
+        }.change);
+    }
+
+    /// The run has settled the pipe (`Chain.at.settle`): wakes whoever waits
+    /// for a worker that may have been let go of.
+    pub fn settled(supervision: Supervision, io: Io) void {
+        supervision.signal.update(io, struct {
+            fn change(_: *Signal) void {}
         }.change);
     }
 
@@ -235,14 +265,29 @@ pub const Supervision = struct {
         return current.signal.has_satisfied.load(.acquire);
     }
 
-    /// Waits for the worker that reports through `ended`. Returns false when
-    /// another worker failed first: the wait is over, the worker is not.
-    pub fn awaitWorker(supervision: Supervision, io: Io, ended: *const bool) Io.Cancelable!bool {
+    /// How a wait for a worker ended.
+    pub const Awaited = enum {
+        /// It returned.
+        ended,
+        /// It did not, and what it works for is no longer wanted.
+        released,
+        /// It did not, and another worker failed: the run is over.
+        failed_elsewhere,
+    };
+
+    /// Waits for the worker that reports through `ended`, unless it has been
+    /// let go of (`released`) or another worker failed first: then the wait
+    /// is over, the worker is not.
+    pub fn awaitWorker(supervision: Supervision, io: Io, ended: *const bool, released: *const std.atomic.Value(bool)) Io.Cancelable!Awaited {
         const signal = supervision.signal;
         signal.mutex.lockUncancelable(io);
         defer signal.mutex.unlock(io);
-        while (!ended.* and signal.failed_stage == null) try signal.changed.wait(io, &signal.mutex);
-        return ended.*;
+        while (true) {
+            if (ended.*) return .ended;
+            if (signal.failed_stage != null) return .failed_elsewhere;
+            if (released.load(.acquire)) return .released;
+            try signal.changed.wait(io, &signal.mutex);
+        }
     }
 };
 
@@ -309,6 +354,15 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
             if (!supervised) return !self.idle;
             inline for (0..n) |i| if (self.wants(i)) return true;
             return false;
+        }
+
+        /// Whether a failure that came out of sub-pipe `i` no longer matters:
+        /// a worker has said meanwhile that the sub-pipe wants no more, so
+        /// what failed was for an item nobody takes. Being cancelled always
+        /// matters. Without workers this cannot happen.
+        pub fn moot(self: *const Self, comptime i: usize, err: anyerror) bool {
+            if (!supervised) return false;
+            return err != error.Canceled and !self.wants(i);
         }
 
         /// What to hand a sub-pipe's `finish`, so it stops once the run has failed.
@@ -570,6 +624,17 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 /// that would only be refused at the end of it.
                 pub fn isDone(late: @This()) bool {
                     if (afterIsDone(late.refs, i - 1).*) return true;
+                    // A later stage that can tell without being pushed to
+                    // (a queue whose far side is done): everything from here
+                    // on leads to it.
+                    inline for (i..n) |k| {
+                        if (@hasDecl(stages[k], "takesNoMore")) {
+                            if (late.refs[k].takesNoMore()) {
+                                afterIsDone(late.refs, i - 1).* = true;
+                                return true;
+                            }
+                        }
+                    }
                     if (comptime !answersDone(Tail)) return false;
                     if (!late.tail.isDone()) return false;
                     // Remembered for every stage: the tail given next time
@@ -649,6 +714,26 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             pub fn push(refs: Refs, item: In, tail: anytype) !Flow {
                 const first: Down(@TypeOf(tail), 0) = .{ .refs = refs, .tail = tail };
                 return first.push(item);
+            }
+
+            /// Carries "done" against the flow: tells every stage whether
+            /// something after it takes no more (`after_is_done` for the
+            /// last one), and answers whether this chain itself takes no
+            /// more. A supervised run does this whenever a worker has said
+            /// it is done, so that a queue before that worker stops taking
+            /// items and lets go of a worker that may be stuck in a handler.
+            /// Called from the supervising task while stages run.
+            pub fn settle(refs: Refs, after_is_done: bool) bool {
+                var done = after_is_done;
+                comptime var k = n;
+                inline while (k > 0) {
+                    k -= 1;
+                    if (@hasDecl(stages[k], "settle")) refs[k].settle(done);
+                    if (@hasDecl(stages[k], "takesNoMore")) {
+                        if (refs[k].takesNoMore()) done = true;
+                    }
+                }
+                return done;
             }
 
             /// `guard` is the run's `Supervision`, or `{}`. With it, once a
@@ -754,6 +839,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         pub fn finish(self: *Self, tail: anytype, guard: anytype) !void {
             return at.finish(self.refsOf(), tail, guard);
+        }
+
+        pub fn settle(self: *Self, after_is_done: bool) bool {
+            return at.settle(self.refsOf(), after_is_done);
         }
 
         pub fn flush(self: *Self) !void {

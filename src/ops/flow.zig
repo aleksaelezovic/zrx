@@ -44,6 +44,12 @@ fn Queue(comptime capacity: usize) type {
                 supervision: ?core.Supervision,
                 /// The consumer has returned. Guarded by the supervision.
                 ended: bool,
+                /// The far side wants no more: the consumer was answered
+                /// `.done`. Set by the consumer, read from any task.
+                satisfied: std.atomic.Value(bool),
+                /// Something after this queue takes no more (`settle`), so
+                /// what its worker is doing is for nothing. Read from any task.
+                released: std.atomic.Value(bool),
 
                 const Self = @This();
                 pub const zrx_boundary = {};
@@ -55,6 +61,8 @@ fn Queue(comptime capacity: usize) type {
                     self.ended_with = null;
                     self.supervision = if (comptime di.has(Env, core.Supervision)) di.get(env, core.Supervision) else null;
                     self.ended = false;
+                    self.satisfied = .init(false);
+                    self.released = .init(false);
                     if (self.supervision) |supervision| supervision.adopt(self.io);
                 }
 
@@ -73,12 +81,17 @@ fn Queue(comptime capacity: usize) type {
                                 const count = self.channel.get(self.io, &ready, 1) catch break .drained;
                                 for (ready[0..count]) |item| {
                                     const flow = down.push(item) catch |err| {
+                                        // Let go of: whatever the handlers
+                                        // made of being interrupted, it was
+                                        // for an item nobody takes.
+                                        if (self.released.load(.acquire)) break :consuming .drained;
                                         self.ended_with = err;
                                         break :consuming .failed;
                                     };
                                     if (flow == .done) break :consuming .satisfied;
                                 }
                             };
+                            if (ending == .satisfied) self.satisfied.store(true, .release);
                             // Tell the run first, then wake the producer. A producer
                             // that is not pushing would never look; one that is must
                             // not get to answer for the closed queue before the reason
@@ -110,16 +123,40 @@ fn Queue(comptime capacity: usize) type {
                 pub fn finish(self: *Self, down: anytype) !void {
                     self.channel.close(self.io);
                     if (self.consumer) |*consumer| {
-                        if (self.supervision) |supervision| {
-                            // Wait for this worker to drain, unless another one
-                            // fails meanwhile: then the run is over, and `stop`
-                            // is what ends this worker.
-                            if (!try supervision.awaitWorker(self.io, &self.ended)) return error.Canceled;
+                        const awaited: core.Supervision.Awaited = if (self.supervision) |supervision|
+                            try supervision.awaitWorker(self.io, &self.ended, &self.released)
+                        else
+                            .ended;
+                        switch (awaited) {
+                            // Drained.
+                            .ended => consumer.await(self.io),
+                            // What follows this queue takes no more: the
+                            // worker is not waited for, however long the
+                            // handler it is in would take.
+                            .released => consumer.cancel(self.io),
+                            // Another worker failed: the run is over, and
+                            // `stop` is what ends this one.
+                            .failed_elsewhere => return error.Canceled,
                         }
-                        consumer.await(self.io);
                         self.consumer = null;
                     }
                     return self.failure(down);
+                }
+
+                /// Whether the far side wants no more, or what follows it
+                /// takes none: an item put in would be for nothing.
+                pub fn takesNoMore(self: *Self) bool {
+                    return self.satisfied.load(.acquire) or self.released.load(.acquire);
+                }
+
+                /// When something after this queue takes no more: a producer
+                /// waiting for space is answered `.done`, and the worker,
+                /// which may be stuck in a handler, is let go of (`finish`
+                /// will not wait for it).
+                pub fn settle(self: *Self, after_is_done: bool) void {
+                    if (!after_is_done) return;
+                    if (self.released.swap(true, .acq_rel)) return;
+                    self.channel.close(self.io);
                 }
 
                 /// The error the consumer ended with, if it failed: one that
@@ -217,7 +254,11 @@ fn Branch(comptime Ps: type) type {
 
                 pub fn start(self: *@This(), _: anytype) !Flow {
                     inline for (0..n) |i| {
-                        if (try self.chains[i].start(Closed{}, self.arms.guardOf(i)) == .done) {
+                        const answer = self.chains[i].start(Closed{}, self.arms.guardOf(i)) catch |err| unwanted: {
+                            if (!self.arms.moot(i, err)) return err;
+                            break :unwanted Flow.done;
+                        };
+                        if (answer == .done) {
                             self.arms.finished(i);
                             // Only a sub-pipe that has been started can be
                             // done, so if none wants an item, all were.
@@ -230,7 +271,14 @@ fn Branch(comptime Ps: type) type {
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
                     inline for (0..n) |i| {
                         if (self.arms.wants(i)) {
-                            if (try self.chains[i].push(item, Closed{}) == .done) self.arms.finished(i);
+                            // A failure over an item that the sub-pipe, by
+                            // a worker's word, no longer wants is not the
+                            // run's failure.
+                            const flow = self.chains[i].push(item, Closed{}) catch |err| unwanted: {
+                                if (!self.arms.moot(i, err)) return err;
+                                break :unwanted Flow.done;
+                            };
+                            if (flow == .done) self.arms.finished(i);
                         }
                     }
                     // Asked after every sub-pipe has had the item, not summed
@@ -241,6 +289,14 @@ fn Branch(comptime Ps: type) type {
 
                 pub fn failureOf(self: *@This(), _: anytype, who: *const anyopaque) !void {
                     inline for (0..n) |i| try self.chains[i].failureOf(Closed{}, who);
+                }
+
+                pub fn takesNoMore(self: *@This()) bool {
+                    return !self.arms.anyWants();
+                }
+
+                pub fn settle(self: *@This(), _: bool) void {
+                    inline for (0..n) |i| _ = self.chains[i].settle(false);
                 }
 
                 pub fn finish(self: *@This(), _: anytype) !void {
@@ -461,7 +517,11 @@ fn Route(comptime Cs: type) type {
                         // start. (A worker's word that the pipe wants no
                         // more needs nothing here: each case's own guard
                         // looks at every pipe the case lies in.)
-                        if (try self.chains[i].start(self.tail(down), self.arms.guardOf(i)) == .done) self.arms.finished(i);
+                        const answer = self.chains[i].start(self.tail(down), self.arms.guardOf(i)) catch |err| unwanted: {
+                            if (!self.arms.moot(i, err)) return err;
+                            break :unwanted Flow.done;
+                        };
+                        if (answer == .done) self.arms.finished(i);
                     }
                     return if (self.outputIsDone(down)) .done else self.verdict();
                 }
@@ -495,7 +555,17 @@ fn Route(comptime Cs: type) type {
                         const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
                             if (self.arms.wants(i)) {
-                                if (try self.chains[i].push(item, self.tail(down)) == .done) self.arms.finished(i);
+                                // A failure over an item that the case, by a
+                                // worker's word, no longer wants is not the
+                                // run's failure. (A predicate's needs nothing
+                                // here: if every case is done, so is the pipe
+                                // the route ends, and whoever pushed into
+                                // that pipe sees it.)
+                                const flow = self.chains[i].push(item, self.tail(down)) catch |err| unwanted: {
+                                    if (!self.arms.moot(i, err)) return err;
+                                    break :unwanted Flow.done;
+                                };
+                                if (flow == .done) self.arms.finished(i);
                             }
                             return self.verdict();
                         }
@@ -515,6 +585,15 @@ fn Route(comptime Cs: type) type {
 
                 pub fn flush(self: *Self) !void {
                     inline for (0..n) |i| try self.chains[n - 1 - i].flush();
+                }
+
+                pub fn takesNoMore(self: *Self) bool {
+                    return !self.arms.anyWants();
+                }
+
+                pub fn settle(self: *Self, after_is_done: bool) void {
+                    // What follows a rejoining case is what follows the route.
+                    inline for (0..n) |i| _ = self.chains[i].settle(rejoins and after_is_done);
                 }
 
                 pub fn failureOf(self: *Self, down: anytype, who: *const anyopaque) !void {

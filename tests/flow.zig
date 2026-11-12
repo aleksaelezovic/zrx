@@ -1340,3 +1340,332 @@ test "a worker's failure stops startup at any depth" {
         }
     }
 }
+
+// --- a worker's "done" travels against the flow ----------------------------------
+//
+// When a worker has said that its side wants no more, what comes before it
+// may be working, or waiting, for nothing: a worker stuck in a handler
+// between two queues, a producer waiting for space, a handler over a final
+// value. None of them is waited for, and none of their failures counts.
+//
+// Reproductions from an adversarial review of 6d1278c. Each of these fails.
+
+/// What the tests below share with their handlers.
+const Stuck = struct {
+    gate: std.Io.Event = .unset,
+    source_woke: std.atomic.Value(bool) = .init(false),
+    handler_woke: std.atomic.Value(bool) = .init(false),
+    sibling_waited: std.atomic.Value(bool) = .init(false),
+    /// The `Supervision` of the pipe `Expose` sits in.
+    supervision: ?zrx.operator.Supervision = null,
+};
+
+/// Copies the `Supervision` of the pipe it is in to the injected `*Stuck`,
+/// so that a handler can wait, without calling into `std.Io`, for what a
+/// worker reports.
+const Expose = struct {
+    pub const zrx_operator = {};
+    pub const name = "expose";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const Expose, env: Env) !void {
+                zrx.di.get(env, *Stuck).supervision = zrx.di.get(env, zrx.operator.Supervision);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+/// Pushes 1 and 2, says so, then waits far longer than a test should take.
+fn pushTwoThenIdle(clock: std.Io, stuck: *Stuck, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    _ = try out.push(@as(u32, 2));
+    stuck.gate.set(clock);
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.source_woke.store(true, .seq_cst);
+}
+
+/// Between two queues. Item 1 goes on once item 2 is in the queue behind it;
+/// item 2 blocks far longer than a test should take.
+fn firstWaitsSecondBlocks(clock: std.Io, stuck: *Stuck, value: u32) !void {
+    if (value == 1) return stuck.gate.wait(clock);
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.handler_woke.store(true, .seq_cst);
+}
+
+test "a pipe that is done does not wait for a handler between two queues" {
+    // take(1) is satisfied by item 1, so the whole pipe is done and the idle
+    // source is interrupted. The worker between the two queues is meanwhile
+    // blocked in its handler over item 2, which nothing wants: the run must
+    // not wait for that handler (it would be cancelled had the pipe failed).
+    var stuck: Stuck = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        queue(4),
+        tap(firstWaitsSecondBlocks),
+        queue(4),
+        take(1),
+        subscribe(record),
+    });
+    try program(zrx.fromProducer(u32, pushTwoThenIdle), work).run(.{ io, &stuck, &seen });
+    try seen.expect(&.{1});
+    try std.testing.expect(!stuck.source_woke.load(.seq_cst));
+    try std.testing.expect(!stuck.handler_woke.load(.seq_cst));
+}
+
+fn pushOneThenIdle(clock: std.Io, stuck: *Stuck, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.source_woke.store(true, .seq_cst);
+}
+
+/// Blocks over the final value only.
+fn blockOnNine(clock: std.Io, stuck: *Stuck, value: u32) !void {
+    if (value != 9) return;
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.handler_woke.store(true, .seq_cst);
+}
+
+test "a final value before a queue that is done reaches no handler" {
+    // The pipe has been done since item 1. The trailer's final value is
+    // dropped where it is emitted: the queue ahead of it can tell that it
+    // takes no more, so the handler in between, which would block, never runs.
+    var stuck: Stuck = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        Trailer{ .value = 9 },
+        tap(blockOnNine),
+        queue(4),
+        take(1),
+        subscribe(record),
+    });
+    try program(zrx.fromProducer(u32, pushOneThenIdle), work).run(.{ io, &stuck, &seen });
+    try seen.expect(&.{1});
+    try std.testing.expect(!stuck.source_woke.load(.seq_cst));
+    try std.testing.expect(!stuck.handler_woke.load(.seq_cst));
+}
+
+/// On the source's side of the first queue. Over the last item: lets the far
+/// side finish, and goes on only once that has made this sub-pipe done.
+fn lastWaitsUntilDone(clock: std.Io, stuck: *Stuck, value: u32) void {
+    if (value != 4) return;
+    stuck.gate.set(clock);
+    while (!stuck.supervision.?.wantsNoMore()) std.Thread.yield() catch {};
+}
+/// Between the queues: item 2 blocks far longer than a test should take.
+fn secondBlocks(clock: std.Io, stuck: *Stuck, value: u32) !void {
+    if (value != 2) return;
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.handler_woke.store(true, .seq_cst);
+}
+fn waitForTheGate(clock: std.Io, stuck: *Stuck, _: u32) !void {
+    try stuck.gate.wait(clock);
+}
+/// The sibling: records whether its last item only came once the handler in
+/// the sub-pipe that is done had woken by itself.
+fn siblingSees(stuck: *Stuck, sink: Right, value: u32) void {
+    if (value == 4 and stuck.handler_woke.load(.seq_cst)) stuck.sibling_waited.store(true, .seq_cst);
+    sink.seen.add(value);
+}
+
+test "a sub-pipe that is done does not keep items from its sibling" {
+    // The first sub-pipe is done (its far side took one item and said so)
+    // before the source hands it item 4. Its first queue is full, because
+    // the worker behind it is blocked in a handler over item 2. The source
+    // then waits for that handler, and so does the sibling, which wants
+    // every item.
+    var stuck: Stuck = .{};
+    var right: Numbers = .{};
+    const done_early = pipe(.{
+        Expose{},
+        tap(lastWaitsUntilDone),
+        queue(1),
+        tap(secondBlocks),
+        queue(1),
+        take(1),
+        subscribe(waitForTheGate),
+    });
+    const work = pipe(.{branch(.{
+        done_early,
+        pipe(.{subscribe(siblingSees)}),
+    })});
+    try program(range(u32, 1, 5), work).run(.{ io, &stuck, Right{ .seen = &right } });
+    try right.expect(&.{ 1, 2, 3, 4 });
+    try std.testing.expect(!stuck.sibling_waited.load(.seq_cst));
+}
+
+/// True for 1. Over 2: lets the queued case finish, waits (without calling
+/// into `std.Io`) until that has made the route done, and only then fails.
+fn failsOnceTheRouteIsDone(clock: std.Io, stuck: *Stuck, value: u32) error{PredicateFailed}!bool {
+    if (value == 1) return true;
+    stuck.gate.set(clock);
+    while (!stuck.supervision.?.wantsNoMore()) std.Thread.yield() catch {};
+    return error.PredicateFailed;
+}
+
+test "a predicate's failure over an item its route no longer wants is not the run's" {
+    // The route's only case is done through its worker while the predicate
+    // is running for item 2. The sibling wants every item, so nothing
+    // cancels the source: the route has to see for itself that the item it
+    // failed over is one nobody takes.
+    var stuck: Stuck = .{};
+    var right: Numbers = .{};
+    const routed = pipe(.{
+        Expose{},
+        route(.{when(failsOnceTheRouteIsDone, pipe(.{ queue(2), take(1), subscribe(waitForTheGate) }))}),
+    });
+    const work = pipe(.{branch(.{
+        routed,
+        pipe(.{subscribe(toRight)}),
+    })});
+    try program(range(u32, 1, 3), work).run(.{ io, &stuck, Right{ .seen = &right } });
+    try right.expect(&.{ 1, 2 });
+}
+
+/// Fine for 1. Over 2: lets the far side finish, waits (without calling into
+/// `std.Io`) until that has made this sub-pipe done, and only then fails.
+fn failsOnceDone(clock: std.Io, stuck: *Stuck, value: u32) error{HandlerFailed}!u32 {
+    if (value == 1) return value;
+    stuck.gate.set(clock);
+    while (!stuck.supervision.?.wantsNoMore()) std.Thread.yield() catch {};
+    return error.HandlerFailed;
+}
+
+/// Pushes 1, waits until that has made the pipe done, and only then fails.
+fn sourceFailsOnceDone(clock: std.Io, stuck: *Stuck, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    stuck.gate.set(clock);
+    while (!stuck.supervision.?.wantsNoMore()) std.Thread.yield() catch {};
+    return error.SourceFailed;
+}
+
+/// As the run starts: pushes one item, waits until that has made its pipe
+/// done, and only then fails.
+const FailsOnceDone = struct {
+    pub const zrx_operator = {};
+    pub const name = "failsOnceDone";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            supervision: zrx.operator.Supervision,
+
+            pub fn init(self: *@This(), _: *const FailsOnceDone, env: Env) !void {
+                self.supervision = zrx.di.get(env, zrx.operator.Supervision);
+            }
+
+            pub fn start(self: *@This(), down: anytype) !zrx.Flow {
+                _ = try down.push(@as(In, 1));
+                while (!self.supervision.wantsNoMore()) std.Thread.yield() catch {};
+                return error.StartFailed;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+test "a failure over something nobody takes any more is not the run's failure" {
+    for (0..50) |_| {
+        // A handler, in a sub-pipe whose sibling keeps the run going.
+        var stuck: Stuck = .{};
+        var right: Numbers = .{};
+        const handler = pipe(.{branch(.{
+            pipe(.{ Expose{}, map(failsOnceDone), queue(2), take(1), subscribe(waitForTheGate) }),
+            pipe(.{subscribe(toRight)}),
+        })});
+        try program(range(u32, 1, 3), handler).run(.{ io, &stuck, Right{ .seen = &right } });
+        try right.expect(&.{ 1, 2 });
+
+        // The same in a case of a route.
+        var routed_stuck: Stuck = .{};
+        var routed_right: Numbers = .{};
+        const in_a_case = pipe(.{branch(.{
+            pipe(.{route(.{
+                when(isEven, pipe(.{drain()})),
+                otherwise(pipe(.{ Expose{}, map(failsOnceDone), queue(2), take(1), subscribe(waitForTheGate) })),
+            })}),
+            pipe(.{subscribe(toRight)}),
+        })});
+        // 1 goes to the case and satisfies it; 3 is the item it fails over.
+        try program(zrx.fromSlice(&[_]u32{ 1, 2, 3, 2 }), in_a_case).run(.{ io, &routed_stuck, Right{ .seen = &routed_right } });
+        try routed_right.expect(&.{ 1, 2, 3, 2 });
+
+        // A start hook, in a sub-pipe and in the whole pipe.
+        var left: Numbers = .{};
+        var started_right: Numbers = .{};
+        const hook = pipe(.{branch(.{
+            pipe(.{ FailsOnceDone{}, queue(2), take(1), subscribe(toLeft) }),
+            pipe(.{subscribe(toRight)}),
+        })});
+        try program(range(u32, 5, 7), hook).run(.{ io, Left{ .seen = &left }, Right{ .seen = &started_right } });
+        try left.expect(&.{1});
+        try started_right.expect(&.{ 5, 6 });
+
+        var seen: Numbers = .{};
+        const whole = pipe(.{ FailsOnceDone{}, queue(2), take(1), subscribe(record) });
+        try program(zrx.fromProducer(u32, mustNotRun), whole).run(.{ io, &seen });
+        try seen.expect(&.{1});
+
+        // The source itself, once the whole pipe is done.
+        var source_stuck: Stuck = .{};
+        var from_source: Numbers = .{};
+        const sourced = pipe(.{ Expose{}, queue(2), take(1), subscribe(record) });
+        try program(zrx.fromProducer(u32, sourceFailsOnceDone), sourced).run(.{ io, &source_stuck, &from_source });
+        try from_source.expect(&.{1});
+    }
+}
+
+test "a queue before a route case or a branch that is done lets go of its worker" {
+    // As for two queues in a row, with the queue that is done one level in:
+    // inside a case of a route, whose sibling arm wants every item.
+    var stuck: Stuck = .{};
+    var right: Numbers = .{};
+    const done_early = pipe(.{
+        Expose{},
+        tap(lastWaitsUntilDone),
+        queue(1),
+        tap(secondBlocks),
+        queue(1),
+        take(1),
+        subscribe(waitForTheGate),
+    });
+    const in_a_case = pipe(.{branch(.{
+        pipe(.{route(.{otherwise(done_early)})}),
+        pipe(.{subscribe(siblingSees)}),
+    })});
+    try program(range(u32, 1, 5), in_a_case).run(.{ io, &stuck, Right{ .seen = &right } });
+    try right.expect(&.{ 1, 2, 3, 4 });
+    try std.testing.expect(!stuck.sibling_waited.load(.seq_cst));
+
+    // And with what is done after the queue being a branch: every arm of it.
+    var before: Stuck = .{};
+    var first: Numbers = .{};
+    var second: Numbers = .{};
+    const before_a_branch = pipe(.{
+        queue(4),
+        tap(firstWaitsSecondBlocks),
+        branch(.{
+            pipe(.{ queue(4), take(1), subscribe(toLeft) }),
+            pipe(.{ queue(4), take(1), subscribe(toRight) }),
+        }),
+    });
+    try program(zrx.fromProducer(u32, pushTwoThenIdle), before_a_branch).run(.{ io, &before, Left{ .seen = &first }, Right{ .seen = &second } });
+    try first.expect(&.{1});
+    try second.expect(&.{1});
+    try std.testing.expect(!before.source_woke.load(.seq_cst));
+    try std.testing.expect(!before.handler_woke.load(.seq_cst));
+}

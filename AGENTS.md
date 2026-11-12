@@ -36,9 +36,24 @@ to this file; edit `AGENTS.md`, not copies.
   stops pushing. For what a stage emits outside of `push` (`start`, `finish`)
   the chain remembers, beside that stage, that what follows it answered
   `.done`, and drops the emission there (`Late` in `src/pipe.zig`): no stage
-  in between runs for it. Operators do not guard this themselves. The answer
-  has to have travelled by a push: across a `queue` the near side learns it
-  at its next push.
+  in between runs for it. Operators do not guard this themselves. A late
+  emission also looks ahead: a later stage that can tell without being pushed
+  to (`takesNoMore`: a `queue` whose far side is done, a `branch` or `route`
+  whose sub-pipes all are) closes it as well.
+- **A worker's "done" travels against the flow.** Every such report, for a
+  sub-pipe as much as for the whole pipe, is news to the run (`Signal.news`),
+  which then settles the pipe (`Chain.at.settle`): each stage is told whether
+  something after it takes no more. A `queue` that is told so stops taking
+  items, so a producer waiting for space moves on, and is released: `finish`
+  cancels its worker instead of waiting for a handler that works for
+  nothing. `takesNoMore` and `settle` run on any task, the supervising one
+  included: atomics only, never blocking.
+- **What a done pipe leaves behind does not count.** A failure that comes
+  out of a sub-pipe, the source or startup after a worker has said that this
+  pipe wants no more was for something nobody takes, and is dropped by the
+  task that failed (`Arms.moot`, `Tasks.unwanted`), not by whoever sees
+  which first. So is whatever a released worker returns. `error.Canceled`
+  always counts.
 - **Taking no more items is not the same as emitting no more.** A stage that
   answers `.done` (from `push` or `start`) closes the output of the stages
   before it, never its own: a `route` whose cases are all done still emits
@@ -88,8 +103,9 @@ to this file; edit `AGENTS.md`, not copies.
   failure must not wait for a producer's next push, for a join, or for a
   handler. A program whose pipe has a queue runs starting (the `start`
   hooks), feeding (the source) and ending (finish and flush) as tasks, one
-  after another; the caller waits on `Supervision` and cancels. Never run
-  user code on the task that supervises: every hook can block.
+  after another; the caller waits on `Supervision`, cancels, and settles the
+  pipe on news from a worker. Never run user code on the task that
+  supervises: every hook can block.
 - **Done before the first item is still done.** A stage's `start` answers
   like a push (`!Flow`: `return down.push(x)`, or `.more`), and `branch` and
   `route` answer for their sub-pipes. If starting satisfies the pipe, by that
@@ -217,4 +233,15 @@ to this file; edit `AGENTS.md`, not copies.
   are not synchronized. Repeat the concurrency suites a few hundred times, in
   Debug and ReleaseFast, before trusting a change to them. To show that something is
   interrupted, have it wait far longer than the test and record whether it
-  woke by itself, rather than measuring how long the run took.
+  woke by itself, rather than measuring how long the run took. To show that
+  a check stops something, the stage that waits for the event must wait
+  without calling into `std.Io` (spin on the state with
+  `std.Thread.yield() catch {}`): if it sleeps it is cancelled where it
+  sleeps, and the test passes without the check. Run such suites under a
+  watchdog; a hang is a failure.
+- In Debug on macOS, Zig 0.17.0's `std.testing.io` can lose a cancel request
+  that arrives while the task allocates (the allocator captures a stack
+  trace through a cancelable lock). A test that cancels a task right as it
+  spawns members can then wait in full. It passes in ReleaseFast and over
+  `std.heap.smp_allocator`; suspect this before the library when only Debug
+  fails that way.

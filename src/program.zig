@@ -116,14 +116,31 @@ pub fn Program(comptime S: type, comptime P: type) type {
 
                 fn begin(refs: Frame.Refs, whole: Supervision, wake: *Signal, io: Io) !void {
                     defer ended(wake, io, .starting);
+                    const answer = Frame.at.start(refs, Closed{}, whole) catch |err| {
+                        if (unwanted(whole, err)) return;
+                        return err;
+                    };
                     // A worker says so itself; an answer that came back to a
                     // start hook is on record before this task is seen to end.
-                    if (try Frame.at.start(refs, Closed{}, whole) == .done) whole.satisfy(io);
+                    if (answer == .done) whole.satisfy(io);
                 }
 
-                fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
+                fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), whole: Supervision, wake: *Signal, io: Io) !void {
                     defer ended(wake, io, .feeding);
-                    return source.run(feed_env, entry);
+                    source.run(feed_env, entry) catch |err| {
+                        if (unwanted(whole, err)) return;
+                        return err;
+                    };
+                }
+
+                /// Whether a failure of starting or feeding no longer
+                /// matters: by a worker's word the pipe wants no more, so
+                /// what failed was for nothing anybody takes. Decided here,
+                /// by the task that failed, not by whichever of the two the
+                /// supervising task happens to see first. Being cancelled
+                /// always matters.
+                fn unwanted(whole: Supervision, err: anyerror) bool {
+                    return err != error.Canceled and whole.wantsNoMore();
                 }
 
                 fn end(refs: Frame.Refs, guard: Supervision, wake: *Signal, io: Io) !void {
@@ -132,11 +149,14 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     try Frame.at.flush(refs);
                 }
 
-                /// Waits until the task of `phase` has returned or the run
-                /// needs it to: a worker failed, or, before the end of the
-                /// stream, nothing wants another item. Returns whether it
-                /// returned by itself.
-                fn wait(wake: *Signal, io: Io, comptime phase: Phase) Io.Cancelable!bool {
+                const Woken = enum { returned, interrupt, news };
+
+                /// Waits until the task of `phase` has returned, the run
+                /// needs it to (a worker failed, or, before the end of the
+                /// stream, nothing wants another item), or a worker has said
+                /// something about being done that the pipe has not been
+                /// settled for (`seen` is how much it has been).
+                fn wait(wake: *Signal, io: Io, comptime phase: Phase, seen: *usize) Io.Cancelable!Woken {
                     wake.mutex.lockUncancelable(io);
                     defer wake.mutex.unlock(io);
                     while (true) {
@@ -145,9 +165,13 @@ pub fn Program(comptime S: type, comptime P: type) type {
                             .feeding => wake.feeding_ended,
                             .ending => wake.ending_ended,
                         };
-                        if (returned) return true;
-                        if (wake.failed_stage != null) return false;
-                        if (phase != .ending and wake.satisfied) return false;
+                        if (returned) return .returned;
+                        if (wake.failed_stage != null) return .interrupt;
+                        if (phase != .ending and wake.satisfied) return .interrupt;
+                        if (wake.news != seen.*) {
+                            seen.* = wake.news;
+                            return .news;
+                        }
                         try wake.changed.wait(io, &wake.mutex);
                     }
                 }
@@ -178,30 +202,30 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // is the cause, and what the phase itself returned may
                     // only be its consequence.
                     var starting = try io.concurrent(Tasks.begin, .{ refs, body.supervision, wake, io });
-                    const started_by_itself = Tasks.wait(wake, io, .starting) catch |err| {
+                    const started_by_itself = body.attend(refs, io, .starting) catch |err| {
                         // This task is being cancelled: so is the phase.
                         starting.cancel(io) catch {};
                         return err;
                     };
                     const started = starting.cancel(io);
                     try body.failureIfAny(refs, io);
-                    if (started_by_itself) try started else started catch {};
+                    started catch |err| if (ours(err, started_by_itself)) return err;
 
                     // If starting already gave the pipe all it wanted, the
                     // source is not run at all.
                     if (!body.supervision.isSatisfied(io)) {
-                        var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, wake, io });
-                        const fed_by_itself = Tasks.wait(wake, io, .feeding) catch |err| {
+                        var feeding = try io.concurrent(Tasks.feed, .{ &body.program.source, body.env, entry, body.supervision, wake, io });
+                        const fed_by_itself = body.attend(refs, io, .feeding) catch |err| {
                             feeding.cancel(io) catch {};
                             return err;
                         };
                         const fed = feeding.cancel(io);
                         try body.failureIfAny(refs, io);
-                        if (fed_by_itself) try fed else fed catch {};
+                        fed catch |err| if (ours(err, fed_by_itself)) return err;
                     }
 
                     var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
-                    _ = Tasks.wait(wake, io, .ending) catch |err| {
+                    _ = body.attend(refs, io, .ending) catch |err| {
                         ending.cancel(io) catch {};
                         return err;
                     };
@@ -209,6 +233,34 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // Whatever cut the end short, the failure that caused it is the result.
                     try body.failureIfAny(refs, io);
                     try finished;
+                }
+
+                /// Whether what the task of a phase returned is the run's
+                /// failure. The task itself has dropped a failure that no
+                /// longer mattered (`Tasks.unwanted`), so anything it still
+                /// returns counts, except its having been cancelled when it
+                /// was this task that interrupted it.
+                fn ours(err: anyerror, returned_by_itself: bool) bool {
+                    return returned_by_itself or err != error.Canceled;
+                }
+
+                /// Waits for the task of `phase`, settling the pipe whenever
+                /// a worker has said it is done: a queue before that worker
+                /// then stops taking items, so a producer waiting on it moves
+                /// on, and lets go of its own worker, so that the end of the
+                /// stream does not wait for a handler working for nothing.
+                /// Each phase settles once to begin with, for what was said
+                /// before it. Returns whether the task returned by itself.
+                fn attend(body: @This(), refs: Frame.Refs, io: Io, comptime phase: Phase) Io.Cancelable!bool {
+                    var seen: usize = 0;
+                    while (true) switch (try Tasks.wait(body.supervision.signal, io, phase, &seen)) {
+                        .returned => return true,
+                        .interrupt => return false,
+                        .news => {
+                            _ = Frame.at.settle(refs, false);
+                            body.supervision.settled(io);
+                        },
+                    };
                 }
 
                 /// Returns the failure of the first worker that failed, as
