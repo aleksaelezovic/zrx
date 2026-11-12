@@ -254,3 +254,99 @@ test "a custom stage's reported failure is the run's result, with its own error 
     }
     try std.testing.expect(found);
 }
+
+// --- an operator built on another one -------------------------------------------
+
+fn isOdd(value: u32) bool {
+    return value % 2 == 1;
+}
+fn addUp(sum: u32, value: u32) u32 {
+    return sum + value;
+}
+
+const sums_by_parity = zrx.route(.{
+    zrx.when(isOdd, pipe(.{zrx.fold(@as(u32, 0), addUp)})),
+    zrx.otherwise(pipe(.{zrx.fold(@as(u32, 0), addUp)})),
+});
+
+/// Ends a pipe by running a route of its own and collecting what it emits.
+/// What it gives the route as `down` is its own: anything with a `push`.
+fn Collected(comptime by_pointer: bool) type {
+    return struct {
+        const Op = @This();
+        const Inner = @TypeOf(sums_by_parity);
+
+        pub const zrx_operator = {};
+        pub const name = "collected";
+
+        pub fn Out(comptime Env: type, comptime In: type) type {
+            if (Inner.Out(Env, In) != u32) @compileError("collected: items must be u32");
+            return zrx.End;
+        }
+
+        const ByPointer = struct {
+            seen: *Numbers,
+
+            pub fn push(self: *ByPointer, item: u32) !zrx.Flow {
+                self.seen.add(item);
+                return .more;
+            }
+        };
+
+        const ByValue = struct {
+            seen: *Numbers,
+
+            /// Nothing the library should mistake for something of its own.
+            pub const isDone = false;
+
+            pub fn push(self: ByValue, item: u32) !zrx.Flow {
+                self.seen.add(item);
+                return .more;
+            }
+        };
+
+        pub fn Stage(comptime Env: type, comptime In: type) type {
+            return struct {
+                inner: Inner.Stage(Env, In),
+                receiver: if (by_pointer) ByPointer else ByValue,
+
+                const Self = @This();
+
+                fn down(self: *Self) if (by_pointer) *ByPointer else ByValue {
+                    return if (by_pointer) &self.receiver else self.receiver;
+                }
+
+                pub fn init(self: *Self, _: *const Op, env: Env) !void {
+                    self.receiver = .{ .seen = zrx.di.get(env, *Numbers) };
+                    try self.inner.init(&sums_by_parity, env);
+                }
+
+                pub fn start(self: *Self, _: anytype) !zrx.Flow {
+                    return self.inner.start(self.down());
+                }
+
+                pub fn push(self: *Self, item: In, _: anytype) !zrx.Flow {
+                    return self.inner.push(item, self.down());
+                }
+
+                pub fn finish(self: *Self, _: anytype) !void {
+                    try self.inner.finish(self.down());
+                }
+
+                pub fn deinit(self: *Self) void {
+                    self.inner.deinit();
+                }
+            };
+        }
+    };
+}
+
+test "an operator can run a built-in one with a `down` of its own" {
+    var by_pointer: Numbers = .{};
+    try program(range(u32, 1, 6), pipe(.{Collected(true){}})).run(.{&by_pointer});
+    try by_pointer.expect(&.{ 9, 6 });
+
+    var by_value: Numbers = .{};
+    try program(range(u32, 1, 6), pipe(.{Collected(false){}})).run(.{&by_value});
+    try by_value.expect(&.{ 9, 6 });
+}

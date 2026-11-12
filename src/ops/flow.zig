@@ -388,6 +388,8 @@ fn Route(comptime Cs: type) type {
                         down: Down,
                         route: *Self,
 
+                        pub const zrx_answers_done = {};
+
                         pub fn push(self: @This(), item: anytype) !Flow {
                             if (try self.down.push(item) == .done) {
                                 self.route.arms.finishAll();
@@ -400,10 +402,13 @@ fn Route(comptime Cs: type) type {
                         /// starts or the stream ends: whether the pipe after
                         /// the route is done. Then a case's value is dropped
                         /// where it is emitted, and no stage of the case runs
-                        /// for it. (`down` can say only when it is the handle
-                        /// the route was started or finished with.)
+                        /// for it. Only a `down` that says it can answer is
+                        /// asked (`core.answersDone`): the chain's handle for
+                        /// starting and finishing does; a handle of someone
+                        /// else's, which may be a pointer, is left alone.
                         pub fn isDone(self: @This()) bool {
-                            return @hasDecl(Down, "isDone") and self.down.isDone();
+                            if (comptime !core.answersDone(Down)) return false;
+                            return self.down.isDone();
                         }
                     };
                 }

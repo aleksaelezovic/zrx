@@ -66,6 +66,18 @@ const di = @import("di.zig");
 /// should a stage before it ignore the answer and push again.
 pub const Flow = enum { more, done };
 
+/// Whether a handle of type `T` (a `down`, or the tail of a chain) can say
+/// that what it pushes into is done:
+///
+///     pub const zrx_answers_done = {};
+///     pub fn isDone(self: T) bool
+///
+/// Only a handle that declares so is asked. A handle is otherwise anything
+/// with a `push`, a pointer included, and what else it declares is its own.
+pub fn answersDone(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_answers_done");
+}
+
 /// The `Out` of a terminal operator: nothing flows past it.
 pub const End = opaque {};
 
@@ -503,6 +515,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 refs: Refs,
                 tail: Tail,
 
+                pub const zrx_answers_done = {};
+
                 pub fn push(late: @This(), item: types.items[i]) !Flow {
                     if (late.isDone()) return .done;
                     const down: Down(Tail, i) = .{ .refs = late.refs, .tail = late.tail };
@@ -517,7 +531,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 /// that would only be refused at the end of it.
                 pub fn isDone(late: @This()) bool {
                     if (afterIsDone(late.refs, i - 1).*) return true;
-                    return @hasDecl(Tail, "isDone") and late.tail.isDone();
+                    if (comptime !answersDone(Tail)) return false;
+                    return late.tail.isDone();
                 }
             };
         }

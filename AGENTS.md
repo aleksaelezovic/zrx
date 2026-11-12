@@ -46,6 +46,10 @@ to this file; edit `AGENTS.md`, not copies.
   stage's output. A chain that rejoins a pipe (a `route` case) asks its tail
   (`isDone`) before a late emission, so the pipe after the route being done
   reaches every stage of every case.
+- **A `down` is anything with a `push`.** An operator may run another one
+  with a handle of its own, a pointer included (`tests/extending.zig`). Never
+  probe a handle for a plain name: ask only what declares a `zrx_*` marker
+  (`answersDone` for `isDone`), and check the type is a struct first.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is
