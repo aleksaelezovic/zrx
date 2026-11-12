@@ -726,10 +726,17 @@ fn Under(comptime inner: anytype, comptime at_start: Kind, comptime per_item: Ki
     };
 }
 
+/// A case that emits more than one value for an item.
+const emits_twice = zrx.route(.{
+    zrx.when(isBelowFour, pipe(.{ zrx.batch(2), zrx.flatten(), zrx.tap(touch) })),
+    zrx.otherwise(pipe(.{ Noting{ .value = 100 }, zrx.tap(touch) })),
+});
+
 /// The routes above and what each delivers from `range(0, 6)` when nothing is ever done.
 const under_test = .{
     .{ watched, &[_]u32{ 100, 1, 3, 5, 2, 4 } },
     .{ watched_last, &[_]u32{ 100, 4, 5, 6 } },
+    .{ emits_twice, &[_]u32{ 100, 0, 1, 2, 3, 4, 5 } },
 };
 
 test "under any `down`, nothing happens after it has said it is done" {
@@ -925,4 +932,76 @@ test "a stage that is done keeps answering done to one that pushes regardless" {
     var taken: Numbers = .{};
     try program(range(u32, 0, 4), pipe(.{ Insistent{}, take(3), subscribe(record) })).run(.{&taken});
     try taken.expect(&.{ 0, 0, 1 });
+}
+
+// --- finding A -------------------------------------------------------------------
+
+// --- a pipe run by another operator ---------------------------------------------
+
+/// Ends a pipe by running `inner`, a pipe, with a `down` that can be asked as
+/// the run starts and one that cannot afterwards.
+fn Piped(comptime inner: anytype) type {
+    return struct {
+        const Op = @This();
+        const Inner = @TypeOf(inner);
+        const wrapped: Inner = inner;
+
+        pub const zrx_operator = {};
+        pub const name = "piped";
+
+        pub fn Out(comptime Env: type, comptime In: type) type {
+            if (Inner.Out(Env, In) != u32) @compileError("piped: items must be u32");
+            return zrx.End;
+        }
+
+        pub fn Stage(comptime Env: type, comptime In: type) type {
+            return struct {
+                inner: Inner.Stage(Env, In),
+                watch: *Watch,
+
+                const Self = @This();
+
+                pub fn init(self: *Self, _: *const Op, env: Env) !void {
+                    self.watch = zrx.di.get(env, *Watch);
+                    try self.inner.init(&wrapped, env);
+                }
+
+                pub fn start(self: *Self, _: anytype) !zrx.Flow {
+                    return self.inner.start(Answering{ .watch = self.watch }, {});
+                }
+
+                pub fn push(self: *Self, item: In, _: anytype) !zrx.Flow {
+                    return self.inner.push(item, PushOnly{ .watch = self.watch });
+                }
+
+                pub fn finish(self: *Self, _: anytype) !void {
+                    try self.inner.finish(PushOnly{ .watch = self.watch }, {});
+                }
+
+                pub fn deinit(self: *Self) void {
+                    self.inner.deinit();
+                }
+            };
+        }
+    };
+}
+
+/// Pipes whose first emission is refused as the run starts and which have
+/// more to emit as the stream ends.
+const piped = .{
+    pipe(.{ Noting{ .value = 100 }, Noting{ .last = 9 } }),
+    pipe(.{ watched, Noting{ .last = 9 } }),
+    pipe(.{ Noting{ .value = 100 }, zrx.tap(touch), watched_last, zrx.tap(touch), Noting{ .last = 9 } }),
+};
+
+test "a pipe remembers that it was told its output is done" {
+    // As the run starts the receiver says it is done, and the first value is
+    // refused. As the stream ends the pipe is given a `down` that cannot be
+    // asked: a final value must not reach it.
+    inline for (piped) |inner| {
+        var watch: Watch = .{ .shut_after = 0 };
+        try program(range(u32, 0, 6), pipe(.{Piped(inner){}})).run(.{&watch});
+        try watch.seen.expect(&.{});
+        try watch.expectNothingAfterDone();
+    }
 }

@@ -52,7 +52,8 @@ to this file; edit `AGENTS.md`, not copies.
   (`answersDone` for `isDone`), on a struct or a pointer to one. The handle
   may differ from hook to hook and may not be askable at all, so whoever
   learns that its output is done latches it in one place (`route`:
-  `closeOutput`), whether it was answered or told when it asked.
+  `closeOutput`; a chain: `closeFrom`), whether it was answered or told
+  when it asked. A handle that can be asked is asked before every value.
 - **Done-handling is tested as invariants, not cases.** `tests/extending.zig`
   runs routes under every kind of `down` and every moment of completion, and
   pipes of several shapes closed after every number of values; nothing may be
@@ -95,7 +96,9 @@ to this file; edit `AGENTS.md`, not copies.
   answer or by a worker's, starting is cut short and the source is not run,
   with or without a queue. `finish` may then reach a stage whose `start` did
   not run: a `queue` that was never started answers `.done` and buffers
-  nothing.
+  nothing. A worker's answer is checked before each stage is started
+  (`Supervision.wantsNoMore`, per sub-pipe inside `branch` and `route`), not
+  left to cancellation, which a hook that never blocks would not notice.
 - **A `route` that is done asks no predicate**, and once it is done while
   starting, no later case is started (a case that is done by itself leaves
   the others to start). It asks whether the pipe after it is done before

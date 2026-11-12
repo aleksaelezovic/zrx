@@ -217,7 +217,7 @@ fn Branch(comptime Ps: type) type {
 
                 pub fn start(self: *@This(), _: anytype) !Flow {
                     inline for (0..n) |i| {
-                        if (try self.chains[i].start(Closed{}) == .done) {
+                        if (try self.chains[i].start(Closed{}, self.arms.guardOf(i)) == .done) {
                             self.arms.finished(i);
                             // Only a sub-pipe that has been started can be
                             // done, so if none wants an item, all were.
@@ -398,6 +398,13 @@ fn Route(comptime Cs: type) type {
                         pub const zrx_answers_done = {};
 
                         pub fn push(self: @This(), item: anytype) !Flow {
+                            // A `down` that can say it is done is asked
+                            // before every value: a case may emit several
+                            // for one item. (The chain's own handle for
+                            // items cannot, and answers the push.)
+                            if (comptime core.answersDone(Down)) {
+                                if (self.isDone()) return .done;
+                            }
                             if (try self.down.push(item) == .done) {
                                 self.route.closeOutput();
                                 return .done;
@@ -450,8 +457,15 @@ fn Route(comptime Cs: type) type {
                         // without anything being pushed, and that looks
                         // like the case being done by itself.
                         if (self.outputIsDone(down)) return .done;
+                        // The same once a worker has said that the pipe the
+                        // route is in wants no more: that is not an answer
+                        // to anything a case pushed.
+                        if (self.arms.pipeWantsNoMore()) {
+                            self.arms.finishAll();
+                            return .done;
+                        }
                         // A case that is done by itself leaves the others to start.
-                        if (try self.chains[i].start(self.tail(down)) == .done) self.arms.finished(i);
+                        if (try self.chains[i].start(self.tail(down), self.arms.guardOf(i)) == .done) self.arms.finished(i);
                     }
                     return if (self.outputIsDone(down)) .done else self.verdict();
                 }

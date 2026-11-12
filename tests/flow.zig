@@ -941,6 +941,8 @@ test "the failure that closed a queue is the result, not the producer's reaction
 /// wants no more, and then either returns or blocks.
 const SatisfyingHerald = struct {
     then_block: bool,
+    /// Inside a sub-pipe: wait for the whole pipe rather than the sub-pipe.
+    whole_pipe: bool = false,
 
     pub const zrx_operator = {};
     pub const name = "satisfyingHerald";
@@ -955,6 +957,7 @@ const SatisfyingHerald = struct {
             flags: *Flags,
             supervision: zrx.operator.Supervision,
             then_block: bool,
+            whole_pipe: bool,
 
             pub fn init(self: *@This(), op: *const SatisfyingHerald, env: Env) !void {
                 self.* = .{
@@ -962,6 +965,7 @@ const SatisfyingHerald = struct {
                     .flags = zrx.di.get(env, *Flags),
                     .supervision = zrx.di.get(env, zrx.operator.Supervision),
                     .then_block = op.then_block,
+                    .whole_pipe = op.whole_pipe,
                 };
             }
 
@@ -972,11 +976,12 @@ const SatisfyingHerald = struct {
                     self.flags.woke_by_itself.store(true, .seq_cst);
                     return .more;
                 }
-                // Return only once the worker has reported that the pipe is done.
-                const signal = self.supervision.signal;
-                try signal.mutex.lock(self.clock);
-                defer signal.mutex.unlock(self.clock);
-                while (!signal.satisfied) try signal.changed.wait(self.clock, &signal.mutex);
+                // Return only once a worker has reported that the pipe is done:
+                // the whole of it, or inside a branch or route this sub-pipe.
+                const asked: zrx.operator.Supervision = if (self.whole_pipe) .{ .signal = self.supervision.signal } else self.supervision;
+                // Waited for without calling into `std.Io`, so that this hook
+                // returns by itself instead of being cancelled where it waits.
+                while (!asked.wantsNoMore()) std.Thread.yield() catch {};
                 return .more;
             }
 
@@ -1086,4 +1091,114 @@ test "the same when a worker's answer cut startup short" {
     try program(zrx.fromProducer(u32, mustNotRun), work).run(.{ io, &flags, &seen });
     try seen.expect(&.{1});
     try std.testing.expect(!flags.woke_by_itself.load(.seq_cst));
+}
+
+/// Its start hook fails.
+const FailingStart = struct {
+    pub const zrx_operator = {};
+    pub const name = "failingStart";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const FailingStart, _: Env) !void {}
+
+            pub fn start(_: *@This(), _: anytype) error{StartedAfterDone}!zrx.Flow {
+                return error.StartedAfterDone;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+test "once a worker's answer has satisfied the pipe during startup, no earlier stage is started" {
+    // The herald's start hook returns only after the worker behind the queue
+    // has reported that the pipe is done, so the order does not depend on
+    // timing: whatever comes before the herald must not be started, be it a
+    // stage, the cases of a route, or a stage whose start would fail the run.
+    for (0..50) |_| {
+        var flags: Flags = .{};
+        var seen: Numbers = .{};
+        var started: Started = .{};
+        const plain = pipe(.{ StartMark{}, SatisfyingHerald{ .then_block = false }, queue(2), take(1), subscribe(record) });
+        try program(zrx.fromProducer(u32, mustNotRun), plain).run(.{ io, &flags, &seen, &started });
+        try seen.expect(&.{1});
+        try std.testing.expectEqual(@as(usize, 0), started.count);
+
+        var routed_seen: Numbers = .{};
+        const routed = pipe(.{
+            route(.{
+                when(isEven, pipe(.{StartMark{}})),
+                otherwise(pipe(.{StartMark{}})),
+            }),
+            SatisfyingHerald{ .then_block = false },
+            queue(2),
+            take(1),
+            subscribe(record),
+        });
+        try program(zrx.fromProducer(u32, mustNotRun), routed).run(.{ io, &flags, &routed_seen, &started });
+        try routed_seen.expect(&.{1});
+        try std.testing.expectEqual(@as(usize, 0), started.count);
+
+        var failing_seen: Numbers = .{};
+        const failing = pipe(.{ FailingStart{}, SatisfyingHerald{ .then_block = false }, queue(2), take(1), subscribe(record) });
+        try program(zrx.fromProducer(u32, mustNotRun), failing).run(.{ io, &flags, &failing_seen });
+        try failing_seen.expect(&.{1});
+    }
+}
+
+test "the same for the next case of a route, and for the rest of a sub-pipe" {
+    for (0..50) |_| {
+        // Inside a branch it is the sub-pipe's own worker that counts: the
+        // sibling wants every item, so the pipe as a whole is not done.
+        var left: Numbers = .{};
+        var right: Numbers = .{};
+        var arm_flags: Flags = .{};
+        var arm_started: Started = .{};
+        const arms = pipe(.{branch(.{
+            pipe(.{ StartMark{}, SatisfyingHerald{ .then_block = false }, queue(2), take(1), subscribe(toLeft) }),
+            pipe(.{subscribe(toRight)}),
+        })});
+        try program(range(u32, 5, 8), arms).run(.{ io, &arm_flags, &arm_started, Left{ .seen = &left }, Right{ .seen = &right } });
+        try left.expect(&.{1});
+        try right.expect(&.{ 5, 6, 7 });
+        try std.testing.expectEqual(@as(usize, 0), arm_started.count);
+
+        // And the same for a case of a route that ends there.
+        var even: Numbers = .{};
+        var odd: Numbers = .{};
+        const ending = pipe(.{route(.{
+            when(isEven, pipe(.{ StartMark{}, SatisfyingHerald{ .then_block = false }, queue(2), take(1), subscribe(toLeft) })),
+            otherwise(pipe(.{subscribe(toRight)})),
+        })});
+        try program(range(u32, 5, 8), ending).run(.{ io, &arm_flags, &arm_started, Left{ .seen = &even }, Right{ .seen = &odd } });
+        try even.expect(&.{1});
+        try odd.expect(&.{ 5, 7 });
+        try std.testing.expectEqual(@as(usize, 0), arm_started.count);
+    }
+    for (0..50) |_| {
+        // The first case's value satisfies the pipe behind the queue. That is
+        // a worker's answer, not one to anything the case pushed.
+        var flags: Flags = .{};
+        var seen: Numbers = .{};
+        var started: Started = .{};
+        const cases = pipe(.{
+            route(.{
+                when(isEven, pipe(.{SatisfyingHerald{ .then_block = false, .whole_pipe = true }})),
+                otherwise(pipe(.{StartMark{}})),
+            }),
+            queue(2),
+            take(1),
+            subscribe(record),
+        });
+        try program(zrx.fromProducer(u32, mustNotRun), cases).run(.{ io, &flags, &seen, &started });
+        try seen.expect(&.{1});
+        try std.testing.expectEqual(@as(usize, 0), started.count);
+    }
 }

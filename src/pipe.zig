@@ -119,6 +119,7 @@ pub const Supervision = struct {
         has_failed: std.atomic.Value(bool) = .init(false),
         /// Nothing in the pipe wants another item.
         satisfied: bool = false,
+        has_satisfied: std.atomic.Value(bool) = .init(false),
         /// The task running the stages' `start` hooks has returned.
         starting_ended: bool = false,
         /// The task feeding the pipe from the source has returned.
@@ -200,6 +201,7 @@ pub const Supervision = struct {
         current.signal.update(io, struct {
             fn change(signal: *Signal) void {
                 signal.satisfied = true;
+                signal.has_satisfied.store(true, .release);
             }
         }.change);
     }
@@ -217,6 +219,14 @@ pub const Supervision = struct {
     /// that should not happen once the run has failed.
     pub fn hasFailed(supervision: Supervision) bool {
         return supervision.signal.has_failed.load(.acquire);
+    }
+
+    /// Whether this pipe (in a `branch` or `route`: this sub-pipe) wants no
+    /// more items, as far as its workers have said. Cheap: read before
+    /// starting a stage, which nothing should do for a pipe that is done.
+    pub fn wantsNoMore(supervision: Supervision) bool {
+        if (supervision.scope) |scope| return scope.done[supervision.arm].load(.seq_cst);
+        return supervision.signal.has_satisfied.load(.acquire);
     }
 
     /// Waits for the worker that reports through `ended`. Returns false when
@@ -263,7 +273,20 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
         /// The environment sub-pipe `i` is built with.
         pub fn envFor(self: *Self, outer: Env, comptime i: usize) Env {
             if (!supervised) return outer;
-            return di.extend(outer, Supervision{ .signal = self.scope.parent.signal, .scope = &self.scope, .arm = i });
+            return di.extend(outer, self.guardOf(i));
+        }
+
+        /// What to start sub-pipe `i` with, so it stops starting stages once
+        /// its workers have said it wants no more.
+        pub fn guardOf(self: *Self, comptime i: usize) Guard {
+            if (!supervised) return {};
+            return .{ .signal = self.scope.parent.signal, .scope = &self.scope, .arm = i };
+        }
+
+        /// Whether the pipe these sub-pipes belong to wants no more items,
+        /// as far as its workers have said.
+        pub fn pipeWantsNoMore(self: *const Self) bool {
+            return if (supervised) self.scope.parent.wantsNoMore() else false;
         }
 
         pub fn wants(self: *const Self, comptime i: usize) bool {
@@ -486,6 +509,13 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return &slot.after_is_done;
         }
 
+        /// What follows each of the stages before `end` is done.
+        fn closeFrom(refs: Refs, comptime end: usize) void {
+            inline for (0..end) |k| {
+                if (comptime emitsLate(stages[k])) afterIsDone(refs, k).* = true;
+            }
+        }
+
         /// What a stage pushes an item on with: to stage `i`, or past the
         /// last one to the chain's tail. A `.done` answer is remembered on
         /// its way back, where a later emission could ask.
@@ -541,7 +571,11 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 pub fn isDone(late: @This()) bool {
                     if (afterIsDone(late.refs, i - 1).*) return true;
                     if (comptime !answersDone(Tail)) return false;
-                    return late.tail.isDone();
+                    if (!late.tail.isDone()) return false;
+                    // Remembered for every stage: the tail given next time
+                    // may be one that cannot be asked.
+                    closeFrom(late.refs, n);
+                    return true;
                 }
             };
         }
@@ -578,11 +612,22 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// emits later is another matter (a `route` that takes no more
             /// items still emits its cases' final values): only an answer
             /// from what follows it closes that.
-            pub fn start(refs: Refs, tail: anytype) !Flow {
+            ///
+            /// `guard` is this pipe's `Supervision`, or `{}`. With it, no
+            /// stage is started once a worker has said the pipe wants no
+            /// more: a stage already started is behind a queue that has, so
+            /// the same holds as for an answer, for this stage as well.
+            pub fn start(refs: Refs, tail: anytype, guard: anytype) !Flow {
                 comptime var i = n;
                 inline while (i > 0) {
                     i -= 1;
                     if (@hasDecl(stages[i], "start")) {
+                        if (@TypeOf(guard) == Supervision) {
+                            if (guard.wantsNoMore()) {
+                                closeFrom(refs, i + 1);
+                                return .done;
+                            }
+                        }
                         const next: Late(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
                         const answer = try refs[i].start(next);
                         if (comptime @TypeOf(answer) != Flow) @compileError(
@@ -590,9 +635,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                                 "`; it must return `!Flow`: what a push it made was answered (`return down.push(x)`), or `.more`",
                         );
                         if (answer == .done) {
-                            inline for (0..i) |k| {
-                                if (comptime emitsLate(stages[k])) afterIsDone(refs, k).* = true;
-                            }
+                            closeFrom(refs, i);
                             return .done;
                         }
                     }
@@ -679,7 +722,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return locals(i + 1, next, body);
         }
 
-        // The same operations for a chain stored as one value: the stage contract.
+        // The same operations for a chain stored as one value. This is what an
+        // operator with sub-pipes calls (`branch`, `route`). It is the stage
+        // contract except that `start` and `finish` also take the guard: the
+        // sub-pipe's `Supervision` (see `Arms`), or `{}` without one.
 
         fn refsOf(self: *Self) Refs {
             var refs: Refs = undefined;
@@ -695,8 +741,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.provide(self.refsOf(), env);
         }
 
-        pub fn start(self: *Self, tail: anytype) !Flow {
-            return at.start(self.refsOf(), tail);
+        pub fn start(self: *Self, tail: anytype, guard: anytype) !Flow {
+            return at.start(self.refsOf(), tail, guard);
         }
 
         pub fn push(self: *Self, item: In, tail: anytype) !Flow {

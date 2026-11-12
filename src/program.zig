@@ -64,7 +64,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     }
                     // If starting already gave the pipe all it wanted, the
                     // source is not run at all.
-                    if (try Frame.at.start(refs, Closed{}) == .more)
+                    if (try Frame.at.start(refs, Closed{}, {}) == .more)
                         try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
                     try Frame.at.finish(refs, Closed{}, {});
                     try Frame.at.flush(refs);
@@ -118,7 +118,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     defer ended(wake, io, .starting);
                     // A worker says so itself; an answer that came back to a
                     // start hook is on record before this task is seen to end.
-                    if (try Frame.at.start(refs, Closed{}) == .done) whole.satisfy(io);
+                    if (try Frame.at.start(refs, Closed{}, whole) == .done) whole.satisfy(io);
                 }
 
                 fn feed(source: *const S, feed_env: Env, entry: Entry(Frame, S.Item), wake: *Signal, io: Io) !void {
@@ -168,7 +168,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     // `init`. With none, there is nobody to supervise.
                     const entry: Entry(Frame, S.Item) = .{ .refs = refs };
                     const io = wake.io orelse {
-                        if (try Frame.at.start(refs, Closed{}) == .more)
+                        if (try Frame.at.start(refs, Closed{}, body.supervision) == .more)
                             try body.program.source.run(body.env, entry);
                         try Frame.at.finish(refs, Closed{}, body.supervision);
                         return Frame.at.flush(refs);

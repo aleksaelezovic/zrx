@@ -420,8 +420,8 @@ The `down` a stage is given is anything with a `push`, and a stage that runs
 another operator may pass one of its own, by value or by pointer. If yours
 can tell that it is done without being pushed to, declare
 `pub const zrx_answers_done = {};` and `pub fn isDone(self) bool`: a `route`
-then asks before it starts a case, runs anything for an item, or emits a
-final value.
+then asks before it starts a case, runs anything for an item, or hands over
+a value, and remembers the answer.
 
 **A source** declares `zrx_source`, `Item`, and
 `run(self, env, down) !void`, which pushes until it has no more or a push
