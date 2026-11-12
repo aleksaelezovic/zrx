@@ -48,6 +48,29 @@ to this file; edit `AGENTS.md`, not copies.
   cancels its worker instead of waiting for a handler that works for
   nothing. `takesNoMore` and `settle` run on any task, the supervising one
   included: atomics only, never blocking.
+- **Something is under way when a worker reports.** A task can be sent one
+  cancel request, only by joining it (`Future.cancel`), and gets it once, at
+  its next cancelation point. That decides what the run can do:
+  - *The source or startup, when the whole pipe is done or has failed:*
+    interrupted and joined. The pipe is settled first, because a task that
+    does not let itself be cancelled while it waits for space in a queue
+    only returns when that queue answers: after a failure everything
+    answers `.done` (`settle(true)`: every queue, and every `branch` and
+    `route` for its sub-pipes). Nothing is checked per item for this.
+  - *A final value, when what it is pushed into comes to take no more:* the
+    emission is marked as under way (`Emission`), settling marks it
+    interrupted, and the run cancels the task finishing the pipe. Whatever
+    comes back from the emission is dropped, the stage counts as finished,
+    and `finish` returns `error.Canceled` to hand the end of the stream
+    back; the run starts another task, which skips what has finished
+    (`finished` beside each stage). The end can be taken up any number of
+    times, and stages after the point that is done still finish.
+  - *A worker:* released, and cancelled when its queue finishes.
+  - *Not interrupted:* a handler already running for an item, or a start
+    hook already blocked, when only a sub-pipe is done and a sibling still
+    wants items. The source and startup cannot be taken up again, so they
+    cannot be sent a request without ending them. They are interrupted when
+    the whole pipe is done or has failed.
 - **What a done pipe leaves behind does not count.** A failure that comes
   out of a sub-pipe, the source or startup after a worker has said that this
   pipe wants no more was for something nobody takes, and is dropped by the

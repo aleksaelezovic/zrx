@@ -153,10 +153,11 @@ fn Queue(comptime capacity: usize) type {
                 /// waiting for space is answered `.done`, and the worker,
                 /// which may be stuck in a handler, is let go of (`finish`
                 /// will not wait for it).
-                pub fn settle(self: *Self, after_is_done: bool) void {
-                    if (!after_is_done) return;
-                    if (self.released.swap(true, .acq_rel)) return;
+                pub fn settle(self: *Self, after_is_done: bool) bool {
+                    if (!after_is_done) return false;
+                    if (self.released.swap(true, .acq_rel)) return false;
                     self.channel.close(self.io);
+                    return false;
                 }
 
                 /// The error the consumer ended with, if it failed: one that
@@ -295,8 +296,17 @@ fn Branch(comptime Ps: type) type {
                     return !self.arms.anyWants();
                 }
 
-                pub fn settle(self: *@This(), _: bool) void {
-                    inline for (0..n) |i| _ = self.chains[i].settle(false);
+                /// Nothing follows a branch, so `after_is_done` is only ever
+                /// true when the run is over and lets go of everything:
+                /// then no sub-pipe takes another item, with or without a
+                /// queue of its own to say so.
+                pub fn settle(self: *@This(), after_is_done: bool) bool {
+                    if (after_is_done) self.arms.finishAll();
+                    var interrupted = false;
+                    inline for (0..n) |i| {
+                        if (self.chains[i].settle(after_is_done).interrupted) interrupted = true;
+                    }
+                    return interrupted;
                 }
 
                 pub fn finish(self: *@This(), _: anytype) !void {
@@ -591,9 +601,17 @@ fn Route(comptime Cs: type) type {
                     return !self.arms.anyWants();
                 }
 
-                pub fn settle(self: *Self, after_is_done: bool) void {
-                    // What follows a rejoining case is what follows the route.
-                    inline for (0..n) |i| _ = self.chains[i].settle(rejoins and after_is_done);
+                /// What follows a rejoining case is what follows the route.
+                /// Nothing follows a case that ends there: for it,
+                /// `after_is_done` is only ever true when the run is over.
+                /// Either way no case takes another item then.
+                pub fn settle(self: *Self, after_is_done: bool) bool {
+                    if (after_is_done) self.arms.finishAll();
+                    var interrupted = false;
+                    inline for (0..n) |i| {
+                        if (self.chains[i].settle(after_is_done).interrupted) interrupted = true;
+                    }
+                    return interrupted;
                 }
 
                 pub fn failureOf(self: *Self, down: anytype, who: *const anyopaque) !void {

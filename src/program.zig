@@ -149,6 +149,13 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     try Frame.at.flush(refs);
                 }
 
+                /// Before the end of the stream is taken up again.
+                fn again(wake: *Signal, io: Io) void {
+                    wake.mutex.lockUncancelable(io);
+                    defer wake.mutex.unlock(io);
+                    wake.ending_ended = false;
+                }
+
                 const Woken = enum { returned, interrupt, news };
 
                 /// Waits until the task of `phase` has returned, the run
@@ -206,7 +213,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         // This task is being cancelled: so is the phase.
                         starting.cancel(io) catch {};
                         return err;
-                    };
+                    } == .returned;
                     const started = starting.cancel(io);
                     try body.failureIfAny(refs, io);
                     started catch |err| if (ours(err, started_by_itself)) return err;
@@ -218,21 +225,33 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         const fed_by_itself = body.attend(refs, io, .feeding) catch |err| {
                             feeding.cancel(io) catch {};
                             return err;
-                        };
+                        } == .returned;
                         const fed = feeding.cancel(io);
                         try body.failureIfAny(refs, io);
                         fed catch |err| if (ours(err, fed_by_itself)) return err;
                     }
 
-                    var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
-                    _ = body.attend(refs, io, .ending) catch |err| {
-                        ending.cancel(io) catch {};
-                        return err;
-                    };
-                    const finished = ending.cancel(io);
-                    // Whatever cut the end short, the failure that caused it is the result.
-                    try body.failureIfAny(refs, io);
-                    try finished;
+                    // The end of the stream may take more than one task: when
+                    // a final value is under way into something that has
+                    // come to take no more, the task is interrupted there
+                    // and another takes the end up from the next stage.
+                    while (true) {
+                        Tasks.again(wake, io);
+                        var ending = try io.concurrent(Tasks.end, .{ refs, body.supervision, wake, io });
+                        const how = body.attend(refs, io, .ending) catch |err| {
+                            ending.cancel(io) catch {};
+                            return err;
+                        };
+                        const finished = ending.cancel(io);
+                        // Whatever cut the end short, the failure that caused it is the result.
+                        try body.failureIfAny(refs, io);
+                        if (how == .interrupted_emission) {
+                            // The request was the interruption, wherever it reached the task.
+                            finished catch |err| if (err != error.Canceled) return err else continue;
+                            return;
+                        }
+                        return finished;
+                    }
                 }
 
                 /// Whether what the task of a phase returned is the run's
@@ -244,21 +263,46 @@ pub fn Program(comptime S: type, comptime P: type) type {
                     return returned_by_itself or err != error.Canceled;
                 }
 
+                /// How the wait for a phase's task ended.
+                const Attended = enum {
+                    /// The task returned by itself.
+                    returned,
+                    /// The run needs it to: a worker failed, or nothing wants another item.
+                    interrupted,
+                    /// A final value it is emitting is for nothing.
+                    interrupted_emission,
+                };
+
                 /// Waits for the task of `phase`, settling the pipe whenever
                 /// a worker has said it is done: a queue before that worker
                 /// then stops taking items, so a producer waiting on it moves
                 /// on, and lets go of its own worker, so that the end of the
                 /// stream does not wait for a handler working for nothing.
                 /// Each phase settles once to begin with, for what was said
-                /// before it. Returns whether the task returned by itself.
-                fn attend(body: @This(), refs: Frame.Refs, io: Io, comptime phase: Phase) Io.Cancelable!bool {
+                /// before it.
+                ///
+                /// The pipe is also settled before the task is interrupted,
+                /// because the caller then joins it: a task that does not
+                /// let itself be cancelled while it waits for space in a
+                /// queue only returns when that queue answers. After a
+                /// failure everything answers `.done` (every queue, and
+                /// every `branch` and `route` for its sub-pipes, so that one
+                /// without a queue does not go on taking items); otherwise
+                /// the queues before something that takes no more.
+                fn attend(body: @This(), refs: Frame.Refs, io: Io, comptime phase: Phase) Io.Cancelable!Attended {
                     var seen: usize = 0;
                     while (true) switch (try Tasks.wait(body.supervision.signal, io, phase, &seen)) {
-                        .returned => return true,
-                        .interrupt => return false,
-                        .news => {
-                            _ = Frame.at.settle(refs, false);
+                        .returned => return .returned,
+                        .interrupt => {
+                            _ = Frame.at.settle(refs, body.supervision.hasFailed());
                             body.supervision.settled(io);
+                            return .interrupted;
+                        },
+                        .news => {
+                            const settled = Frame.at.settle(refs, false);
+                            body.supervision.settled(io);
+                            // (Only the end of the stream emits final values.)
+                            if (phase == .ending and settled.interrupted) return .interrupted_emission;
                         },
                     };
                 }

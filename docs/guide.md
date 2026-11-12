@@ -286,6 +286,18 @@ when all of them are done, and the first failure ends it:
   waiting for space in an earlier queue moves on, and a worker stuck in a
   handler between two queues is cancelled at the end of the stream instead
   of awaited: its item is one nobody takes.
+- **A final value that is under way when its pipe becomes done is not
+  waited for either.** Its handler is interrupted, the value is dropped, and
+  the end of the stream goes on: stages after the point that is done still
+  emit theirs.
+- **A producer that does not let itself be cancelled** (it blocks
+  cancellation around a push) is answered `.done` instead: by the queue it
+  waits on, and after a failure by the pipe itself.
+- **Not interrupted:** a handler that is already running for an item, or a
+  start hook that is already blocked, when only one sub-pipe of a `branch`
+  or `route` is done and another still wants items. It runs on; if it waits
+  for something that never comes, so does the run. Both are interrupted
+  once the whole pipe is done or has failed.
 - **A failure over something nobody takes is not the run's failure.** If a
   handler, a predicate, a start hook or the source fails after a worker has
   said that its pipe (or sub-pipe) wants no more, that failure is dropped.

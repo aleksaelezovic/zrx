@@ -1669,3 +1669,197 @@ test "a queue before a route case or a branch that is done lets go of its worker
     try std.testing.expect(!before.source_woke.load(.seq_cst));
     try std.testing.expect(!before.handler_woke.load(.seq_cst));
 }
+
+// --- something is under way when a worker reports --------------------------------
+
+/// Pushes without letting itself be cancelled, as a producer does around
+/// work it must not leave half done. Only an answer ends it.
+fn pushUncancelled(clock: std.Io, out: anytype) !void {
+    const before = clock.swapCancelProtection(.blocked);
+    defer _ = clock.swapCancelProtection(before);
+    var value: u32 = 1;
+    while (true) : (value += 1) {
+        if (try out.push(value) == .done) return;
+    }
+}
+
+/// Between two queues: lets item 1 through and blocks over item 2 far longer
+/// than a test should take.
+fn blocksOverTwo(clock: std.Io, stuck: *Stuck, value: u32) !void {
+    if (value != 2) return;
+    try clock.sleep(.fromSeconds(5), .awake);
+    stuck.handler_woke.store(true, .seq_cst);
+}
+
+test "a producer that cannot be cancelled is answered before it is joined" {
+    // The producer ends up waiting for space in the first queue, whose
+    // worker is stuck in a handler. It ignores cancellation, so only that
+    // queue answering `.done` lets it return: the run has to see to that
+    // before it waits for the producer, when the pipe is done and when it
+    // has failed.
+    var done: Stuck = .{};
+    var seen: Numbers = .{};
+    const satisfied = pipe(.{ queue(1), tap(blocksOverTwo), queue(4), take(1), subscribe(record) });
+    try program(zrx.fromProducer(u32, pushUncancelled), satisfied).run(.{ io, &done, &seen });
+    try seen.expect(&.{1});
+    try std.testing.expect(!done.handler_woke.load(.seq_cst));
+
+    // After a failure the first queue is not before anything that is done,
+    // so only letting go of every queue answers the producer. The failure
+    // is held back until the producer is on its way into that queue (item 4
+    // has passed the tap in front of it), past the point where the run's
+    // having failed would be answered directly.
+    var failed: Stuck = .{};
+    const failing = pipe(.{ tap(opensOnFour), queue(1), tap(blocksOverTwo), queue(4), subscribe(failsOnceOpen) });
+    try std.testing.expectError(error.ConsumerBroke, program(zrx.fromProducer(u32, pushUncancelled), failing).run(.{ io, &failed }));
+    try std.testing.expect(!failed.handler_woke.load(.seq_cst));
+
+    // The same with the queues two levels in.
+    var nested: Stuck = .{};
+    const in_an_arm = pipe(.{branch(.{
+        pipe(.{route(.{otherwise(pipe(.{ tap(opensOnFour), queue(1), tap(blocksOverTwo), queue(4), subscribe(failsOnceOpen) }))})}),
+        pipe(.{drain()}),
+    })});
+    try std.testing.expectError(error.ConsumerBroke, program(zrx.fromProducer(u32, pushUncancelled), in_an_arm).run(.{ io, &nested }));
+    try std.testing.expect(!nested.handler_woke.load(.seq_cst));
+}
+
+test "once the run has failed, a producer that cannot be cancelled is answered done" {
+    // The failing sub-pipe has no queue between the producer and the
+    // failure's cause to answer for it, and the sibling takes every item:
+    // only the pipe's own answer ends this producer.
+    var stuck: Stuck = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ queue(4), subscribe(failAlways) }),
+        pipe(.{drain()}),
+    })});
+    try std.testing.expectError(error.ConsumerBroke, program(zrx.fromProducer(u32, pushUncancelled), work).run(.{ io, &stuck }));
+}
+
+/// In front of the first queue, on the producer's task.
+fn opensOnFour(clock: std.Io, stuck: *Stuck, value: u32) void {
+    if (value == 4) stuck.gate.set(clock);
+}
+
+/// Fails once the producer is on its way into the first queue.
+fn failsOnceOpen(clock: std.Io, stuck: *Stuck, _: u32) !void {
+    try stuck.gate.wait(clock);
+    return error.ConsumerBroke;
+}
+
+/// What two sub-pipes each wait on, and whether a handler woke by itself.
+const Gates = struct {
+    first: std.Io.Event = .unset,
+    second: std.Io.Event = .unset,
+    woke: std.atomic.Value(usize) = .init(0),
+    supervision: ?zrx.operator.Supervision = null,
+
+    fn of(gates: *Gates, value: u32) *std.Io.Event {
+        return if (value % 2 == 0) &gates.first else &gates.second;
+    }
+};
+
+/// Over a final value (8 or 9): lets the far side of its queue finish, which
+/// makes the pipe done, and then blocks far longer than a test should take.
+fn opensThenBlocks(clock: std.Io, gates: *Gates, value: u32) !void {
+    if (value < 8) return;
+    gates.of(value).set(clock);
+    try clock.sleep(.fromSeconds(5), .awake);
+    _ = gates.woke.fetchAdd(1, .seq_cst);
+}
+
+/// Behind the queue: holds an item until the gate for its sub-pipe is open.
+fn holdsFirst(clock: std.Io, gates: *Gates, _: u32) !void {
+    try gates.first.wait(clock);
+}
+fn holdsSecond(clock: std.Io, gates: *Gates, _: u32) !void {
+    try gates.second.wait(clock);
+}
+
+test "a final value that is under way when its pipe becomes done is not waited for" {
+    // The source has ended, and the worker behind the queue still holds the
+    // one item that is wanted. The trailer's final value is emitted before
+    // the pipe is done, so nothing drops it; its handler lets the worker
+    // finish, which makes the pipe done, and then blocks. The end of the
+    // stream must go on: the fold behind the queue still owes its value.
+    var gates: Gates = .{};
+    var left: Numbers = .{};
+    const whole = pipe(.{
+        Trailer{ .value = 8 },
+        tap(opensThenBlocks),
+        queue(4),
+        tap(holdsFirst),
+        take(1),
+        fold(@as(u32, 100), add),
+        subscribe(toLeft),
+    });
+    try program(zrx.fromSlice(&[_]u32{1}), whole).run(.{ io, &gates, Left{ .seen = &left } });
+    try left.expect(&.{101});
+    try std.testing.expectEqual(@as(usize, 0), gates.woke.load(.seq_cst));
+}
+
+test "the same in one sub-pipe after another" {
+    // Each arm's final value is under way when that arm becomes done, one
+    // after the other: the end of the stream is taken up again each time.
+    var gates: Gates = .{};
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{branch(.{
+        pipe(.{ Trailer{ .value = 8 }, tap(opensThenBlocks), queue(4), tap(holdsFirst), take(1), fold(@as(u32, 100), add), subscribe(toLeft) }),
+        pipe(.{ Trailer{ .value = 9 }, tap(opensThenBlocks), queue(4), tap(holdsSecond), take(1), fold(@as(u32, 200), add), subscribe(toRight) }),
+    })});
+    try program(zrx.fromSlice(&[_]u32{1}), work).run(.{ io, &gates, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{101});
+    try right.expect(&.{201});
+    try std.testing.expectEqual(@as(usize, 0), gates.woke.load(.seq_cst));
+}
+
+/// Remembers the `Supervision` of the pipe it is in, for `opensThenFails`.
+const ExposeTo = struct {
+    pub const zrx_operator = {};
+    pub const name = "exposeTo";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const ExposeTo, env: Env) !void {
+                zrx.di.get(env, *Gates).supervision = zrx.di.get(env, zrx.operator.Supervision);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+/// Over the final value: lets the far side finish, waits (without calling
+/// into `std.Io`) until that has made the pipe done, and only then fails.
+fn opensThenFails(clock: std.Io, gates: *Gates, value: u32) error{HandlerFailed}!void {
+    if (value < 8) return;
+    gates.of(value).set(clock);
+    while (!gates.supervision.?.wantsNoMore()) std.Thread.yield() catch {};
+    return error.HandlerFailed;
+}
+
+test "nor does its failure count" {
+    for (0..50) |_| {
+        var gates: Gates = .{};
+        var left: Numbers = .{};
+        const work = pipe(.{
+            ExposeTo{},
+            Trailer{ .value = 8 },
+            tap(opensThenFails),
+            queue(4),
+            tap(holdsFirst),
+            take(1),
+            fold(@as(u32, 100), add),
+            subscribe(toLeft),
+        });
+        try program(zrx.fromSlice(&[_]u32{1}), work).run(.{ io, &gates, Left{ .seen = &left } });
+        try left.expect(&.{101});
+    }
+}

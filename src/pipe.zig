@@ -20,7 +20,7 @@
 //!     pub fn stop(self: *Stage) void                     // optional: cancel and join any task this stage runs
 //!     pub fn failure(self: *Stage, down: anytype) !void  // with a worker: the error it ended with, if any
 //!     pub fn takesNoMore(self: *Stage) bool              // optional: would answer `.done`, without being pushed to
-//!     pub fn settle(self: *Stage, after_is_done: bool) void // optional: told whether what follows it takes no more
+//!     pub fn settle(self: *Stage, after_is_done: bool) bool // optional: told whether what follows it takes no more
 //!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
 //!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
@@ -30,7 +30,9 @@
 //! is all that nesting a pipe in a pipe means.
 //!
 //! A run goes: `init` every stage in order, `start` in reverse, `push` per
-//! item, then on a normal end `finish` in order and `flush` in reverse; and
+//! item, then on a normal end `finish` in order (each stage once, even when
+//! a supervised run takes the end of the stream up again after interrupting
+//! a final value that was for nothing) and `flush` in reverse; and
 //! always, last, `stop` in order and then `deinit` in reverse. A failure skips
 //! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
 //! still using a stage when that stage, or one after it, is torn down.
@@ -500,6 +502,25 @@ fn plan(comptime Ops: type, comptime Env: type, comptime In: type) Plan(di.types
     return result;
 }
 
+/// A final value of a stage, as the run sees it.
+const Emission = enum(u8) {
+    idle,
+    /// On its way through the stages after the one that emitted it.
+    under_way,
+    /// Under way into something that takes no more: the run has marked it
+    /// and is interrupting the task that emits it.
+    interrupted,
+};
+
+/// What settling a chain found (`Chain.at.settle`).
+pub const Settled = struct {
+    /// The chain takes no more.
+    done: bool,
+    /// A final value was under way for nothing and has been marked: the
+    /// task finishing the pipe must be interrupted.
+    interrupted: bool,
+};
+
 /// Whether a stage of type `S` can push outside of its `push`.
 fn emitsLate(comptime S: type) bool {
     return @hasDecl(S, "start") or @hasDecl(S, "finish");
@@ -533,10 +554,18 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
     };
     // A stage that can push outside of its `push` (as the run starts, as the
     // stream ends) is stored with one flag beside it: what follows the stage
-    // has answered `.done`.
+    // has answered `.done`. In a supervised run, where the end of the stream
+    // may be taken up again after being interrupted, also whether the stage
+    // has finished and whether a final value of it is under way.
+    const supervised = di.has(Env, Supervision);
     const slots = blk: {
         var list: [n]type = undefined;
-        for (stages, 0..) |S, i| list[i] = if (emitsLate(S)) struct { stage: S, after_is_done: bool } else S;
+        for (stages, 0..) |S, i| list[i] = if (!emitsLate(S))
+            S
+        else if (supervised)
+            struct { stage: S, after_is_done: bool, finished: bool, emission: std.atomic.Value(Emission) }
+        else
+            struct { stage: S, after_is_done: bool };
         break :blk list;
     };
 
@@ -557,10 +586,13 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             break :blk false;
         };
 
-        /// The flag stored beside stage `i`, which emits outside of `push`.
+        /// What is stored beside stage `i`, which emits outside of `push`.
+        fn slotOf(refs: Refs, comptime i: usize) *slots[i] {
+            return @fieldParentPtr("stage", refs[i]);
+        }
+
         fn afterIsDone(refs: Refs, comptime i: usize) *bool {
-            const slot: *slots[i] = @fieldParentPtr("stage", refs[i]);
-            return &slot.after_is_done;
+            return &slotOf(refs, i).after_is_done;
         }
 
         /// What follows each of the stages before `end` is done.
@@ -603,17 +635,48 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
         /// has answered `.done`, nothing is pushed there again, and no stage
         /// after it runs for the value. (While items flow there is nothing
         /// to check: whoever was answered `.done` stops pushing.)
-        fn Late(comptime Tail: type, comptime i: usize) type {
+        fn Late(comptime Tail: type, comptime i: usize, comptime finishing: bool) type {
             return struct {
                 refs: Refs,
                 tail: Tail,
 
                 pub const zrx_answers_done = {};
 
+                /// Whether the run can interrupt this emission: a final
+                /// value, in a supervised run. (As the run starts, the
+                /// handle may be kept by a worker and used from its task.)
+                const interruptible = finishing and supervised;
+
                 pub fn push(late: @This(), item: types.items[i]) !Flow {
                     if (late.isDone()) return .done;
                     const down: Down(Tail, i) = .{ .refs = late.refs, .tail = late.tail };
-                    return down.push(item);
+                    if (!interruptible) return down.push(item);
+
+                    // The value is under way from here to where `down.push`
+                    // returns. If what it is pushed into comes to take no
+                    // more meanwhile, the run interrupts it (`at.settle`),
+                    // and then nothing that came back counts: not having
+                    // been cancelled in a handler, not a handler's failure.
+                    const emission = &slotOf(late.refs, i - 1).emission;
+                    emission.store(.under_way, .release);
+                    const answer = down.push(item) catch |err| {
+                        if (emission.cmpxchgStrong(.under_way, .idle, .acq_rel, .acquire) != null) return late.forNothing();
+                        // Not interrupted, but the same may have become
+                        // true by now: a failure over a value nobody takes
+                        // is not the run's. Being cancelled always counts.
+                        if (@as(anyerror, err) != error.Canceled and late.isDone()) return .done;
+                        return err;
+                    };
+                    if (emission.cmpxchgStrong(.under_way, .idle, .acq_rel, .acquire) != null) return late.forNothing();
+                    return answer;
+                }
+
+                /// The run interrupted this emission. `finish` sees the mark
+                /// when the stage's hook returns, and hands the end of the
+                /// stream back to the run.
+                fn forNothing(late: @This()) Flow {
+                    afterIsDone(late.refs, i - 1).* = true;
+                    return .done;
                 }
 
                 /// Whether an emission would get nowhere: what follows the
@@ -653,7 +716,13 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
             fn initFrom(comptime i: usize, refs: Refs, operators: *const Ops, env: types.envs[i]) !void {
                 if (i == n) return;
-                if (comptime emitsLate(stages[i])) afterIsDone(refs, i).* = false;
+                if (comptime emitsLate(stages[i])) {
+                    afterIsDone(refs, i).* = false;
+                    if (supervised) {
+                        slotOf(refs, i).finished = false;
+                        slotOf(refs, i).emission = .init(.idle);
+                    }
+                }
                 try refs[i].init(&operators[i], env);
                 errdefer if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
                 const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
@@ -696,7 +765,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                                 return .done;
                             }
                         }
-                        const next: Late(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                        const next: Late(@TypeOf(tail), i + 1, false) = .{ .refs = refs, .tail = tail };
                         const answer = try refs[i].start(next);
                         if (comptime @TypeOf(answer) != Flow) @compileError(
                             "pipe: `" ++ ops[i].name ++ "` has a `start` that returns `" ++ @typeName(@TypeOf(answer)) ++
@@ -723,17 +792,28 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// it is done, so that a queue before that worker stops taking
             /// items and lets go of a worker that may be stuck in a handler.
             /// Called from the supervising task while stages run.
-            pub fn settle(refs: Refs, after_is_done: bool) bool {
-                var done = after_is_done;
+            pub fn settle(refs: Refs, after_is_done: bool) Settled {
+                var settled: Settled = .{ .done = after_is_done, .interrupted = false };
                 comptime var k = n;
                 inline while (k > 0) {
                     k -= 1;
-                    if (@hasDecl(stages[k], "settle")) refs[k].settle(done);
+                    if (@hasDecl(stages[k], "settle")) {
+                        if (refs[k].settle(settled.done)) settled.interrupted = true;
+                    }
+                    // A final value of this stage that is under way into
+                    // something that takes no more is for nothing: marked
+                    // here, so that the run interrupts whoever emits it.
+                    if (supervised and comptime emitsLate(stages[k])) {
+                        if (settled.done) {
+                            if (slotOf(refs, k).emission.cmpxchgStrong(.under_way, .interrupted, .acq_rel, .acquire) == null)
+                                settled.interrupted = true;
+                        }
+                    }
                     if (@hasDecl(stages[k], "takesNoMore")) {
-                        if (refs[k].takesNoMore()) done = true;
+                        if (refs[k].takesNoMore()) settled.done = true;
                     }
                 }
-                return done;
+                return settled;
             }
 
             /// `guard` is the run's `Supervision`, or `{}`. With it, once a
@@ -741,14 +821,38 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// normal end must not follow a failure. `error.Canceled` then
             /// stands for "the run failed elsewhere"; the program returns
             /// that failure instead.
+            ///
+            /// In a supervised run the end of the stream can be taken up
+            /// again: a stage whose `finish` has returned is not finished
+            /// twice. That is how the run gets past a final value that was
+            /// under way when what it was pushed into came to take no more:
+            /// it interrupts the task (the one request a task can be sent),
+            /// the stage counts as finished, `error.Canceled` hands the end
+            /// back, and the run starts it again from the next stage.
             pub fn finish(refs: Refs, tail: anytype, guard: anytype) !void {
                 inline for (0..n) |i| {
-                    if (@hasDecl(stages[i], "finish")) {
+                    if (@hasDecl(stages[i], "finish")) again: {
+                        if (supervised) {
+                            if (slotOf(refs, i).finished) break :again;
+                        }
                         if (@TypeOf(guard) == Supervision) {
                             if (guard.hasFailed()) return error.Canceled;
                         }
-                        const next: Late(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        try refs[i].finish(next);
+                        const next: Late(@TypeOf(tail), i + 1, true) = .{ .refs = refs, .tail = tail };
+                        if (!supervised) {
+                            try refs[i].finish(next);
+                            break :again;
+                        }
+                        const result = refs[i].finish(next);
+                        if (slotOf(refs, i).emission.swap(.idle, .acq_rel) == .interrupted) {
+                            slotOf(refs, i).finished = true;
+                            // Being cancelled was the interruption; anything
+                            // else the hook failed with is its own.
+                            result catch |err| if (@as(anyerror, err) != error.Canceled) return err;
+                            return error.Canceled;
+                        }
+                        try result;
+                        slotOf(refs, i).finished = true;
                     }
                 }
             }
@@ -841,7 +945,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.finish(self.refsOf(), tail, guard);
         }
 
-        pub fn settle(self: *Self, after_is_done: bool) bool {
+        pub fn settle(self: *Self, after_is_done: bool) Settled {
             return at.settle(self.refsOf(), after_is_done);
         }
 
