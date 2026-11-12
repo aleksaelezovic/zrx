@@ -326,23 +326,142 @@ test "a route remembers that the pipe after it is done, even from before the fir
     try std.testing.expectEqual(@as(usize, 1), tapped.count);
 }
 
-test "every case starts, but a start emission does not get past a pipe that is done" {
+const Started = struct { count: usize = 0 };
+
+/// Records that it was started; emits nothing.
+const StartMark = struct {
+    pub const zrx_operator = {};
+    pub const name = "startMark";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            started: *Started,
+
+            pub fn init(self: *@This(), _: *const StartMark, env: Env) !void {
+                self.started = zrx.di.get(env, *Started);
+            }
+
+            pub fn start(self: *@This(), _: anytype) !zrx.Flow {
+                self.started.count += 1;
+                return .more;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+        };
+    }
+};
+
+test "once a start emission satisfied the pipe after a route, no later case is started" {
     var seen: Numbers = .{};
     var tapped: Pulls = .{};
-    // Both cases emit as the run starts. The first satisfies take(1); the
-    // second still starts, and what it emits is dropped.
+    var started: Started = .{};
+    // The first case emits as the run starts and that satisfies take(1).
+    // Nothing the other cases could emit would get anywhere, so their start
+    // hooks, which might block, are not run.
     const work = pipe(.{
         route(.{
             when(isEven, pipe(.{Herald{ .value = 100 }})),
-            otherwise(pipe(.{Herald{ .value = 200 }})),
+            when(isSmall, pipe(.{ StartMark{}, Herald{ .value = 200 } })),
+            otherwise(pipe(.{StartMark{}})),
         }),
         tap(countPull),
         take(1),
         subscribe(record),
     });
-    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped });
+    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped, &started });
     try seen.expect(&.{100});
     try std.testing.expectEqual(@as(usize, 1), tapped.count);
+    try std.testing.expectEqual(@as(usize, 0), started.count);
+}
+
+test "a case that is done by itself does not keep the other cases from starting" {
+    var seen: Numbers = .{};
+    var started: Started = .{};
+    const work = pipe(.{
+        route(.{
+            when(isEven, pipe(.{ Herald{ .value = 100 }, take(1) })),
+            otherwise(pipe(.{ StartMark{}, map(double) })),
+        }),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 4), work).run(.{ &seen, &started });
+    try seen.expect(&.{ 100, 2, 6 });
+    try std.testing.expectEqual(@as(usize, 1), started.count);
+}
+
+const Answer = struct { flow: ?zrx.Flow = null };
+
+/// Forwards every item, emits one more at the end of the stream, and
+/// records what that one was answered.
+const Probe = struct {
+    value: u32,
+
+    pub const zrx_operator = {};
+    pub const name = "probe";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            value: u32,
+            answer: *Answer,
+
+            pub fn init(self: *@This(), op: *const Probe, env: Env) !void {
+                self.* = .{ .value = op.value, .answer = zrx.di.get(env, *Answer) };
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), down: anytype) !void {
+                self.answer.flow = try down.push(self.value);
+            }
+        };
+    }
+};
+
+test "what a stage emits after the pipe behind it is done reaches no stage" {
+    // take(1) is done after the first item. The probe still emits at the end
+    // of the stream: the tap between them does not run for that value.
+    var seen: Numbers = .{};
+    var tapped: Pulls = .{};
+    var answer: Answer = .{};
+    const tapping = pipe(.{ Probe{ .value = 9 }, tap(countPull), take(1), subscribe(record) });
+    try program(range(u32, 0, 5), tapping).run(.{ &seen, &tapped, &answer });
+    try seen.expect(&.{0});
+    try std.testing.expectEqual(@as(usize, 1), tapped.count);
+    try std.testing.expectEqual(@as(?zrx.Flow, .done), answer.flow);
+
+    // The answer stays `.done`, even through a filter that would have
+    // dropped the value and said `.more`.
+    var filtered: Numbers = .{};
+    var second: Answer = .{};
+    const filtering = pipe(.{ Probe{ .value = 9 }, filter(isEven), take(1), subscribe(record) });
+    try program(range(u32, 0, 5), filtering).run(.{ &filtered, &second });
+    try filtered.expect(&.{0});
+    try std.testing.expectEqual(@as(?zrx.Flow, .done), second.flow);
+}
+
+test "a start emission after the pipe behind it is done reaches no stage either" {
+    // The herald's value satisfies take(1), so the source is never run. The
+    // probe before it still emits at the end of the stream.
+    var seen: Numbers = .{};
+    var tapped: Pulls = .{};
+    var answer: Answer = .{};
+    const work = pipe(.{ Probe{ .value = 9 }, tap(countPull), Herald{ .value = 1 }, take(1), subscribe(record) });
+    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped, &answer });
+    try seen.expect(&.{1});
+    try std.testing.expectEqual(@as(usize, 0), tapped.count);
+    try std.testing.expectEqual(@as(?zrx.Flow, .done), answer.flow);
 }
 
 fn evenOrFail(value: u32) error{PredicateFailed}!bool {

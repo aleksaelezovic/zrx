@@ -31,7 +31,14 @@ to this file; edit `AGENTS.md`, not copies.
 
 - **Push with a flow answer.** `down.push(item)` returns `E!Flow` (`.more` or
   `.done`). Early stop is a value, never an error. A stage that answered
-  `.done` may still be pushed to and keeps answering `.done`.
+  `.done` of its own accord (`take`) keeps answering `.done`.
+- **Done is final, and the chain enforces it.** Whoever is answered `.done`
+  stops pushing. For what a stage emits outside of `push` (`start`, `finish`)
+  the chain remembers, beside that stage, that what follows it answered
+  `.done`, and drops the emission there (`Late` in `src/pipe.zig`): no stage
+  in between runs for it. Operators do not guard this themselves. The answer
+  has to have travelled by a push: across a `queue` the near side learns it
+  at its next push.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is
@@ -69,11 +76,11 @@ to this file; edit `AGENTS.md`, not copies.
   with or without a queue. `finish` may then reach a stage whose `start` did
   not run: a `queue` that was never started answers `.done` and buffers
   nothing.
-- **A stage that is done runs no user code for an item.** A `route` that is
-  done asks no predicate. What it asks first is one flag (`Arms.idle`), kept
-  up to date where a sub-pipe finishes: walking the cases ahead of the
-  per-item work makes the optimizer reshape the loop. For the same reason a
-  `start` reads no state on the path where nothing answered `.done`.
+- **A `route` that is done asks no predicate**, and once it is done while
+  starting, no later case is started (a case that is done by itself leaves
+  the others to start). What `push` asks first is one flag (`Arms.idle`),
+  kept up to date where a sub-pipe finishes: walking the cases ahead of the
+  per-item work makes the optimizer reshape the loop.
 - **The sequential fallback orders outcomes; it cannot cancel.** On an `Io`
   with no concurrency a member runs on the caller's task until it returns.
   Do not promise immediate cancellation there. After a failed launch, re-read
@@ -130,6 +137,15 @@ to this file; edit `AGENTS.md`, not copies.
   are stored as one value. A stage that indexes into an array it owns cannot
   be kept in registers at all, so give such a buffer a stage of its own and
   keep counters in another (see `batch`).
+- What a chain keeps per stage lives beside that stage (`slots` in `Chain`),
+  reached from the stage pointer. Do not add to `Refs`: one more pointer in
+  it, even unused, reshaped the `branch` fixture.
+- Not covered: a stage that emits at the end of the stream followed by an
+  early stop (`batch` then `take`). A trial fixture met `lean` on x86-64 but
+  not on aarch64, where the optimizer restructures the loop and copies the
+  remainder with `memcpy`; natively it measured about 0.85 ns/item against
+  0.55 by hand, and no better before the chain remembered `.done`. Do not
+  claim that combination.
 - `tools/same_code.zig` compares instruction shape: the multiset of
   instructions with value and block names erased, phi inputs in any order, and
   `> c` equal to `>= c + 1`. Nothing else is equated; a comparison never

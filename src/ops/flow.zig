@@ -373,34 +373,23 @@ fn Route(comptime Cs: type) type {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
                 arms: core.Arms(n, Env),
-                /// Set when the pipe after the route asked to stop.
-                downstream_done: bool,
-
                 const Self = @This();
 
                 pub const has_boundary = anyBoundary(&chains);
 
-                /// The `down` given to a rejoining case: forwards and remembers `.done`.
-                ///
-                /// Once the pipe after the route is done, nothing is forwarded
-                /// to it again, whenever the answer came (a case may emit as
-                /// the run starts, as items flow, or as the stream ends):
-                /// - every case is marked as wanting no more, which `push`
-                ///   already checks before handing a case an item;
-                /// - with `guarded`, an emission is dropped: that is how cases
-                ///   are started and finished, where each one still runs but
-                ///   what it emits must not get past a pipe that is done.
-                ///   (Checking the flag itself on every push as well would
-                ///   cost nothing per item but makes the optimizer peel the loop.)
-                fn Rejoin(comptime Down: type, comptime guarded: bool) type {
+                /// The `down` given to a rejoining case. When the pipe after
+                /// the route answers `.done`, every case is marked as wanting
+                /// no more, so the route is done as well. Keeping what a case
+                /// emits later (as the run starts, as the stream ends) from
+                /// reaching that pipe again is not done here: `down` is the
+                /// chain's own handle, which already does.
+                fn Rejoin(comptime Down: type) type {
                     return struct {
                         down: Down,
                         route: *Self,
 
                         pub fn push(self: @This(), item: anytype) !Flow {
-                            if (guarded and self.route.downstream_done) return .done;
                             if (try self.down.push(item) == .done) {
-                                self.route.downstream_done = true;
                                 self.route.arms.finishAll();
                                 return .done;
                             }
@@ -409,17 +398,16 @@ fn Route(comptime Cs: type) type {
                     };
                 }
 
-                fn Tail(comptime Down: type, comptime guarded: bool) type {
-                    return if (rejoins) Rejoin(Down, guarded) else Closed;
+                fn Tail(comptime Down: type) type {
+                    return if (rejoins) Rejoin(Down) else Closed;
                 }
 
-                fn tail(self: *Self, down: anytype, comptime guarded: bool) Tail(@TypeOf(down), guarded) {
+                fn tail(self: *Self, down: anytype) Tail(@TypeOf(down)) {
                     return if (rejoins) .{ .down = down, .route = self } else .{};
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {
                     self.arms.init(env);
-                    self.downstream_done = false;
                     inline for (0..n) |i| {
                         self.tests[i] = if (cases[i].is_otherwise) {} else .init(env);
                         self.chains[i].init(&op.cases[i].pipe, self.arms.envFor(env, i)) catch |err| {
@@ -431,9 +419,15 @@ fn Route(comptime Cs: type) type {
 
                 pub fn start(self: *Self, down: anytype) !Flow {
                     inline for (0..n) |i| {
-                        if (try self.chains[i].start(self.tail(down, true)) == .done) self.arms.finished(i);
+                        if (try self.chains[i].start(self.tail(down)) == .done) self.arms.finished(i);
+                        // A case that is done by itself leaves the others to
+                        // start. Once the route is done (the pipe after it
+                        // is, or this was the last case), no later case is
+                        // started: nothing it emitted would get anywhere, and
+                        // its hook could block.
+                        if (self.verdict() == .done) return .done;
                     }
-                    return self.verdict();
+                    return .more;
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
@@ -445,7 +439,7 @@ fn Route(comptime Cs: type) type {
                         const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
                             if (self.arms.wants(i)) {
-                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.arms.finished(i);
+                                if (try self.chains[i].push(item, self.tail(down)) == .done) self.arms.finished(i);
                             }
                             return self.verdict();
                         }
@@ -460,7 +454,7 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn finish(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down, true), self.arms.guard());
+                    inline for (0..n) |i| try self.chains[i].finish(self.tail(down), self.arms.guard());
                 }
 
                 pub fn flush(self: *Self) !void {
@@ -470,7 +464,7 @@ fn Route(comptime Cs: type) type {
                 pub fn failureOf(self: *Self, down: anytype, who: *const anyopaque) !void {
                     // Only terminating cases can contain a worker.
                     if (rejoins) return;
-                    inline for (0..n) |i| try self.chains[i].failureOf(self.tail(down, false), who);
+                    inline for (0..n) |i| try self.chains[i].failureOf(self.tail(down), who);
                 }
 
                 pub fn stop(self: *Self) void {

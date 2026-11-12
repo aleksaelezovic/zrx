@@ -248,10 +248,16 @@ another item. `take` and `takeWhile` answer `.done`; sources stop when they see
 it; `branch` and `route` answer `.done` once every sub-pipe has. The stream then
 finishes normally: `fold` emits, writers flush.
 
+Done is final. Whoever is answered `.done` stops pushing, and a value that
+an earlier stage emits afterwards (a final value as the stream ends) is
+dropped where it is emitted: no handler between that stage and the one that
+is done runs for it. The answer has to have come back through a push, so
+across a `queue` this starts at the near side's next push; until then such a
+value still passes the stages before the queue.
+
 A pipe can be done before the first item: a stage emitted as the run started
-and that was all anything wanted. Its source is then never run. What is done
-runs none of your code for an item that still arrives (a final value from a
-stage before it): a `route` that is done asks no predicate.
+and that was all anything wanted. Its source is then never run. A `route`
+that is done asks no predicate, and starts no further case.
 
 ## Concurrency and backpressure
 

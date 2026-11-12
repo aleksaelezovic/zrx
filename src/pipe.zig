@@ -33,6 +33,11 @@
 //! `finish` and `flush`. Every `stop` runs before any `deinit`, so no task is
 //! still using a stage when that stage, or one after it, is torn down.
 //!
+//! In `start` and `finish` a stage emits with the same `down.push`. The chain
+//! remembers when what follows a stage has answered `.done` and from then on
+//! answers such an emission itself, so no stage after it runs for a value
+//! nobody takes; a stage does not have to guard that.
+//!
 //! `start` answers like a push: `.done` when nothing after the stage wants an
 //! item, which a stage learns from a push it made (`return down.push(x)`), and
 //! `.more` otherwise. When the pipe is done before startup is over, startup
@@ -54,8 +59,11 @@ const Io = std.Io;
 const di = @import("di.zig");
 
 /// What a push tells its caller: keep sending, or stop because nothing
-/// downstream wants more. A stage that returned `.done` may still be pushed
-/// to (by trailing emissions upstream) and keeps answering `.done`.
+/// downstream wants more. Done is final, and whoever is answered `.done`
+/// stops pushing: a source ends, a stage passes the answer on, and the chain
+/// drops what a stage emits afterwards outside of `push` (see `Late`). A
+/// stage that answers `.done` of its own accord (`take`) keeps doing so,
+/// should a stage before it ignore the answer and push again.
 pub const Flow = enum { more, done };
 
 /// The `Out` of a terminal operator: nothing flows past it.
@@ -394,6 +402,11 @@ fn plan(comptime Ops: type, comptime Env: type, comptime In: type) Plan(di.types
     return result;
 }
 
+/// Whether a stage of type `S` can push outside of its `push`.
+fn emitsLate(comptime S: type) bool {
+    return @hasDecl(S, "start") or @hasDecl(S, "finish");
+}
+
 /// The runtime state of a pipe: one stage per operator.
 ///
 /// Every function works on `Refs`, a tuple of pointers to the stages, so the
@@ -420,9 +433,17 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
         for (stages, 0..) |S, i| list[i] = *S;
         break :blk list;
     };
+    // A stage that can push outside of its `push` (as the run starts, as the
+    // stream ends) is stored with one flag beside it: what follows the stage
+    // has answered `.done`.
+    const slots = blk: {
+        var list: [n]type = undefined;
+        for (stages, 0..) |S, i| list[i] = if (emitsLate(S)) struct { stage: S, after_is_done: bool } else S;
+        break :blk list;
+    };
 
     return struct {
-        states: @Tuple(&stages),
+        states: @Tuple(&slots),
 
         const Self = @This();
 
@@ -438,18 +459,54 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             break :blk false;
         };
 
+        /// The flag stored beside stage `i`, which emits outside of `push`.
+        fn afterIsDone(refs: Refs, comptime i: usize) *bool {
+            const slot: *slots[i] = @fieldParentPtr("stage", refs[i]);
+            return &slot.after_is_done;
+        }
+
+        /// What a stage pushes an item on with: to stage `i`, or past the
+        /// last one to the chain's tail. A `.done` answer is remembered on
+        /// its way back, where a later emission could ask.
         fn Down(comptime Tail: type, comptime i: usize) type {
             return struct {
                 refs: Refs,
                 tail: Tail,
 
                 pub fn push(down: @This(), item: types.items[i]) !Flow {
+                    if (comptime i == 0 or !emitsLate(stages[i - 1])) return down.forward(item);
+                    if (try down.forward(item) == .done) {
+                        afterIsDone(down.refs, i - 1).* = true;
+                        return .done;
+                    }
+                    return .more;
+                }
+
+                fn forward(down: @This(), item: types.items[i]) !Flow {
                     if (i == n) {
                         return down.tail.push(item);
                     } else {
                         const next: Down(Tail, i + 1) = .{ .refs = down.refs, .tail = down.tail };
                         return down.refs[i].push(item, next);
                     }
+                }
+            };
+        }
+
+        /// What a stage emits with outside of `push`: as the run starts and
+        /// as the stream ends. Done is final: once what follows the stage
+        /// has answered `.done`, nothing is pushed there again, and no stage
+        /// after it runs for the value. (While items flow there is nothing
+        /// to check: whoever was answered `.done` stops pushing.)
+        fn Late(comptime Tail: type, comptime i: usize) type {
+            return struct {
+                refs: Refs,
+                tail: Tail,
+
+                pub fn push(late: @This(), item: types.items[i]) !Flow {
+                    if (afterIsDone(late.refs, i - 1).*) return .done;
+                    const down: Down(Tail, i) = .{ .refs = late.refs, .tail = late.tail };
+                    return down.push(item);
                 }
             };
         }
@@ -462,6 +519,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
             fn initFrom(comptime i: usize, refs: Refs, operators: *const Ops, env: types.envs[i]) !void {
                 if (i == n) return;
+                if (comptime emitsLate(stages[i])) afterIsDone(refs, i).* = false;
                 try refs[i].init(&operators[i], env);
                 errdefer if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
                 const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
@@ -480,19 +538,25 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
             /// Starts the stages, last first. `.done` when a stage answered
             /// that nothing after it wants an item: then no source item can
-            /// get anywhere either, and the stages before it are not started.
+            /// get anywhere either, the stages before it are not started,
+            /// and nothing they emit later is pushed on.
             pub fn start(refs: Refs, tail: anytype) !Flow {
                 comptime var i = n;
                 inline while (i > 0) {
                     i -= 1;
                     if (@hasDecl(stages[i], "start")) {
-                        const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                        const next: Late(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
                         const answer = try refs[i].start(next);
                         if (comptime @TypeOf(answer) != Flow) @compileError(
                             "pipe: `" ++ ops[i].name ++ "` has a `start` that returns `" ++ @typeName(@TypeOf(answer)) ++
                                 "`; it must return `!Flow`: what a push it made was answered (`return down.push(x)`), or `.more`",
                         );
-                        if (answer == .done) return .done;
+                        if (answer == .done) {
+                            inline for (0..i + 1) |k| {
+                                if (comptime emitsLate(stages[k])) afterIsDone(refs, k).* = true;
+                            }
+                            return .done;
+                        }
                     }
                 }
                 return .more;
@@ -514,7 +578,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                         if (@TypeOf(guard) == Supervision) {
                             if (guard.hasFailed()) return error.Canceled;
                         }
-                        const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                        const next: Late(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
                         try refs[i].finish(next);
                     }
                 }
@@ -570,10 +634,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             body: anytype,
         ) @typeInfo(@TypeOf(@TypeOf(body).call)).@"fn".return_type.? {
             if (i == n) return body.call(partial);
-            var state: stages[i] = undefined;
+            var state: slots[i] = undefined;
             var next: @Tuple(pointers[0 .. i + 1]) = undefined;
             inline for (0..i) |k| next[k] = partial[k];
-            next[i] = &state;
+            next[i] = if (comptime emitsLate(stages[i])) &state.stage else &state;
             return locals(i + 1, next, body);
         }
 
@@ -581,7 +645,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         fn refsOf(self: *Self) Refs {
             var refs: Refs = undefined;
-            inline for (0..n) |i| refs[i] = &self.states[i];
+            inline for (0..n) |i| refs[i] = if (comptime emitsLate(stages[i])) &self.states[i].stage else &self.states[i];
             return refs;
         }
 
