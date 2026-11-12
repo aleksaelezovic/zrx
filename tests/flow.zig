@@ -366,6 +366,62 @@ test "a predicate cannot fail the run over an item a done route no longer takes"
     try seen.expect(&.{100});
 }
 
+/// Forwards every item and emits one more at the end of the stream.
+const Trailer = struct {
+    value: u32,
+
+    pub const zrx_operator = {};
+    pub const name = "trailer";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            value: u32,
+
+            pub fn init(self: *@This(), op: *const Trailer, _: Env) !void {
+                self.value = op.value;
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), down: anytype) !void {
+                _ = try down.push(self.value);
+            }
+        };
+    }
+};
+
+const Asked = struct { count: usize = 0 };
+fn countedEven(asked: *Asked, value: u32) bool {
+    asked.count += 1;
+    return value % 2 == 0;
+}
+
+test "a route that is done asks no predicate" {
+    var seen: Numbers = .{};
+    var asked: Asked = .{};
+    // take(1) is done after the first item. The stage before the route still
+    // emits at the end of the stream: the route answers for itself, without
+    // running a predicate that could fail or block over that item.
+    const work = pipe(.{
+        Trailer{ .value = 9 },
+        route(.{
+            when(countedEven, pipe(.{map(double)})),
+            otherwise(pipe(.{map(double)})),
+        }),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 5), work).run(.{ &seen, &asked });
+    try seen.expect(&.{0});
+    try std.testing.expectEqual(@as(usize, 1), asked.count);
+}
+
 const Threshold = struct { value: u32 };
 fn above(threshold: Threshold, value: u32) bool {
     return value > threshold.value;

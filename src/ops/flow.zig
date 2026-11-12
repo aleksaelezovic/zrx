@@ -315,6 +315,11 @@ fn Route(comptime Cs: type) type {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
                 live: [n]bool,
+                /// The route wants no more items: no case does, or the pipe
+                /// after it is done. Kept as one flag because it is asked
+                /// ahead of the per-item work, where walking `live` instead
+                /// makes the optimizer reshape the loop.
+                done: bool,
                 /// Set when the pipe after the route asked to stop.
                 downstream_done: bool,
 
@@ -342,6 +347,7 @@ fn Route(comptime Cs: type) type {
                             if (try self.down.push(item) == .done) {
                                 self.route.downstream_done = true;
                                 self.route.live = @splat(false);
+                                self.route.done = true;
                                 return .done;
                             }
                             return .more;
@@ -359,6 +365,7 @@ fn Route(comptime Cs: type) type {
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {
                     self.live = @splat(true);
+                    self.done = false;
                     self.downstream_done = false;
                     inline for (0..n) |i| {
                         self.tests[i] = if (cases[i].is_otherwise) {} else .init(env);
@@ -374,31 +381,30 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
+                    // A route that is done runs nothing for an item nobody
+                    // takes: no predicate is asked, so none can fail or
+                    // block the run over it.
+                    if (self.done) return .done;
                     inline for (0..n) |i| {
-                        // A predicate must not fail the run over an item nobody
-                        // takes any more: if the route is done, that is the
-                        // answer. (Asking that before every predicate instead
-                        // would be the obvious way, but a check ahead of the
-                        // work makes the optimizer peel the loop; this one
-                        // sits on the failure path only.)
-                        const taken = if (cases[i].is_otherwise) true else lift(self.tests[i].call(.{item})) catch |err| {
-                            if (self.verdict() == .done) return .done;
-                            return err;
-                        };
+                        const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
                             if (self.live[i]) {
-                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.live[i] = false;
+                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.caseDone(i);
                             }
                             return self.verdict();
                         }
                     }
-                    return self.verdict();
+                    return .more;
+                }
+
+                fn caseDone(self: *Self, comptime i: usize) void {
+                    self.live[i] = false;
+                    inline for (0..n) |k| if (self.live[k]) return;
+                    self.done = true;
                 }
 
                 fn verdict(self: *const Self) Flow {
-                    if (self.downstream_done) return .done;
-                    for (self.live) |live| if (live) return .more;
-                    return .done;
+                    return if (self.done) .done else .more;
                 }
 
                 pub fn finish(self: *Self, down: anytype) !void {
