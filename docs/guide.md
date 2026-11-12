@@ -416,6 +416,13 @@ a run can end with are known to the compiler; [`src/pipe.zig`](../src/pipe.zig) 
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
 
+The `down` a stage is given is anything with a `push`, and a stage that runs
+another operator may pass one of its own, by value or by pointer. If yours
+can tell that it is done without being pushed to, declare
+`pub const zrx_answers_done = {};` and `pub fn isDone(self) bool`: a `route`
+then asks before it starts a case, runs anything for an item, or emits a
+final value.
+
 **A source** declares `zrx_source`, `Item`, and
 `run(self, env, down) !void`, which pushes until it has no more or a push
 answers `.done`. See [`src/sources.zig`](../src/sources.zig).

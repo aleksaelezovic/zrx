@@ -72,10 +72,19 @@ pub const Flow = enum { more, done };
 ///     pub const zrx_answers_done = {};
 ///     pub fn isDone(self: T) bool
 ///
-/// Only a handle that declares so is asked. A handle is otherwise anything
-/// with a `push`, a pointer included, and what else it declares is its own.
+/// Only a handle that declares so is asked, and it may be a pointer to what
+/// declares it, as it may for `push`. A handle is otherwise anything with a
+/// `push`, and what else it declares is its own.
+///
+/// Whoever is told remembers: the answer need not be given twice, nor by the
+/// same handle (an operator may pass a different one in each hook).
 pub fn answersDone(comptime T: type) bool {
-    return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_answers_done");
+    return switch (@typeInfo(T)) {
+        .@"struct" => @hasDecl(T, "zrx_answers_done"),
+        .pointer => |pointer| pointer.size == .one and
+            @typeInfo(pointer.child) == .@"struct" and @hasDecl(pointer.child, "zrx_answers_done"),
+        else => false,
+    };
 }
 
 /// The `Out` of a terminal operator: nothing flows past it.

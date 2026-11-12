@@ -373,9 +373,10 @@ fn Route(comptime Cs: type) type {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
                 arms: core.Arms(n, Env),
-                /// A case's value was answered `.done` by the pipe after the
-                /// route. Written where that answer arrives and read only
-                /// before a case emits as the run starts or the stream ends.
+                /// The pipe after the route is done. Set wherever the route
+                /// finds out (`closeOutput`) and never unset: the `down` it
+                /// is given may differ from hook to hook, and one that
+                /// cannot be asked must not make it forget.
                 output_done: bool,
 
                 const Self = @This();
@@ -398,23 +399,24 @@ fn Route(comptime Cs: type) type {
 
                         pub fn push(self: @This(), item: anytype) !Flow {
                             if (try self.down.push(item) == .done) {
-                                self.route.output_done = true;
-                                self.route.arms.finishAll();
+                                self.route.closeOutput();
                                 return .done;
                             }
                             return .more;
                         }
 
-                        /// Whether the pipe after the route is done: it said so
-                        /// to a case's value, or `down` knows (the chain's
-                        /// handle does, also for an answer given to an item
-                        /// that did not come through a case). A `down` of
-                        /// someone else's is anything with a `push` and is not
-                        /// asked, which is why the route remembers for itself.
+                        /// Whether the pipe after the route is done: the route
+                        /// already knows, or `down` says so now (the chain's
+                        /// handle for starting and finishing can, also for an
+                        /// answer given to something that did not come
+                        /// through a case). A `down` that cannot be asked is
+                        /// anything with a `push`.
                         pub fn isDone(self: @This()) bool {
                             if (self.route.output_done) return true;
                             if (comptime !core.answersDone(Down)) return false;
-                            return self.down.isDone();
+                            if (!self.down.isDone()) return false;
+                            self.route.closeOutput();
+                            return true;
                         }
                     };
                 }
@@ -443,24 +445,29 @@ fn Route(comptime Cs: type) type {
                     inline for (0..n) |i| {
                         // Once the pipe after the route is done, no case is
                         // started: nothing it emitted would get anywhere,
-                        // and its hook could block or fail.
+                        // and its hook could block or fail. Asked before
+                        // each case, because an emission can be refused
+                        // without anything being pushed, and that looks
+                        // like the case being done by itself.
                         if (self.outputIsDone(down)) return .done;
-                        // A case that is done by itself leaves the others to
-                        // start, unless it was the last one wanting items.
+                        // A case that is done by itself leaves the others to start.
                         if (try self.chains[i].start(self.tail(down)) == .done) self.arms.finished(i);
-                        if (self.verdict() == .done) return .done;
                     }
-                    return if (self.outputIsDone(down)) .done else .more;
+                    return if (self.outputIsDone(down)) .done else self.verdict();
                 }
 
-                /// Whether the pipe after the route is done, however that
-                /// became known: answered to a case, or said by `down`
-                /// without anything being pushed. Then so is every case.
+                /// Whether the pipe after the route is done, asking `down`
+                /// if it can say.
                 fn outputIsDone(self: *Self, down: anytype) bool {
                     if (!rejoins) return false;
-                    if (!self.tail(down).isDone()) return false;
+                    return self.tail(down).isDone();
+                }
+
+                /// The pipe after the route is done, however that became
+                /// known: then so is every case, and the route.
+                fn closeOutput(self: *Self) void {
+                    self.output_done = true;
                     self.arms.finishAll();
-                    return true;
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
@@ -468,6 +475,12 @@ fn Route(comptime Cs: type) type {
                     // takes: no predicate is asked, so none can fail or
                     // block the run over it.
                     if (self.verdict() == .done) return .done;
+                    // A `down` that can say it is done is asked before
+                    // anything runs for the item. (The chain's own handle
+                    // for items cannot: there, done is the answer to a push.)
+                    if (comptime rejoins and core.answersDone(@TypeOf(down))) {
+                        if (self.outputIsDone(down)) return .done;
+                    }
                     inline for (0..n) |i| {
                         const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {

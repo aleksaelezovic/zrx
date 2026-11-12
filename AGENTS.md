@@ -49,9 +49,16 @@ to this file; edit `AGENTS.md`, not copies.
 - **A `down` is anything with a `push`.** An operator may run another one
   with a handle of its own, a pointer included (`tests/extending.zig`). Never
   probe a handle for a plain name: ask only what declares a `zrx_*` marker
-  (`answersDone` for `isDone`), and check the type is a struct first. Since
-  such a handle cannot be asked, whoever is answered `.done` by it remembers
-  (`route` keeps `output_done`).
+  (`answersDone` for `isDone`), on a struct or a pointer to one. The handle
+  may differ from hook to hook and may not be askable at all, so whoever
+  learns that its output is done latches it in one place (`route`:
+  `closeOutput`), whether it was answered or told when it asked.
+- **Done-handling is tested as invariants, not cases.** `tests/extending.zig`
+  runs routes under every kind of `down` and every moment of completion, and
+  pipes of several shapes closed after every number of values; nothing may be
+  pushed, handled or started after the end has said it is done. A change to
+  what happens after `.done` is checked by removing each safeguard in turn
+  and seeing a test fail; add a shape rather than a one-off test.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is
@@ -91,9 +98,10 @@ to this file; edit `AGENTS.md`, not copies.
   nothing.
 - **A `route` that is done asks no predicate**, and once it is done while
   starting, no later case is started (a case that is done by itself leaves
-  the others to start). Before starting each case it asks whether the pipe
-  after it is done: a case's emission can be refused without anything being
-  pushed, which looks like the case being done by itself. What `push` asks first is one flag (`Arms.idle`),
+  the others to start). It asks whether the pipe after it is done before
+  starting each case, after the last, and, if the `down` it gets for items
+  can say, before each item: a case's emission can be refused without
+  anything being pushed, which looks like the case being done by itself. What `push` asks first is one flag (`Arms.idle`),
   kept up to date where a sub-pipe finishes: walking the cases ahead of the
   per-item work makes the optimizer reshape the loop.
 - **The sequential fallback orders outcomes; it cannot cancel.** On an `Io`
