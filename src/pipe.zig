@@ -205,6 +205,10 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
     const supervised = di.has(Env, Supervision);
     return struct {
         live: if (supervised) void else [n]bool,
+        /// No sub-pipe is live. `route` asks this ahead of its per-item work,
+        /// where one flag is free and walking `live` makes the optimizer
+        /// reshape the loop.
+        idle: if (supervised) void else bool,
         done: if (supervised) [n]std.atomic.Value(bool) else void,
         scope: if (supervised) Supervision.Scope else void,
 
@@ -214,10 +218,12 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
         pub fn init(self: *Self, env: Env) void {
             if (supervised) {
                 self.live = {};
+                self.idle = {};
                 for (&self.done) |*done| done.* = .init(false);
                 self.scope = .{ .parent = di.get(env, Supervision), .done = &self.done };
             } else {
                 self.live = @splat(true);
+                self.idle = false;
                 self.done = {};
                 self.scope = {};
             }
@@ -234,7 +240,10 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
         }
 
         pub fn finished(self: *Self, comptime i: usize) void {
-            if (supervised) self.done[i].store(true, .seq_cst) else self.live[i] = false;
+            if (supervised) return self.done[i].store(true, .seq_cst);
+            self.live[i] = false;
+            inline for (0..n) |k| if (self.live[k]) return;
+            self.idle = true;
         }
 
         /// The pipe after a rejoining route is done: no sub-pipe is handed another item.
@@ -243,6 +252,7 @@ pub fn Arms(comptime n: usize, comptime Env: type) type {
         }
 
         pub fn anyWants(self: *const Self) bool {
+            if (!supervised) return !self.idle;
             inline for (0..n) |i| if (self.wants(i)) return true;
             return false;
         }

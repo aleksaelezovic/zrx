@@ -421,17 +421,12 @@ fn Route(comptime Cs: type) type {
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
+                    // A route that is done runs nothing for an item nobody
+                    // takes: no predicate is asked, so none can fail or
+                    // block the run over it.
+                    if (self.verdict() == .done) return .done;
                     inline for (0..n) |i| {
-                        // A predicate must not fail the run over an item nobody
-                        // takes any more: if the route is done, that is the
-                        // answer. (Asking that before every predicate instead
-                        // would be the obvious way, but a check ahead of the
-                        // work makes the optimizer peel the loop; this one
-                        // sits on the failure path only.)
-                        const taken = if (cases[i].is_otherwise) true else lift(self.tests[i].call(.{item})) catch |err| {
-                            if (self.verdict() == .done) return .done;
-                            return err;
-                        };
+                        const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
                         if (taken) {
                             if (self.arms.wants(i)) {
                                 if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.arms.finished(i);
@@ -442,8 +437,9 @@ fn Route(comptime Cs: type) type {
                     return self.verdict();
                 }
 
+                /// When the pipe after the route is done, so is every case
+                /// (`Rejoin`), which makes this the one question to ask.
                 fn verdict(self: *const Self) Flow {
-                    if (self.downstream_done) return .done;
                     return if (self.arms.anyWants()) .more else .done;
                 }
 
