@@ -395,6 +395,66 @@ test "a case that is done by itself does not keep the other cases from starting"
     try std.testing.expectEqual(@as(usize, 1), started.count);
 }
 
+test "a route that takes no more items still delivers what its cases emit at the end" {
+    // Each case is satisfied by its own start emission, so the route is done
+    // before the first item and the source is never run. The pipe after the
+    // route is not done: it still gets each case's final value.
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        route(.{
+            when(isEven, pipe(.{ Herald{ .value = 1 }, take(1), fold(@as(u32, 10), add) })),
+            otherwise(pipe(.{ Herald{ .value = 1 }, take(1), fold(@as(u32, 20), add) })),
+        }),
+        subscribe(record),
+    });
+    try program(zrx.fromProducer(u32, sourceMustNotRun), work).run(.{&seen});
+    try seen.expect(&.{ 11, 21 });
+}
+
+fn sourceMustNotRun(_: anytype) error{SourceRan}!void {
+    return error.SourceRan;
+}
+
+test "once the pipe after a route is done, no case runs a handler for its own final value" {
+    // The first case's final value satisfies take(1). The second case still
+    // finishes, but its final value would get nowhere: the tap inside that
+    // case does not run for it.
+    var seen: Numbers = .{};
+    var tapped: Pulls = .{};
+    const at_the_end = pipe(.{
+        route(.{
+            when(isEven, pipe(.{ fold(@as(u32, 0), add), tap(countPull) })),
+            otherwise(pipe(.{ fold(@as(u32, 0), add), tap(countPull) })),
+        }),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 4), at_the_end).run(.{ &seen, &tapped });
+    try seen.expect(&.{2});
+    try std.testing.expectEqual(@as(usize, 1), tapped.count);
+
+    // The same when that pipe was already done as the run started, and for
+    // a route inside the case.
+    var early: Numbers = .{};
+    var untouched: Pulls = .{};
+    const inner = pipe(.{route(.{
+        when(isSmall, pipe(.{ fold(@as(u32, 0), add), tap(countPull) })),
+        otherwise(pipe(.{ fold(@as(u32, 0), add), tap(countPull) })),
+    })});
+    const from_the_start = pipe(.{
+        route(.{
+            when(isEven, pipe(.{ fold(@as(u32, 0), add), tap(countPull) })),
+            when(isSmall, inner),
+            otherwise(pipe(.{Herald{ .value = 100 }})),
+        }),
+        take(1),
+        subscribe(record),
+    });
+    try program(range(u32, 0, 4), from_the_start).run(.{ &early, &untouched });
+    try early.expect(&.{100});
+    try std.testing.expectEqual(@as(usize, 0), untouched.count);
+}
+
 const Answer = struct { flow: ?zrx.Flow = null };
 
 /// Forwards every item, emits one more at the end of the stream, and

@@ -39,6 +39,13 @@ to this file; edit `AGENTS.md`, not copies.
   in between runs for it. Operators do not guard this themselves. The answer
   has to have travelled by a push: across a `queue` the near side learns it
   at its next push.
+- **Taking no more items is not the same as emitting no more.** A stage that
+  answers `.done` (from `push` or `start`) closes the output of the stages
+  before it, never its own: a `route` whose cases are all done still emits
+  their final values. Only an answer from what follows a stage closes that
+  stage's output. A chain that rejoins a pipe (a `route` case) asks its tail
+  (`isDone`) before a late emission, so the pipe after the route being done
+  reaches every stage of every case.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is

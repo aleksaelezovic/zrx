@@ -395,6 +395,16 @@ fn Route(comptime Cs: type) type {
                             }
                             return .more;
                         }
+
+                        /// Asked by a case's chain before it emits as the run
+                        /// starts or the stream ends: whether the pipe after
+                        /// the route is done. Then a case's value is dropped
+                        /// where it is emitted, and no stage of the case runs
+                        /// for it. (`down` can say only when it is the handle
+                        /// the route was started or finished with.)
+                        pub fn isDone(self: @This()) bool {
+                            return @hasDecl(Down, "isDone") and self.down.isDone();
+                        }
                     };
                 }
 

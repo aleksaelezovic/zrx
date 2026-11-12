@@ -38,8 +38,8 @@
 //! answers such an emission itself, so no stage after it runs for a value
 //! nobody takes; a stage does not have to guard that.
 //!
-//! `start` answers like a push: `.done` when nothing after the stage wants an
-//! item, which a stage learns from a push it made (`return down.push(x)`), and
+//! `start` answers like a push: `.done` when the stage takes no more items,
+//! which a stage learns from a push it made (`return down.push(x)`), and
 //! `.more` otherwise. When the pipe is done before startup is over, startup
 //! is cut short there and the source is never run: `finish` can then reach a
 //! stage whose `start` was interrupted or never ran, and has to cope with
@@ -504,9 +504,20 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 tail: Tail,
 
                 pub fn push(late: @This(), item: types.items[i]) !Flow {
-                    if (afterIsDone(late.refs, i - 1).*) return .done;
+                    if (late.isDone()) return .done;
                     const down: Down(Tail, i) = .{ .refs = late.refs, .tail = late.tail };
                     return down.push(item);
+                }
+
+                /// Whether an emission would get nowhere: what follows the
+                /// stage has answered `.done`, or what this chain emits into
+                /// has. The second is for a chain that rejoins a pipe
+                /// (a `route` case): its tail says whether that pipe is done,
+                /// and then no stage of this chain should run for a value
+                /// that would only be refused at the end of it.
+                pub fn isDone(late: @This()) bool {
+                    if (afterIsDone(late.refs, i - 1).*) return true;
+                    return @hasDecl(Tail, "isDone") and late.tail.isDone();
                 }
             };
         }
@@ -537,9 +548,12 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             }
 
             /// Starts the stages, last first. `.done` when a stage answered
-            /// that nothing after it wants an item: then no source item can
-            /// get anywhere either, the stages before it are not started,
-            /// and nothing they emit later is pushed on.
+            /// that it takes no more items: then no source item can get
+            /// anywhere either, the stages before it are not started, and
+            /// nothing they emit later is pushed on. What the stage itself
+            /// emits later is another matter (a `route` that takes no more
+            /// items still emits its cases' final values): only an answer
+            /// from what follows it closes that.
             pub fn start(refs: Refs, tail: anytype) !Flow {
                 comptime var i = n;
                 inline while (i > 0) {
@@ -552,7 +566,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                                 "`; it must return `!Flow`: what a push it made was answered (`return down.push(x)`), or `.more`",
                         );
                         if (answer == .done) {
-                            inline for (0..i + 1) |k| {
+                            inline for (0..i) |k| {
                                 if (comptime emitsLate(stages[k])) afterIsDone(refs, k).* = true;
                             }
                             return .done;
