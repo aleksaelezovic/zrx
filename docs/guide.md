@@ -235,13 +235,31 @@ another item. `take` and `takeWhile` answer `.done`; sources stop when they see
 it; `branch` and `route` answer `.done` once every sub-pipe has. The stream then
 finishes normally: `fold` emits, writers flush.
 
+`.done` is a hint that sticks: a stage that answered it keeps answering it,
+and whoever is answered it stops pushing items. A value emitted at the end of
+the stream (`fold`, `batch`) is still pushed and is refused by the stage that
+is done; a handler between the two may run for it.
+
+To stop a run from outside, cancel the task that called `run`: every task of
+the run is cancelled, nothing finishes or flushes, and `run` returns
+`error.Canceled`. To stop *gracefully*, end the source: when a source returns,
+everything it pushed is still handled, queues drain, and the stream finishes
+and flushes as usual.
+
 ## Concurrency and backpressure
 
 Without `queue`, a program is one loop on the caller's task. `queue(n)` is the
 only task boundary: the stages before it push into a buffer of `n` items and
-wait while it is full; a second task feeds the stages after it. That waiting is
+wait while it is full; another task feeds the stages after it. That waiting is
 the backpressure: a slow consumer slows the source instead of dropping items or
 growing memory.
+
+A queue splits the pipe into *segments*. The source with the stages up to the
+first queue is one segment, and each queue starts the next. With a queue in
+the pipe every segment runs as a task of its own, the source included, and
+`run` only waits for them: no handler runs on the task that called `run`. The
+`Io` must be able to run tasks concurrently (`error.ConcurrencyUnavailable`
+otherwise).
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:
@@ -266,8 +284,25 @@ branch(.{
   shared across a queue or between programs of a system must be safe for that.
 - Items cross a queue by value. A slice item must stay valid until consumed;
   slices from `batch` and `lines` are not, so copy before queueing them.
-- When the stream ends, the queue drains before anything after it finishes.
-  When the far side fails or is done, the near side stops.
+- The end of the stream travels with the items. A segment that runs out of
+  input finishes its own stages and closes its queue; the next segment drains
+  the queue, finishes, and so on. Writers flush after the last segment has
+  finished.
+- The first failure in any segment is the result of the run. The other
+  segments are cancelled where they wait (a source waiting for input, a
+  handler in an `Io` call), and none of them goes on to finish its stream;
+  nothing flushes. Handlers may still run for a few items that were already
+  in a queue.
+- When the stages after a queue are done (`take`), the segment before it is
+  answered `.done` at its next push. If everything that segment produces goes
+  into queues, it is not left waiting for that push: it is cancelled as soon
+  as the segments behind those queues have returned. A segment that also
+  feeds a sub-pipe directly (a `branch` with one direct and one queued
+  sub-pipe) stops at its next push.
+- Stages before a queue may have handled more items than the stages after it
+  take: the queue holds some, and the source runs ahead.
+- Cancellation is cooperative: a handler or source that never calls into
+  `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a queue (the pipe after
   the route would be pushed to from two tasks); put the queue after the route.
 
@@ -351,6 +386,10 @@ A stage may also declare `finish`, `flush`, `deinit` and, with
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
 
+An operator that hands items to a task of its own, as `queue` does, declares
+a task boundary; one that holds sub-pipes, as `branch` does, passes their
+tasks on. Both contracts are in [`src/pipe.zig`](../src/pipe.zig).
+
 **A source** declares `zrx_source`, `Item`, and
 `run(self, env, down) !void`, which pushes until it has no more or a push
 answers `.done`. See [`src/sources.zig`](../src/sources.zig).
@@ -401,6 +440,10 @@ Two things make it work, and are worth knowing when writing an operator:
   `batch` is a counter stage followed by a buffer stage for this reason.
 
 ## Not here yet
+
+Stopping a source from outside, so that a signal or a timeout ends a run
+gracefully, is proposed in [the segments spec](spec-segments.md) and not
+built.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

@@ -30,8 +30,14 @@ to this file; edit `AGENTS.md`, not copies.
 ## Design decisions
 
 - **Push with a flow answer.** `down.push(item)` returns `E!Flow` (`.more` or
-  `.done`). Early stop is a value, never an error. A stage that answered
-  `.done` may still be pushed to and keeps answering `.done`.
+  `.done`). Early stop is a value, never an error.
+- **"Done" is a hint, sticky where it originates.** A stage that answered
+  `.done` of its own accord may still be pushed to and keeps answering
+  `.done`; whoever is answered `.done` stops pushing items. Final values
+  (`fold`, `batch`) are still pushed and refused there. Nothing remembers a
+  "done" on behalf of another stage, and no promise is made that no handler
+  runs for a value nobody takes. PR 3 tried to make that a guarantee and
+  needed machinery in the chain, across tasks, that kept regressing.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
   happen in `Out`, which runs for the whole pipeline before any stage type is
@@ -54,14 +60,39 @@ to this file; edit `AGENTS.md`, not copies.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
-- **One scope supervises every group of tasks** (`tasks.Scope`): `system` and
-  `merge` now, the segments of a program next (`docs/spec-segments.md`).
-  Members are started with `Io.concurrent` and never run on the supervising
-  task, which only waits. The first outcome is the result: a member returning
-  an error, or a member saying the group is done (`merge`, when the pipe
-  answers `.done`); the rest are cancelled and joined. There is no sequential
+- **A queue splits a pipe into segments; each segment is a task.**
+  [docs/spec-segments.md](docs/spec-segments.md) is the design record: its
+  rules, what is *not promised*, and the acceptance cases. Segment 0 is the
+  source and the stages up to the first queue. A program without a queue is
+  a plain loop on the caller's task.
+- **The end of the stream travels with the data.** `finish` runs in order up
+  to and including a boundary, on the task that pushed into it; the
+  boundary's task finishes what follows. No task finishes, joins or waits
+  for another segment's stages. Only `flush` and `deinit` run on the caller,
+  after every task has returned.
+- **One scope supervises every group of tasks** (`tasks.Scope`): the segments
+  of a program, the sources of `merge`, the programs of `system`. Members are
+  started with `Io.concurrent` and never run on the supervising task, which
+  only waits. The first outcome is the result: a member returning an error,
+  or a member saying the group is done (`merge`, when the pipe answers
+  `.done`); the rest are cancelled and joined. There is no sequential
   fallback: an `Io` that cannot start a member is
   `error.ConcurrencyUnavailable`. Being cancelled from outside always wins.
+  A failure is a task's return value: nothing is reported on the side, and
+  nothing is cast from `anyerror`.
+- **After a failure no segment ends its stream** (`Scope.hasFailed`, read
+  before `finish`), and nothing flushes. That is all a failure promises:
+  handlers may run for items already queued until the cancel request arrives.
+- **Working for nothing is decided from a static tree.** A member names who
+  feeds it (`fed_by`) and whether everything it puts out goes to other
+  members (`feeds_only_members`, from `sinks_directly`). Once all of those
+  have returned the scope cancels it and discards what it returns. Stages
+  are not asked anything from another task: no atomics in operators for this.
+- **Do not add to the stage contract for concurrency.** A boundary stage has
+  `zrx_boundary`, `work` and `taskIo`; a stage with sub-pipes has
+  `has_boundary`, `sinks_directly`, `Tasks` and `tasks`. A review finding
+  against something the spec lists as not promised is answered by pointing
+  there, not by a change.
 - **Lifecycle.** `init` in order, pushes, then on a normal end `finish` in
   order and `flush` in reverse; always `deinit` in reverse. There is no
   `start` hook: no stage emits before the first item.
@@ -122,4 +153,17 @@ to this file; edit `AGENTS.md`, not copies.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
-  timing or scheduling order for their assertions.
+  timing or scheduling order for their assertions. Things that run at the
+  same time (programs of a system, segments, queued sub-pipes) get a log
+  each: the test logs are not synchronized. To show that something is
+  interrupted, have it wait far longer than the test and record whether it
+  woke by itself, rather than measuring how long the run took. To show that
+  a check stops something, the party that waits for the event must wait
+  without sleeping (spin on `checkCancel` or on shared state with
+  `std.Thread.yield() catch {}`): if it sleeps it is cancelled where it
+  sleeps, and the test passes without the check. Before a test cancels a
+  task, it waits until that task has started everything it starts.
+- A change to the scope or to segments is checked by removing each safeguard
+  in turn and seeing a test fail, and by repeating the `flow` and `programs`
+  suites a few hundred times in Debug and ReleaseFast under a watchdog that
+  also fails when the binary is missing. A hang is a failure.

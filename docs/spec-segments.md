@@ -1,7 +1,7 @@
 # Spec: segments and one scope
 
-Status: being implemented step by step (see Steps). Replaces the approach of
-the closed PR 3 (`rewrite-hardening`).
+Status: steps 1 to 4 are implemented; step 5 is proposed. Replaces the
+approach of the closed PR 3 (`rewrite-hardening`).
 
 Each entry is marked **accepted** (agreed on 2026-11-13) or **proposed**.
 
@@ -115,6 +115,16 @@ into a guarantee. This spec changes the structure instead.
 A review finding against something on this list is answered by pointing here,
 not by a change.
 
+## Costs
+
+- With a queue, the source runs as a task so that it can be cancelled. The
+  queue benchmark went from about 36 to about 53 ns/item on macOS aarch64.
+- Tasks are cancelled one after another: `std.Io` sends a cancel request by
+  joining the task. One that is slow to notice delays the request to the
+  others; the run returns at the same moment either way.
+- A source or handler that swallows `error.Canceled` and goes on can hold a
+  run that has failed: a queue is not closed behind a failure.
+
 ## Acceptance cases
 
 Each is a test that fails on `main` or pins behaviour `main` already has.
@@ -156,5 +166,5 @@ Each step is one reviewable change, from `main`.
 2. Segments: the boundary hook, `finish` stopping at a boundary, the source as
    segment 0, `start` removed (cases 1 to 3, 6 to 8, 11 to 15). *Done.*
 3. Rule 6 (cases 9, 10). *Done.*
-4. The guide, and the design decisions in `AGENTS.md`.
+4. The guide, and the design decisions in `AGENTS.md`. *Done.*
 5. *(proposed)* The stop trigger for sources.
