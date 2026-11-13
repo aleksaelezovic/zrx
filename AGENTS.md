@@ -66,12 +66,24 @@ to this file; edit `AGENTS.md`, not copies.
 - Claim only what is checked. `zig build zero-overhead` compares optimized LLVM
   IR of pipelines and hand-written loops (`tests/zero_overhead`,
   `tools/same_code.zig`). When adding or changing a synchronous operator, add
-  or extend a fixture; a new fixture is `same_*` unless the difference is only
-  loop shape, then `lean_*` with the reason in a comment.
+  or extend a fixture (every synchronous operator has one); a new fixture is
+  `same_*` unless the difference is only loop shape, then `lean_*` with the
+  reason in a comment.
 - Do not force inlining. Keep stages free of hidden memory: return
   `down.push(x)` directly or compare its result and return a constant; never
   store a `Flow` and later select between it and a constant (it defeats the
   optimizer; `lean_take` exists because of this).
+- Each stage of a program is its own local (`Chain.withLocals`); nested pipes
+  are spliced so this holds for them too. Sub-pipes of `branch` and `route`
+  are stored as one value. A stage that indexes into an array it owns cannot
+  be kept in registers at all, so give such a buffer a stage of its own and
+  keep counters in another (see `batch`).
+- `tools/same_code.zig` compares instruction shape: the multiset of
+  instructions with value and block names erased, phi inputs in any order, and
+  `> c` equal to `>= c + 1`. Nothing else is equated; a comparison never
+  matches its negation. Say "the same instructions" for a `same_*` fixture,
+  not "the same program": wiring is not compared, `behavior.zig` covers
+  results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
 
 ## Diagnostics
@@ -91,6 +103,14 @@ to this file; edit `AGENTS.md`, not copies.
   (and the guide's example) honest.
 - Examples are small, use function aliases at the top (`const map = zrx.map;`),
   and have their exact output asserted in `build.zig`.
+- In examples, apps and documentation, write a pipe with one operator per line
+  (end the tuple with a trailing comma so `zig fmt` keeps it that way), and do
+  the same for the sub-pipes of `branch` and the cases of `route`. A pipe with
+  a single operator stays on one line. Name sub-pipes rather than nesting
+  multi-line pipes deeply. Tests may keep short pipes on one line.
+- `examples/apps/` holds independent projects that depend on zrx by path and
+  have their own CI job; see `examples/apps/README.md`. A gap found while
+  writing an app is recorded in that app's README, not fixed in passing.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on

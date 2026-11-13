@@ -50,8 +50,16 @@ Rules:
 it, reuse it, put it inside another pipe.
 
 ```zig
-const parse = pipe(.{ map(trim), filter(isNotEmpty), map(toNumber) });
-const total = pipe(.{ parse, fold(0, add), print(Stdout, "{d}\n") });
+const parse = pipe(.{
+    map(trim),
+    filter(isNotEmpty),
+    map(toNumber),
+});
+const total = pipe(.{
+    parse,
+    fold(0, add),
+    print(Stdout, "{d}\n"),
+});
 ```
 
 Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
@@ -173,6 +181,7 @@ they are built from.
 |---|---|
 | `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
+| `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
 | `eq(v)`, `ne(v)`, `lt(v)`, `le(v)`, `gt(v)`, `ge(v)` | Comparison with a comptime value. |
@@ -189,7 +198,11 @@ after every resource has been released. `run`'s error set is inferred from your
 handlers and the operators you used; it is never `anyerror`, and a program
 whose handlers cannot fail has an empty one.
 
-To handle errors per item, put `recover(handler)` before the operators that may
+There are two ways to handle an error instead. To keep the item as a value of
+your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
+`rejected(deps..., err, item)` when `parse` fails and passes its result on.
+
+To drop the item, put `recover(handler)` before the operators that may
 fail. When one of them fails for an item, the handler receives the error and
 the item as it was at the `recover`. Returning normally skips the item;
 returning an error fails the run.
@@ -197,7 +210,12 @@ returning an error fails the run.
 ```zig
 fn reject(log: Log, err: ParseError, line: []const u8) void { ... }
 
-pipe(.{ recover(reject), map(parse), map(validate), subscribe(save) })
+pipe(.{
+    recover(reject),
+    map(parse),
+    map(validate),
+    subscribe(save),
+})
 ```
 
 - The handler's error parameter selects what it handles: an error set handles
@@ -230,8 +248,16 @@ concurrent by starting with a queue:
 
 ```zig
 branch(.{
-    pipe(.{ queue(64), map(slowWrite), drain() }),
-    pipe(.{ queue(64), batch(10), subscribe(report) }),
+    pipe(.{
+        queue(64),
+        map(slowWrite),
+        drain(),
+    }),
+    pipe(.{
+        queue(64),
+        batch(10),
+        subscribe(report),
+    }),
 })
 ```
 
@@ -255,7 +281,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 |---|---|
 | `print(Role, "fmt")` | Terminal. Formats every item; a tuple item supplies several arguments. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
-| `createFile(Role, path, n)` | Creates the file and provides a writer to it as `Role`. |
+| `createFile(Role, path, n, .{})` | Creates the file and provides a writer to it as `Role`; `.{ .exclusive = true }` refuses to replace an existing one. |
 | `lines(Role)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
@@ -342,7 +368,8 @@ zero-overhead` compiles the file once per variant, in ReleaseFast for
 of every exported function:
 
 - `same_*` functions must be the same multiset of instructions once value and
-  block names are erased;
+  block names are erased. The order of a phi's inputs is ignored, and `x > c`
+  matches the identical `x >= c + 1`; a comparison does not match its negation;
 - `lean_*` functions may differ in loop shape, but the zrx variant must contain
   no calls, no stack slots, no more loads or stores than the hand-written one,
   and at most a quarter more instructions;
@@ -353,12 +380,29 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
+Every synchronous operator has a fixture. Twelve are `same`; `take`, `batch`
+and the handler combinators are `lean`, each with the reason next to it.
+
 What this does and does not show: pipelines of the operators covered there
-compile to the code of the loop. It is evidence for those shapes with this
-compiler, not a proof for every pipeline. `queue` is deliberately outside it.
+compile to the code of the loop. The comparison is of instruction shape: it
+cannot hide an extra call, load, store, branch or comparison, but it does not
+check how the instructions are wired together, which is why the behaviour test
+exists alongside it. It is evidence for those shapes with this compiler, not
+a proof for every pipeline. `queue` is deliberately outside it.
+
+Two things make it work, and are worth knowing when writing an operator:
+
+- Each stage of a program is its own local variable, so the optimizer keeps
+  each in registers independently. Stages inside a `branch` or `route`
+  sub-pipe are stored together with it.
+- A stage that indexes into an array it owns stays in memory as a whole. Keep
+  such a buffer in a stage of its own, away from counters and accumulators:
+  `batch` is a counter stage followed by a buffer stage for this reason.
 
 ## Not here yet
 
 Present in the previous implementation and not ported: HTTP serving, signals
-(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and the
-standalone example applications.
+(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of
+the three standalone example applications. The
+[record processor](../examples/apps/record-processor/README.md) is ported, and
+its README lists what the port needed that the library does not have yet.

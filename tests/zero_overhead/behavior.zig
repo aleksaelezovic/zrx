@@ -87,3 +87,81 @@ test "taken" {
         try std.testing.expectEqual(without, with);
     };
 }
+
+test "scanned" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.scanned(true, items, &with);
+        cases.scanned(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "skipped" {
+    for (inputs) |items| for ([_]usize{ 0, 1, 5, 100 }) |count| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.skipped(true, items, count, &with);
+        cases.skipped(false, items, count, &without);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
+test "takenWhile" {
+    for (inputs) |items| for ([_]u32{ 0, 4, 101, std.math.maxInt(u32) }) |below| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.takenWhile(true, items, below, &with);
+        cases.takenWhile(false, items, below, &without);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
+test "batched" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.batched(true, items, &with);
+        cases.batched(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "withResource" {
+    for (inputs) |items| {
+        var with: struct { u32, u32, u64 } = .{ 3, 7, 99 };
+        var without: struct { u32, u32, u64 } = .{ 3, 7, 98 };
+        cases.withResource(true, items, &with[0], &with[1], &with[2]);
+        cases.withResource(false, items, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "printed" {
+    for (inputs) |items| {
+        var with_bytes: [256]u8 = undefined;
+        var without_bytes: [256]u8 = undefined;
+        var with: std.Io.Writer = .fixed(&with_bytes);
+        var without: std.Io.Writer = .fixed(&without_bytes);
+        try std.testing.expect(cases.printed(true, items, &with));
+        try std.testing.expect(cases.printed(false, items, &without));
+        try std.testing.expectEqualStrings(without.buffered(), with.buffered());
+    }
+    // A writer that runs out of room fails both the same way.
+    var small_with: [3]u8 = undefined;
+    var small_without: [3]u8 = undefined;
+    var with: std.Io.Writer = .fixed(&small_with);
+    var without: std.Io.Writer = .fixed(&small_without);
+    try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
+}
+
+test "fellBack" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.fellBack(true, items, &with);
+        cases.fellBack(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}

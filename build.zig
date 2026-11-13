@@ -129,6 +129,13 @@ pub fn build(b: *std.Build) void {
         .target = b.graph.host,
         .optimize = .ReleaseSafe,
     }) });
+    // The comparison itself is code that can be wrong: it has tests of its own.
+    const same_code_tests = b.addTest(.{ .name = "same_code", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/same_code.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    zero_overhead.dependOn(&b.addRunArtifact(same_code_tests).step);
     inline for (code_targets) |triple| {
         const resolved = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = triple, .cpu_features = "baseline" }) catch unreachable);
         const compare = b.addRunArtifact(same_code);

@@ -215,18 +215,17 @@ fn Branch(comptime Ps: type) type {
 // ---------------------------------------------------------------------------
 
 /// A `route` case: items for which `predicate(deps..., item)` is true go to `sub`.
-pub fn when(comptime predicate: anytype, sub: anytype) Case(predicate, @TypeOf(sub)) {
-    core.expectPipe("when", @TypeOf(sub));
+pub fn when(comptime predicate: anytype, sub: anytype) Case("when", predicate, @TypeOf(sub)) {
     return .{ .pipe = sub };
 }
 
 /// The final `route` case: items no earlier case took go to `sub`.
-pub fn otherwise(sub: anytype) Case(null, @TypeOf(sub)) {
-    core.expectPipe("otherwise", @TypeOf(sub));
+pub fn otherwise(sub: anytype) Case("otherwise", null, @TypeOf(sub)) {
     return .{ .pipe = sub };
 }
 
-fn Case(comptime case_predicate: anytype, comptime P: type) type {
+fn Case(comptime who: []const u8, comptime case_predicate: anytype, comptime P: type) type {
+    core.expectPipe(who, P);
     return struct {
         pipe: P,
 

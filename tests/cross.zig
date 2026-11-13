@@ -32,7 +32,7 @@ export fn zrx_cross_tasks(io: *const std.Io, first: u32, end: u32) bool {
 
 export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const u8) bool {
     const copy = program(zrx.fileLines(std.mem.span(from), 256), pipe(.{
-        zrx.createFile(Copy, std.mem.span(to), 256),
+        zrx.createFile(Copy, std.mem.span(to), 256, .{}),
         zrx.print(Copy, "{s}\n"),
     }));
     const measure = program(zrx.stdinLines(256), pipe(.{ zrx.map(length), zrx.drain() }));

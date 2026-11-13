@@ -115,6 +115,90 @@ pub fn compose(comptime handlers: anytype) type {
     };
 }
 
+/// `handler`, with a failure turned into a value: when `handler` returns an
+/// error, the result is `fallback(deps..., err, item)` instead. Where `recover`
+/// skips an item that failed, this keeps it, as whatever the fallback makes.
+/// Like `recover`, it never handles `error.Canceled`: that one is returned.
+pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
+    return struct {
+        pub const zrx_handler = {};
+
+        pub fn requires(comptime arity: usize) []const type {
+            return di.merge(di.requires("orElse", handler, arity), di.requires("orElse", fallback, arity + 1));
+        }
+
+        pub fn call(env: anytype, args: anytype) Fallen(di.types(@TypeOf(args))) {
+            return di.invoke(handler, env, args) catch |err| {
+                if (comptime canCancel(Failure(di.types(@TypeOf(args))))) {
+                    if (@as(anyerror, err) == error.Canceled) return error.Canceled;
+                }
+                const Args = comptime di.types(@TypeOf(args));
+                var with_error: @Tuple(WithError(Args)) = undefined;
+                // A cancellation never gets here, so the error fits the
+                // fallback's parameter even when that leaves `Canceled` out.
+                with_error[0] = if (comptime Given(Args) == Failure(Args)) err else @errorCast(err);
+                inline for (0..args.len) |i| with_error[i + 1] = args[i];
+                return di.invoke(fallback, env, with_error);
+            };
+        }
+
+        fn Failure(comptime Args: []const type) type {
+            const R = di.Result("orElse", handler, Args);
+            if (!Fallible(R)) @compileError("orElse: the handler returns `" ++ @typeName(R) ++ "`, which cannot fail; there is nothing to fall back from");
+            return @typeInfo(R).error_union.error_set;
+        }
+
+        /// The type the fallback's error parameter is given: the one it
+        /// declares, or the handler's whole error set when it is generic.
+        fn Given(comptime Args: []const type) type {
+            return di.Param(fallback, Args.len + 1, 0) orelse Failure(Args);
+        }
+
+        /// The fallback's data: the error, then the handler's own data.
+        fn WithError(comptime Args: []const type) []const type {
+            return &[_]type{Given(Args)} ++ Args;
+        }
+
+        /// Whether the fallback's error parameter takes every error it can be
+        /// handed: all the handler's, except `Canceled`, which is never handed over.
+        fn takesAll(comptime Takes: type, comptime E: type) bool {
+            if (@typeInfo(Takes) != .error_set) return false;
+            const takes = @typeInfo(Takes).error_set.error_names orelse return true; // anyerror
+            const names = @typeInfo(E).error_set.error_names orelse return false;
+            next: for (names) |name| {
+                if (std.mem.eql(u8, name, "Canceled")) continue;
+                for (takes) |have| if (std.mem.eql(u8, have, name)) continue :next;
+                return false;
+            }
+            return true;
+        }
+
+        /// Whether the handler can report a cancellation, which is not a failure to fall back from.
+        fn canCancel(comptime E: type) bool {
+            const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+            for (names) |name| if (std.mem.eql(u8, name, "Canceled")) return true;
+            return false;
+        }
+
+        /// What the fallback returns, which must be what the handler would
+        /// have; plus `error.Canceled` when the handler can be cancelled.
+        fn Fallen(comptime Args: []const type) type {
+            @setEvalBranchQuota(di.quota);
+            const Wanted = di.Payload(di.Result("orElse", handler, Args));
+            if (!takesAll(Given(Args), Failure(Args))) @compileError(
+                "orElse: the fallback takes `" ++ @typeName(Given(Args)) ++ "` but the handler can fail with `" ++ @typeName(Failure(Args)) ++ "`",
+            );
+            const F = di.Result("orElse", fallback, WithError(Args));
+            if (di.Payload(F) != Wanted) @compileError(
+                "orElse: the fallback must return `" ++ @typeName(Wanted) ++ "` like the handler, got `" ++ @typeName(F) ++ "`",
+            );
+            if (!canCancel(Failure(Args))) return F;
+            const Own = if (Fallible(F)) @typeInfo(F).error_union.error_set else error{};
+            return (Own || error{Canceled})!Wanted;
+        }
+    };
+}
+
 /// Projects a struct item to one of its fields: `map(field(.price))`.
 pub fn field(comptime name: @EnumLiteral()) type {
     return struct {

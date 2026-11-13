@@ -14,6 +14,7 @@ const not = zrx.not;
 const all = zrx.all;
 const any = zrx.any;
 const compose = zrx.compose;
+const orElse = zrx.orElse;
 const field = zrx.field;
 const constant = zrx.constant;
 const eq = zrx.eq;
@@ -103,6 +104,75 @@ test "composed predicates work on projections" {
     const expensive = compose(.{ field(.price), ge(100) });
     try program(fromSlice(&orders), pipe(.{ filter(expensive), map(field(.id)), subscribe(record) })).run(.{&seen});
     try seen.expect(&.{ 1, 2 });
+}
+
+const Fallback = struct { value: u32 };
+fn positive(price: u32) error{ Free, TooHigh }!u32 {
+    if (price == 0) return error.Free;
+    if (price > 1000) return error.TooHigh;
+    return price;
+}
+fn substitute(fallback: Fallback, err: error{ Free, TooHigh }, price: u32) u32 {
+    return switch (err) {
+        error.Free => fallback.value,
+        error.TooHigh => price / 10,
+    };
+}
+fn giveUp(err: anyerror, _: u32) error{GaveUp}!u32 {
+    return if (err == error.TooHigh) error.GaveUp else 1;
+}
+
+test "orElse turns a failure into a value, with the error and the item" {
+    var seen: Numbers = .{};
+    const prices = [_]u32{ 5, 0, 5000 };
+    try program(fromSlice(&prices), pipe(.{ map(orElse(positive, substitute)), subscribe(record) })).run(.{ &seen, Fallback{ .value = 99 } });
+    try seen.expect(&.{ 5, 99, 500 });
+}
+
+test "orElse works on composed handlers and may itself fail" {
+    var seen: Numbers = .{};
+    const orders = [_]Order{ .{ .id = 1, .price = 0 }, .{ .id = 2, .price = 7 }, .{ .id = 3, .price = 5000 } };
+    const price = orElse(compose(.{ field(.price), positive }), orderFallback);
+    const result = program(fromSlice(&orders), pipe(.{ map(price), subscribe(record) })).run(.{&seen});
+    try std.testing.expectError(error.GaveUp, result);
+    try seen.expect(&.{ 1, 7 });
+}
+fn orderFallback(err: anyerror, order: Order) error{GaveUp}!u32 {
+    return giveUp(err, order.price);
+}
+
+var fallbacks: u32 = 0;
+fn interrupted(value: u32) error{ Canceled, Odd }!u32 {
+    if (value == 2) return error.Canceled;
+    if (value % 2 == 1) return error.Odd;
+    return value;
+}
+fn countFallback(_: error{ Canceled, Odd }, _: u32) u32 {
+    fallbacks += 1;
+    return 0;
+}
+
+test "orElse falls back from failures but never from a cancellation" {
+    var seen: Numbers = .{};
+    fallbacks = 0;
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, countFallback)), subscribe(record) })).run(.{&seen});
+    try std.testing.expectError(error.Canceled, result);
+    try seen.expect(&.{ 0, 0 });
+    try std.testing.expectEqual(@as(u32, 1), fallbacks);
+}
+
+fn narrowFallback(_: error{Odd}, _: u32) u32 {
+    fallbacks += 1;
+    return 0;
+}
+
+test "a fallback need not name Canceled, which it is never given" {
+    var seen: Numbers = .{};
+    fallbacks = 0;
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, narrowFallback)), subscribe(record) })).run(.{&seen});
+    try std.testing.expectError(error.Canceled, result);
+    try seen.expect(&.{ 0, 0 });
+    try std.testing.expectEqual(@as(u32, 1), fallbacks);
 }
 
 test "constant replaces every item" {

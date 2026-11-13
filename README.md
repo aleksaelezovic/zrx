@@ -59,18 +59,22 @@ stream, an operator after a terminal one, a pipe that never ends.
 
 Read the **[guide](docs/guide.md)** for every operator, the error and
 concurrency model, and how to write operators of your own. The
-[examples](examples) are small and each is run and checked by the build.
+[examples](examples) are small and each is run and checked by the build;
+[examples/apps](examples/apps/README.md) holds a complete application.
 
 ## Zero overhead, checked
 
-Everything is resolved at compile time: stages are laid out in one struct,
-dependencies are copied into the handlers that asked for them once, and a push
-is a chain of direct calls the optimizer flattens. `zig build zero-overhead`
-compiles each fixture in [`tests/zero_overhead`](tests/zero_overhead/cases.zig)
-twice, as a pipeline and as a hand-written loop, and compares the optimized
-LLVM IR function by function. Six of the eight fixtures are the same
-instructions; the other two differ only in loop shape and are required to be
-free of calls and extra memory traffic.
+Everything is resolved at compile time: every stage is a local variable of
+the run, dependencies are copied into the handlers that asked for them once,
+and a push is a chain of direct calls the optimizer flattens. `zig build
+zero-overhead` compiles each fixture in
+[`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
+as a hand-written loop, and compares the optimized LLVM IR function by
+function. The fixtures cover every synchronous operator. Twelve of the
+fifteen consist of the same instructions (the same multiset, once value and
+block names are erased); the other three differ only in loop shape and are
+required to be free of calls and extra memory traffic. A separate test runs
+both variants of every fixture and requires equal results.
 
 `queue` is the one operator that costs something by design: it is a real
 bounded buffer between two tasks.

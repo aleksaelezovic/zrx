@@ -30,12 +30,29 @@ fn sumOf(values: []const u32) u64 {
 }
 
 /// A slow sink behind a small buffer.
-const archive = pipe(.{ queue(4), tap(slowWrite), fold(0, add), print(zrx.Stdout, "archived sum: {d}\n") });
+const archive = pipe(.{
+    queue(4),
+    tap(slowWrite),
+    fold(0, add),
+    print(zrx.Stdout, "archived sum: {d}\n"),
+});
 
 /// A fast aggregation that keeps running while the archive catches up.
-const report = pipe(.{ queue(16), batch(10), map(sumOf), print(zrx.Stderr, "batch sum: {d}\n") });
+const report = pipe(.{
+    queue(16),
+    batch(10),
+    map(sumOf),
+    print(zrx.Stderr, "batch sum: {d}\n"),
+});
 
 pub fn main(init: std.process.Init) !void {
-    const app = program(range(u32, 1, 31), pipe(.{ stdout(64), stderr(128), branch(.{ archive, report }) }));
+    const app = program(range(u32, 1, 31), pipe(.{
+        stdout(64),
+        stderr(128),
+        branch(.{
+            archive,
+            report,
+        }),
+    }));
     try app.run(.{init.io});
 }

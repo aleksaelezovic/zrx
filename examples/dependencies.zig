@@ -51,12 +51,19 @@ pub fn main(init: std.process.Init) !void {
     var saved: u32 = 0;
     const values = [_]i32{ 5, 12, 19 };
 
-    const logging = pipe(.{ stdout(256), resource(openLogger, null) });
+    const logging = pipe(.{
+        stdout(256),
+        resource(openLogger, null),
+    });
     const storage = pipe(.{
         resource(connect, disconnect),
         provide(Table{ .name = "measurements" }),
         subscribe(save),
     });
-    const app = program(fromSlice(&values), pipe(.{ logging, map(timesTen), storage }));
+    const app = program(fromSlice(&values), pipe(.{
+        logging,
+        map(timesTen),
+        storage,
+    }));
     try app.run(.{ init.io, &saved });
 }

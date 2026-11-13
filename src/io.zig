@@ -154,11 +154,22 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
     };
 }
 
-/// Creates (or truncates) the file at `path` and provides a writer to it as
-/// `Role`, a struct with a single `writer: *std.Io.Writer` field. The file is
-/// flushed when the stream ends and closed afterwards. Needs `std.Io`.
-pub fn createFile(comptime Role: type, path: []const u8, comptime buffer_size: usize) CreateFile(Role, buffer_size) {
-    return .{ .path = path };
+pub const CreateFileOptions = struct {
+    /// Fail with `error.PathAlreadyExists` instead of replacing an existing file.
+    exclusive: bool = false,
+};
+
+/// Creates the file at `path` (replacing an existing one unless
+/// `options.exclusive`) and provides a writer to it as `Role`, a struct with a
+/// single `writer: *std.Io.Writer` field. The file is flushed when the stream
+/// ends and closed afterwards. Needs `std.Io`.
+pub fn createFile(
+    comptime Role: type,
+    path: []const u8,
+    comptime buffer_size: usize,
+    options: CreateFileOptions,
+) CreateFile(Role, buffer_size) {
+    return .{ .path = path, .options = options };
 }
 
 fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
@@ -167,6 +178,7 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
     );
     return struct {
         path: []const u8,
+        options: CreateFileOptions,
 
         const Op = @This();
         pub const zrx_operator = {};
@@ -190,7 +202,7 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) !void {
                     self.io = di.get(env, Io);
-                    self.file = try Io.Dir.cwd().createFile(self.io, op.path, .{});
+                    self.file = try Io.Dir.cwd().createFile(self.io, op.path, .{ .exclusive = op.options.exclusive });
                     self.writer = self.file.writer(self.io, &self.buffer);
                 }
 
