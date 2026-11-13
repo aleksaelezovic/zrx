@@ -1,8 +1,0 @@
-.{
-    .name = .http_jobs,
-    .version = "0.1.0",
-    .fingerprint = 0x939bb429315f1c5,
-    .minimum_zig_version = "0.17.0",
-    .dependencies = .{ .zrx = .{ .path = "../../.." } },
-    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "README.md", "src", "tests" },
-}

@@ -1,5 +1,0 @@
-phase,command,wall_seconds,child_user_cpu_seconds,child_system_cpu_seconds,exit_code
-release-fresh,zig build test -Doptimize=ReleaseFast --summary all --verbose --color off,129.174219,347.235985,30.929380,0
-release-warm,zig build test -Doptimize=ReleaseFast --summary all --verbose --color off,4.655544,13.466242,19.510053,0
-check-fresh,zig build check --summary all --verbose --color off,97.232439,201.162162,37.845308,0
-release-after-check,zig build test -Doptimize=ReleaseFast --summary all --verbose --color off,81.396122,328.916529,32.853230,0

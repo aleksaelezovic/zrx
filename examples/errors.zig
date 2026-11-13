@@ -1,57 +1,40 @@
-//! One run, separate success/report sinks. No retry boundary is needed to route
-//! an ordinary map failure; errors skip success stages until whenError.
+//! A handler error fails the run unless a `recover` upstream handles it.
+//! Here good records go to stdout and rejected ones to stderr.
 const std = @import("std");
 const zrx = @import("zrx");
-const fromSlice = zrx.fromSlice;
 const pipe = zrx.pipe;
+const program = zrx.program;
+const fromSlice = zrx.fromSlice;
 const map = zrx.map;
-const branch = zrx.branch;
-const whenError = zrx.whenError;
-const otherwise = zrx.otherwise;
-const stdoutLines = zrx.stdoutLines;
-const stderrLines = zrx.stderrLines;
-const line = zrx.line;
-const run = zrx.run;
-const Text = zrx.Line(64);
-const AppError = error{ Invalid, Unavailable };
+const recover = zrx.recover;
+const stdout = zrx.stdout;
+const stderr = zrx.stderr;
+const print = zrx.print;
 
-fn process(value: u32) AppError!u32 {
-    return switch (value) {
-        0 => error.Invalid,
-        1 => error.Unavailable,
-        else => value * 2,
-    };
+const ParseError = error{ Empty, NotANumber };
+
+fn parse(text: []const u8) ParseError!u32 {
+    if (text.len == 0) return error.Empty;
+    return std.fmt.parseInt(u32, text, 10) catch error.NotANumber;
 }
-fn formatResult(value: u32) Text {
-    var bytes: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&bytes, "result: {d}", .{value}) catch unreachable;
-    return line(64, text) catch unreachable;
-}
-fn formatFailure(failure: zrx.Failure(AppError)) Text {
-    var bytes: [64]u8 = undefined;
-    const text = std.fmt.bufPrint(&bytes, "error: {s}", .{@errorName(failure.err)}) catch unreachable;
-    return line(64, text) catch unreachable;
+fn double(value: u32) u32 {
+    return value * 2;
 }
 
-pub fn program(source: anytype, success: anytype, errors: anytype) @TypeOf(pipe(source, .{
-    map(process), map(formatResult),
-    branch(.{
-        whenError(AppError, .{ map(formatFailure), errors }),
-        otherwise(success),
-    }),
-})) {
-    return pipe(source, .{
-        map(process), map(formatResult),
-        branch(.{
-            whenError(AppError, .{ map(formatFailure), errors }),
-            otherwise(success),
-        }),
-    });
+/// Handles exactly `ParseError`; any other error would still fail the run.
+fn reject(err_out: zrx.Stderr, err: ParseError, text: []const u8) !void {
+    try err_out.writer.print("rejected \"{s}\": {s}\n", .{ text, @errorName(err) });
 }
+
+pub const records = pipe(.{
+    recover(reject),
+    map(parse),
+    map(double),
+    print(zrx.Stdout, "{d}\n"),
+});
 
 pub fn main(init: std.process.Init) !void {
-    const input = [_]u32{ 2, 0, 1, 3 };
-    try run(.{ init.gpa, init.io }, .{
-        program(fromSlice(&input), stdoutLines(), stderrLines()),
-    });
+    const input = [_][]const u8{ "21", "", "4", "four" };
+    const app = program(fromSlice(&input), pipe(.{ stdout(256), stderr(256), records }));
+    try app.run(.{init.io});
 }

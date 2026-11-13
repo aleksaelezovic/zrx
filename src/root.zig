@@ -1,86 +1,88 @@
-//! Public zrx API. Implementations and contracts live beside their named entry points.
-//! See docs/README.md for guides and executable examples.
+//! zrx: declarative push streams with type-keyed dependency injection.
+//!
+//! A *program* is one source feeding one pipe; a *pipe* is a composition of
+//! operators that ends in a terminal one; operators take *handlers*, plain
+//! functions whose leading parameters are injected by type. A *system* runs
+//! several programs together. Everything is resolved at compile time.
+//!
+//!     const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), subscribe(report) });
+//!     try program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
 
-pub const pipe = @import("compose.zig").pipe;
-pub const retryPipe = @import("ops/retryPipe.zig").retryPipe;
-pub const recover = @import("ops/recover.zig").recover;
-pub const Failure = @import("data/failures.zig").Failure;
-pub const discard = @import("ops/effects.zig").discard;
-pub const all = @import("ops/predicates.zig").all;
-pub const any = @import("ops/predicates.zig").any;
-pub const RetryDecision = @import("ops/retryPipe.zig").RetryDecision;
-pub const RetryOptions = @import("ops/retryPipe.zig").RetryOptions;
-pub const run = @import("run.zig").run;
+// Composition
+pub const pipe = @import("pipe.zig").pipe;
+pub const program = @import("program.zig").program;
+pub const system = @import("program.zig").system;
 
-pub const resource = @import("internal/world/resources.zig").resource;
-pub const deriveResource = @import("internal/world/resources.zig").deriveResource;
-pub const fromSlice = @import("data/declarations.zig").fromSlice;
-pub const fromValue = @import("data/declarations.zig").fromValue;
-pub const fromService = @import("data/declarations.zig").fromService;
-pub const Stream = @import("data/declarations.zig").Stream;
-pub const Emitter = @import("data/streams.zig").Emitter;
-pub const fromIterator = @import("compose.zig").fromIterator;
-pub const readFrom = @import("compose.zig").readFrom;
-pub const Line = @import("data/lines.zig").Line;
-pub const line = @import("data/lines.zig").line;
-pub const Arguments = @import("io/cli.zig").Arguments;
-pub const arguments = @import("io/cli.zig").arguments;
-pub const Chunk = @import("data/chunks.zig").Chunk;
-pub const Reader = @import("io/bytes.zig").Reader;
-pub const reader = @import("io/bytes.zig").reader;
-pub const Writer = @import("io/bytes.zig").Writer;
-pub const writer = @import("io/bytes.zig").writer;
-pub const readChunks = @import("io/bytes.zig").readChunks;
-pub const writeTo = @import("io/bytes.zig").writeTo;
-pub const writeBytes = @import("io/bytes.zig").writeBytes;
-pub const flush = @import("io/bytes.zig").flushOutput;
-pub const writeLine = @import("io/lines.zig").writeLine;
-pub const readerLines = @import("io/lines.zig").readerLines;
-pub const stdinLines = @import("io/lines.zig").stdinLines;
-pub const fileLines = @import("io/lines.zig").fileLines;
-pub const tcpLines = @import("io/lines.zig").tcpLines;
-pub const stdoutLines = @import("compose.zig").stdoutLines;
-pub const stderrLines = @import("compose.zig").stderrLines;
-pub const writeFileLines = @import("compose.zig").writeFileLines;
-pub const HttpServerConfig = @import("io/http.zig").HttpServerConfig;
-pub const HttpServer = @import("io/http.zig").HttpServer;
-pub const httpServer = @import("io/http.zig").httpServer;
-pub const HttpReady = @import("io/http.zig").HttpReady;
-pub const HttpRequest = @import("io/http.zig").HttpRequest;
-pub const HttpResponse = @import("io/http.zig").HttpResponse;
-pub const HttpResponseOptions = @import("io/http.zig").HttpResponseOptions;
-pub const HttpJsonResponseOptions = @import("io/http.zig").HttpJsonResponseOptions;
-pub const HttpBodyError = @import("io/http.zig").HttpBodyError;
-pub const httpRequests = @import("io/http.zig").httpRequests;
-pub const httpMethod = @import("io/http.zig").httpMethod;
-pub const httpTarget = @import("io/http.zig").httpTarget;
-pub const httpTargetPrefix = @import("io/http.zig").httpTargetPrefix;
-pub const httpPath = @import("io/http.zig").httpPath;
-pub const httpPathPrefix = @import("io/http.zig").httpPathPrefix;
-pub const respondHttp = @import("compose.zig").respondHttp;
-pub const sendHttpResponse = @import("io/http.zig").sendHttpResponse;
+// Sources
+const sources = @import("sources.zig");
+pub const fromSlice = sources.fromSlice;
+pub const fromValue = sources.fromValue;
+pub const range = sources.range;
+pub const fromIterator = sources.fromIterator;
+pub const fromProducer = sources.fromProducer;
+pub const merge = sources.merge;
 
-pub const map = @import("compose.zig").map;
-pub const flatMap = @import("ops/flatMap.zig").flatMap;
-pub const flatten = @import("ops/flatten.zig").flatten;
-pub const splitBy = @import("ops/splitBy.zig").splitBy;
-pub const SplitOptions = @import("ops/splitBy.zig").SplitOptions;
-pub const each = @import("compose.zig").each;
-pub const filter = @import("compose.zig").filter;
-pub const fold = @import("data/declarations.zig").fold;
-pub const scan = @import("ops/scan.zig").scan;
-pub const tap = @import("compose.zig").tap;
-pub const branch = @import("ops/branch.zig").branch;
-pub const when = @import("ops/branch.zig").when;
-pub const whenError = @import("ops/branch.zig").whenError;
-pub const otherwise = @import("ops/branch.zig").otherwise;
-pub const maxItems = @import("ops/maxItems.zig").maxItems;
-pub const take = @import("ops/take.zig").take;
-pub const takeLast = @import("ops/takeLast.zig").takeLast;
-pub const merge = @import("ops/merge.zig").merge;
-pub const hold = @import("ops/hold.zig").hold;
-pub const values = @import("ops/values.zig").values;
-pub const withLatestFrom = @import("ops/withLatestFrom.zig").withLatestFrom;
-pub const forEach = @import("compose.zig").forEach;
-pub const collectThen = @import("compose.zig").collectThen;
-pub const batchThen = @import("compose.zig").batchThen;
+// Per-item operators
+const transform = @import("ops/transform.zig");
+pub const map = transform.map;
+pub const filter = transform.filter;
+pub const tap = transform.tap;
+pub const scan = transform.scan;
+pub const fold = transform.fold;
+pub const take = transform.take;
+pub const skip = transform.skip;
+pub const takeWhile = transform.takeWhile;
+pub const flatten = transform.flatten;
+pub const batch = transform.batch;
+pub const recover = transform.recover;
+
+// Terminal operators
+const sink = @import("ops/sink.zig");
+pub const subscribe = sink.subscribe;
+pub const drain = sink.drain;
+
+// Dependency operators
+const env = @import("ops/env.zig");
+pub const provide = env.provide;
+pub const resource = env.resource;
+
+// Flow operators
+const flow = @import("ops/flow.zig");
+pub const queue = flow.queue;
+pub const branch = flow.branch;
+pub const route = flow.route;
+pub const when = flow.when;
+pub const otherwise = flow.otherwise;
+
+// Handler combinators
+const handlers = @import("handlers.zig");
+pub const not = handlers.not;
+pub const all = handlers.all;
+pub const any = handlers.any;
+pub const compose = handlers.compose;
+pub const field = handlers.field;
+pub const constant = handlers.constant;
+pub const eq = handlers.eq;
+pub const ne = handlers.ne;
+pub const lt = handlers.lt;
+pub const le = handlers.le;
+pub const gt = handlers.gt;
+pub const ge = handlers.ge;
+
+// I/O
+const io = @import("io.zig");
+pub const Stdout = io.Stdout;
+pub const Stderr = io.Stderr;
+pub const stdout = io.stdout;
+pub const stderr = io.stderr;
+pub const createFile = io.createFile;
+pub const print = io.print;
+pub const lines = io.lines;
+pub const stdinLines = io.stdinLines;
+pub const fileLines = io.fileLines;
+
+// For writing operators, sources and handlers of your own.
+pub const Flow = @import("pipe.zig").Flow;
+pub const End = @import("pipe.zig").End;
+pub const di = @import("di.zig");
+pub const operator = @import("pipe.zig");

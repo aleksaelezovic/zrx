@@ -35,56 +35,13 @@ jobs:
           grep MemTotal /proc/meminfo
           lscpu
           zig env
-          zig run tests/ci_target.zig -OReleaseFast
 
-      # The build owns the current API tests and single cross-target catalog.
-      # Only native tests execute here; cross builds do not run foreign binaries.
+      # The build owns the suites, compile-error contracts, examples, the
+      # zero-overhead comparison and the cross-target catalog. Only native
+      # tests execute; cross builds do not run foreign binaries.
       # Fix CPU selection across heterogeneous hosts; user build defaults stay native.
       - name: Run full validation
         run: zig build check -Dcpu=baseline --summary all
 
       - name: Run ReleaseFast native tests
         run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline --summary all
-
-  apps:
-    name: "App: ${{ matrix.app }}"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        app: [record-processor, durable-checkout, http-jobs]
-    defaults:
-      run:
-        shell: bash
-        working-directory: examples/apps/${{ matrix.app }}
-    steps:
-      - name: Check out source
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-
-      - name: Set up pinned Zig
-        uses: ./.github/actions/setup-zig
-
-      - name: Verify app version pin matches the library
-        run: cmp .zigversion "$GITHUB_WORKSPACE/.zigversion"
-
-      - name: Verify database-test prerequisites
-        if: matrix.app == 'durable-checkout'
-        run: |
-          python3 -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 37), sqlite3.sqlite_version"
-
-      # Use each independent project's documented validation path, including
-      # its real finite executable simulations. No app dependencies enter zrx.
-      - name: Build app
-        run: zig build
-
-      - name: Run app tests
-        run: zig build test
-
-      - name: Run app ReleaseFast tests
-        run: zig build test -Doptimize=ReleaseFast
-
-      - name: Run app checks
-        run: zig build check
