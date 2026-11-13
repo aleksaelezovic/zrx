@@ -100,21 +100,8 @@ pub fn listTypes(comptime list: []const type) []const u8 {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// A composite handler is a struct type built from other handlers:
-///
-///     pub const zrx_handler = {};
-///     pub fn requires(comptime arity: usize) []const type
-///     pub fn call(env: anytype, args: anytype) R
-///
-/// `env` holds at least the types `requires` returned; `args` is the tuple of
-/// trailing data. Use `invoke` inside `call` to run child handlers.
-fn isComposite(comptime handler: anytype) bool {
-    if (@TypeOf(handler) != type) return false;
-    return @typeInfo(handler) == .@"struct" and @hasDecl(handler, "zrx_handler");
-}
-
 pub fn isHandler(comptime handler: anytype) bool {
-    return @typeInfo(@TypeOf(handler)) == .@"fn" or isComposite(handler);
+    return @typeInfo(@TypeOf(handler)) == .@"fn";
 }
 
 fn describe(comptime handler: anytype) []const u8 {
@@ -123,7 +110,6 @@ fn describe(comptime handler: anytype) []const u8 {
 
 fn expectHandler(comptime who: []const u8, comptime handler: anytype, comptime arity: usize) void {
     if (!isHandler(handler)) @compileError(who ++ ": expected a handler (a comptime-known function), got `" ++ describe(handler) ++ "`");
-    if (isComposite(handler)) return;
     const info = @typeInfo(@TypeOf(handler)).@"fn";
     if (info.attrs.varargs) @compileError(who ++ ": handler `" ++ describe(handler) ++ "` must not be variadic");
     if (info.param_types.len < arity) @compileError(std.fmt.comptimePrint(
@@ -139,7 +125,6 @@ fn expectHandler(comptime who: []const u8, comptime handler: anytype, comptime a
 pub fn requires(comptime who: []const u8, comptime handler: anytype, comptime arity: usize) []const type {
     @setEvalBranchQuota(quota);
     expectHandler(who, handler, arity);
-    if (isComposite(handler)) return handler.requires(arity);
     const params = @typeInfo(@TypeOf(handler)).@"fn".param_types;
     var out: []const type = &.{};
     for (params[0 .. params.len - arity]) |T| out = merge(out, &.{T.?});
@@ -158,7 +143,6 @@ pub fn merge(comptime a: []const type, comptime b: []const type) []const type {
 
 /// The declared type of trailing data parameter `i`, or null when it is `anytype`.
 pub fn Param(comptime handler: anytype, comptime arity: usize, comptime i: usize) ?type {
-    if (isComposite(handler)) return null;
     const params = @typeInfo(@TypeOf(handler)).@"fn".param_types;
     return params[params.len - arity + i];
 }
@@ -216,9 +200,7 @@ pub fn check(comptime who: []const u8, comptime handler: anytype, comptime Env: 
 /// What `handler` returns for data of types `Args`.
 pub fn Result(comptime who: []const u8, comptime handler: anytype, comptime Args: []const type) type {
     @setEvalBranchQuota(quota);
-    const needs = requires(who, handler, Args.len);
-    if (isComposite(handler))
-        return @TypeOf(handler.call(@as(@Tuple(needs), undefined), @as(@Tuple(Args), undefined)));
+    _ = requires(who, handler, Args.len);
     const info = @typeInfo(@TypeOf(handler)).@"fn";
     // A generic function's return type (an inferred error set included) only exists per instantiation.
     if (!info.is_generic) return info.return_type.?;
@@ -244,7 +226,6 @@ fn ArgTypes(comptime Args: type) []const type {
 
 /// Calls `handler`, taking its dependencies from `env` and its data from the tuple `args`.
 pub fn invoke(comptime handler: anytype, env: anytype, args: anytype) Result("zrx", handler, ArgTypes(@TypeOf(args))) {
-    if (comptime isComposite(handler)) return handler.call(env, args);
     const params = @typeInfo(@TypeOf(handler)).@"fn".param_types;
     const leading = params.len - args.len;
     comptime var full_types: [params.len]type = undefined;

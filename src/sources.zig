@@ -9,11 +9,8 @@
 //! `run` calls `down.push(item)` for each item and returns when it has no more
 //! or when a push answers `.done`.
 const std = @import("std");
-const Io = std.Io;
 const di = @import("di.zig");
 const core = @import("pipe.zig");
-const program = @import("program.zig");
-const tasks = @import("tasks.zig");
 const Flow = core.Flow;
 const lift = core.lift;
 
@@ -162,96 +159,6 @@ fn Emitter(comptime T: type, comptime Down: type) type {
 
         pub fn push(out: @This(), item: T) !Flow {
             return out.down.push(item);
-        }
-    };
-}
-
-/// The items of several sources, interleaved as they arrive; each source keeps
-/// its own order. Sources run together (see `tasks.all`) and take turns
-/// pushing, so the pipe still sees one item at a time. Needs `std.Io`.
-pub fn merge(sources: anytype) Merge(Sources(@TypeOf(sources))) {
-    var out: Sources(@TypeOf(sources)) = undefined;
-    inline for (0..sources.len) |i| out[i] = sources[i];
-    return .{ .sources = out };
-}
-
-fn Sources(comptime Given: type) type {
-    @setEvalBranchQuota(di.quota);
-    if (!di.isTuple(Given)) @compileError("merge: expected a tuple of sources `.{ a, b }`, got `" ++ @typeName(Given) ++ "`");
-    const list = di.types(Given);
-    if (list.len == 0) @compileError("merge: needs at least one source");
-    for (list, 0..) |S, i| {
-        if (!program.isSource(S)) @compileError(std.fmt.comptimePrint("merge: element {d} is not a source (got `{s}`)", .{ i, @typeName(S) }));
-        if (S.Item != list[0].Item) @compileError(std.fmt.comptimePrint(
-            "merge: every source must emit the same item type; source 0 emits `{s}` but source {d} emits `{s}`",
-            .{ @typeName(list[0].Item), i, @typeName(S.Item) },
-        ));
-    }
-    return @Tuple(list);
-}
-
-fn Merge(comptime Ss: type) type {
-    const members = di.types(Ss);
-    return struct {
-        sources: Ss,
-
-        pub const zrx_source = {};
-        pub const Item = members[0].Item;
-
-        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
-            const Env = @TypeOf(env);
-            if (members.len == 1) return self.sources[0].run(env, down);
-            if (comptime !di.has(Env, Io)) @compileError("merge: needs `std.Io` to run sources together; pass `io` to `run(.{ io, ... })`");
-            const io = di.get(env, Io);
-
-            var turn: Turn = .{ .mutex = .init, .stopped = false };
-            const Gate = Serialized(Item, @TypeOf(down));
-            const gate: Gate = .{ .io = io, .turn = &turn, .down = down };
-
-            const list = comptime blk: {
-                var types: [members.len]type = undefined;
-                for (members, 0..) |S, i| types[i] = Feed(S, Env, Gate);
-                break :blk types;
-            };
-            var group: @Tuple(&list) = undefined;
-            inline for (0..members.len) |i| group[i] = .{ .source = &self.sources[i], .env = env, .gate = gate };
-            return tasks.all(io, group);
-        }
-    };
-}
-
-const Turn = struct {
-    mutex: Io.Mutex,
-    /// Set once the pipe wants no more or a push failed; every source then stops.
-    stopped: bool,
-};
-
-fn Serialized(comptime T: type, comptime Down: type) type {
-    return struct {
-        io: Io,
-        turn: *Turn,
-        down: Down,
-
-        pub fn push(gate: @This(), item: T) !Flow {
-            try gate.turn.mutex.lock(gate.io);
-            defer gate.turn.mutex.unlock(gate.io);
-            if (gate.turn.stopped) return .done;
-            errdefer gate.turn.stopped = true;
-            const flow = try gate.down.push(item);
-            if (flow == .done) gate.turn.stopped = true;
-            return flow;
-        }
-    };
-}
-
-fn Feed(comptime S: type, comptime Env: type, comptime Gate: type) type {
-    return struct {
-        source: *const S,
-        env: Env,
-        gate: Gate,
-
-        pub fn run(self: @This()) !void {
-            return self.source.run(self.env, self.gate);
         }
     };
 }

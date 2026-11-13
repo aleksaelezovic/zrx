@@ -23,26 +23,6 @@ test "sumScaled, nestedProvide" {
     };
 }
 
-test "routed" {
-    for (inputs) |items| {
-        var with: u64 = 99;
-        var without: u64 = 98;
-        cases.routed(true, items, &with);
-        cases.routed(false, items, &without);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
-test "branched" {
-    for (inputs) |items| {
-        var with: [2]u64 = .{ 99, 98 };
-        var without: [2]u64 = .{ 97, 96 };
-        cases.branched(true, items, &with[0], &with[1]);
-        cases.branched(false, items, &without[0], &without[1]);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
 test "flattened" {
     const rows = [_][4]u32{ .{ 1, 6, 7, 2 }, .{ 0, 0, 0, 0 }, .{ 100, 5, 6, 1000 } };
     for ([_][]const [4]u32{ &.{}, rows[0..1], &rows }) |some| {
@@ -50,30 +30,6 @@ test "flattened" {
         var without: u64 = 98;
         cases.flattened(true, some, &with);
         cases.flattened(false, some, &without);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
-test "recovered" {
-    for (inputs) |items| {
-        var with: struct { u32, u64 } = .{ 0, 0 };
-        var without: struct { u32, u64 } = .{ 0, 0 };
-        cases.recovered(true, items, &with[0], &with[1]);
-        cases.recovered(false, items, &without[0], &without[1]);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
-test "combined" {
-    const orders = [_]cases.Order{
-        .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 500 }, .{ .id = 3, .price = 99 },
-        .{ .id = 5, .price = 250 }, .{ .id = 7, .price = 0 },
-    };
-    for ([_][]const cases.Order{ &.{}, orders[0..2], &orders }) |some| {
-        var with: u64 = 99;
-        var without: u64 = 98;
-        cases.combined(true, some, &with);
-        cases.combined(false, some, &without);
         try std.testing.expectEqual(without, with);
     }
 }
@@ -118,50 +74,12 @@ test "takenWhile" {
     };
 }
 
-test "batched" {
+test "tapped" {
     for (inputs) |items| {
-        var with: u64 = 99;
-        var without: u64 = 98;
-        cases.batched(true, items, &with);
-        cases.batched(false, items, &without);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
-test "withResource" {
-    for (inputs) |items| {
-        var with: struct { u32, u32, u64 } = .{ 3, 7, 99 };
-        var without: struct { u32, u32, u64 } = .{ 3, 7, 98 };
-        cases.withResource(true, items, &with[0], &with[1], &with[2]);
-        cases.withResource(false, items, &without[0], &without[1], &without[2]);
-        try std.testing.expectEqual(without, with);
-    }
-}
-
-test "printed" {
-    for (inputs) |items| {
-        var with_bytes: [256]u8 = undefined;
-        var without_bytes: [256]u8 = undefined;
-        var with: std.Io.Writer = .fixed(&with_bytes);
-        var without: std.Io.Writer = .fixed(&without_bytes);
-        try std.testing.expect(cases.printed(true, items, &with));
-        try std.testing.expect(cases.printed(false, items, &without));
-        try std.testing.expectEqualStrings(without.buffered(), with.buffered());
-    }
-    // A writer that runs out of room fails both the same way.
-    var small_with: [3]u8 = undefined;
-    var small_without: [3]u8 = undefined;
-    var with: std.Io.Writer = .fixed(&small_with);
-    var without: std.Io.Writer = .fixed(&small_without);
-    try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
-}
-
-test "fellBack" {
-    for (inputs) |items| {
-        var with: u64 = 99;
-        var without: u64 = 98;
-        cases.fellBack(true, items, &with);
-        cases.fellBack(false, items, &without);
+        var with: u64 = 5;
+        var without: u64 = 5;
+        cases.tapped(true, items, &with);
+        cases.tapped(false, items, &without);
         try std.testing.expectEqual(without, with);
     }
 }

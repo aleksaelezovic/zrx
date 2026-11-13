@@ -8,7 +8,6 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const filter = zrx.filter;
 const take = zrx.take;
 const subscribe = zrx.subscribe;
 
@@ -54,7 +53,7 @@ test "a custom operator composes with the built-in ones" {
     try std.testing.expectEqual(@as(usize, 3), count);
 }
 
-// --- an operator with every optional hook --------------------------------------
+// --- an operator with the optional hook ------------------------------------------
 
 const Journal = support.Recorder(u8);
 
@@ -84,10 +83,6 @@ const Echoed = struct {
                 self.journal.add('i');
             }
 
-            pub fn start(self: *@This(), _: anytype) !void {
-                self.journal.add('s');
-            }
-
             pub fn push(self: *@This(), item: In, down: anytype) !zrx.Flow {
                 self.journal.add('p');
                 if (try down.push(item) == .done) return .done;
@@ -98,14 +93,6 @@ const Echoed = struct {
                 self.journal.add('f');
                 _ = try down.push(self.tail);
             }
-
-            pub fn flush(self: *@This()) !void {
-                self.journal.add('F');
-            }
-
-            pub fn deinit(self: *@This()) void {
-                self.journal.add('d');
-            }
         };
     }
 };
@@ -115,7 +102,7 @@ test "stage hooks run in the documented order" {
     var journal: Journal = .{};
     try program(range(u32, 1, 3), pipe(.{ echoed(9), subscribe(record) })).run(.{ &seen, &journal });
     try seen.expect(&.{ 1, 1, 2, 2, 9 });
-    try journal.expect("isppfFd");
+    try journal.expect("ippf");
 }
 
 fn failAtTwo(value: u32) error{Two}!u32 {
@@ -123,12 +110,12 @@ fn failAtTwo(value: u32) error{Two}!u32 {
     return value;
 }
 
-test "a failed run skips finish and flush but not deinit" {
+test "a failed run skips finish" {
     var seen: Numbers = .{};
     var journal: Journal = .{};
     const result = program(range(u32, 1, 3), pipe(.{ echoed(9), map(failAtTwo), subscribe(record) })).run(.{ &seen, &journal });
     try std.testing.expectError(error.Two, result);
-    try journal.expect("isppd");
+    try journal.expect("ipp");
 }
 
 // --- a source -----------------------------------------------------------------
@@ -153,32 +140,4 @@ test "a custom source" {
     try program(Powers{ .limit = 40 }, pipe(.{subscribe(record)})).run(.{&seen});
     try program(Powers{ .limit = 1 << 30 }, pipe(.{ take(2), subscribe(record) })).run(.{&seen});
     try seen.expect(&.{ 1, 2, 4, 8, 16, 32, 1, 2 });
-}
-
-// --- a composite handler ---------------------------------------------------------
-
-/// A predicate that is true when `predicate` is true for the item plus one.
-fn next(comptime predicate: anytype) type {
-    return struct {
-        pub const zrx_handler = {};
-
-        pub fn requires(comptime arity: usize) []const type {
-            return zrx.di.requires("next", predicate, arity);
-        }
-
-        pub fn call(env: anytype, args: anytype) bool {
-            return zrx.di.invoke(predicate, env, .{args[0] + 1});
-        }
-    };
-}
-
-const Limit = struct { max: u32 };
-fn withinLimit(limit: Limit, value: u32) bool {
-    return value <= limit.max;
-}
-
-test "a custom composite handler forwards dependencies" {
-    var seen: Numbers = .{};
-    try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), subscribe(record) })).run(.{ &seen, Limit{ .max = 3 } });
-    try seen.expect(&.{ 0, 1, 2 });
 }

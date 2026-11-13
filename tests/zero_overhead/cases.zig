@@ -14,25 +14,17 @@ const program = zrx.program;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const filter = zrx.filter;
-const tap = zrx.tap;
 const fold = zrx.fold;
 const take = zrx.take;
 const flatten = zrx.flatten;
-const recover = zrx.recover;
 const provide = zrx.provide;
-const branch = zrx.branch;
-const route = zrx.route;
-const when = zrx.when;
-const otherwise = zrx.otherwise;
 const subscribe = zrx.subscribe;
-const drain = zrx.drain;
 
 /// Which variant the exported functions are compiled as.
 const exported_with_zrx = @import("variant").with_zrx;
 
 const Scale = struct { by: u32 };
 const Result = struct { out: *u64 };
-const Second = struct { out: *u64 };
 
 fn scale(factor: Scale, value: u32) u32 {
     return value *% factor.by;
@@ -47,9 +39,6 @@ fn add(sum: u64, value: u32) u64 {
     return sum +% value;
 }
 fn store(result: Result, value: u64) void {
-    result.out.* = value;
-}
-fn storeSecond(result: Second, value: u64) void {
     result.out.* = value;
 }
 
@@ -100,61 +89,6 @@ export fn same_nested_provide(ptr: [*]const u32, len: usize, by: u32, out: *u64)
     nestedProvide(exported_with_zrx, ptr[0..len], by, out);
 }
 
-// --- route with rejoining cases -------------------------------------------------
-
-fn triple(value: u32) u32 {
-    return value *% 3;
-}
-fn increment(value: u32) u32 {
-    return value +% 1;
-}
-
-pub fn routed(comptime with_zrx: bool, items: []const u32, out: *u64) void {
-    if (with_zrx) {
-        const total = pipe(.{
-            route(.{ when(isEven, pipe(.{map(triple)})), otherwise(pipe(.{map(increment)})) }),
-            fold(@as(u64, 0), add),
-            subscribe(store),
-        });
-        run(program(fromSlice(items), total), .{Result{ .out = out }});
-    } else {
-        var sum: u64 = 0;
-        for (items) |value| {
-            sum +%= if (value % 2 == 0) value *% 3 else value +% 1;
-        }
-        out.* = sum;
-    }
-}
-
-export fn same_route(ptr: [*]const u32, len: usize, out: *u64) void {
-    routed(exported_with_zrx, ptr[0..len], out);
-}
-
-// --- branch into two folds --------------------------------------------------------
-
-pub fn branched(comptime with_zrx: bool, items: []const u32, first: *u64, second: *u64) void {
-    if (with_zrx) {
-        const totals = pipe(.{branch(.{
-            pipe(.{ fold(@as(u64, 0), add), subscribe(store) }),
-            pipe(.{ filter(isEven), map(triple), fold(@as(u64, 0), add), subscribe(storeSecond) }),
-        })});
-        run(program(fromSlice(items), totals), .{ Result{ .out = first }, Second{ .out = second } });
-    } else {
-        var sum: u64 = 0;
-        var evens: u64 = 0;
-        for (items) |value| {
-            sum +%= value;
-            if (value % 2 == 0) evens +%= value *% 3;
-        }
-        first.* = sum;
-        second.* = evens;
-    }
-}
-
-export fn same_branch(ptr: [*]const u32, len: usize, first: *u64, second: *u64) void {
-    branched(exported_with_zrx, ptr[0..len], first, second);
-}
-
 // --- flatten ------------------------------------------------------------------------
 
 pub fn flattened(comptime with_zrx: bool, rows: []const [4]u32, out: *u64) void {
@@ -174,67 +108,6 @@ pub fn flattened(comptime with_zrx: bool, rows: []const [4]u32, out: *u64) void 
 
 export fn same_flatten(ptr: [*]const [4]u32, len: usize, out: *u64) void {
     flattened(exported_with_zrx, ptr[0..len], out);
-}
-
-// --- recover --------------------------------------------------------------------------
-
-const Rejected = struct { count: *u32 };
-
-fn checked(value: u32) error{TooSmall}!u32 {
-    if (value < 10) return error.TooSmall;
-    return value;
-}
-fn countRejected(rejected: Rejected, _: error{TooSmall}, _: u32) void {
-    rejected.count.* +%= 1;
-}
-fn accumulate(result: Result, value: u32) void {
-    result.out.* +%= value;
-}
-
-pub fn recovered(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
-    if (with_zrx) {
-        const total = pipe(.{ recover(countRejected), map(checked), tap(accumulate), drain() });
-        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
-    } else {
-        for (items) |value| {
-            if (value < 10) {
-                rejected.* +%= 1;
-            } else {
-                out.* +%= value;
-            }
-        }
-    }
-}
-
-export fn same_recover(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
-    recovered(exported_with_zrx, ptr[0..len], rejected, out);
-}
-
-// --- handler combinators ----------------------------------------------------------------
-
-pub const Order = extern struct { id: u32, price: u32 };
-
-pub fn combined(comptime with_zrx: bool, orders: []const Order, out: *u64) void {
-    if (with_zrx) {
-        const wanted = zrx.all(.{
-            zrx.compose(.{ zrx.field(.price), zrx.ge(100) }),
-            zrx.not(zrx.compose(.{ zrx.field(.id), isEven })),
-        });
-        const total = pipe(.{ filter(wanted), map(zrx.field(.price)), fold(@as(u64, 0), add), subscribe(store) });
-        run(program(fromSlice(orders), total), .{Result{ .out = out }});
-    } else {
-        var sum: u64 = 0;
-        for (orders) |order| {
-            if (order.price >= 100 and order.id % 2 != 0) sum +%= order.price;
-        }
-        out.* = sum;
-    }
-}
-
-/// `lean`, not `same`: the pipeline reads the whole order once where the loop
-/// reads its two fields separately; the pipeline comes out shorter.
-export fn lean_combinators(ptr: [*]const Order, len: usize, out: *u64) void {
-    combined(exported_with_zrx, ptr[0..len], out);
 }
 
 // --- early stop -----------------------------------------------------------------------------
@@ -339,115 +212,22 @@ export fn same_take_while(ptr: [*]const u32, len: usize, below: u32, out: *u64) 
     takenWhile(exported_with_zrx, ptr[0..len], below, out);
 }
 
-// --- batch --------------------------------------------------------------------------------------
+// --- tap and drain ------------------------------------------------------------------------------
 
-/// The largest item of a group, times how many items the group has.
-fn weigh(group: []const u32) u64 {
-    var largest: u32 = 0;
-    for (group) |value| largest = @max(largest, value);
-    return @as(u64, largest) *% group.len;
+fn tally(result: Result, value: u32) void {
+    result.out.* +%= value;
 }
 
-pub fn batched(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+/// Adds every item to what `out` already holds.
+pub fn tapped(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.batch(4), map(weigh), fold(@as(u64, 0), addWide), subscribe(store) });
-        run(program(fromSlice(items), total), .{Result{ .out = out }});
+        const work = pipe(.{ zrx.tap(tally), zrx.drain() });
+        run(program(fromSlice(items), work), .{Result{ .out = out }});
     } else {
-        var sum: u64 = 0;
-        var group: [4]u32 = undefined;
-        var len: usize = 0;
-        for (items) |value| {
-            group[len] = value;
-            len += 1;
-            if (len == group.len) {
-                sum +%= weigh(&group);
-                len = 0;
-            }
-        }
-        if (len != 0) sum +%= weigh(group[0..len]);
-        out.* = sum;
+        for (items) |value| out.* +%= value;
     }
 }
 
-/// `lean`, not `same`: both variants are the same size, but the optimizer
-/// unrolls the two differently around the four-item buffer.
-export fn lean_batch(ptr: [*]const u32, len: usize, out: *u64) void {
-    batched(exported_with_zrx, ptr[0..len], out);
-}
-
-// --- resource -----------------------------------------------------------------------------------
-
-const Ledger = struct { opened: *u32, closed: *u32 };
-const Session = struct { bias: u32 };
-
-fn open(ledger: Ledger) Session {
-    ledger.opened.* +%= 1;
-    return .{ .bias = ledger.opened.* };
-}
-fn close(ledger: Ledger, session: Session) void {
-    ledger.closed.* +%= session.bias;
-}
-fn biased(session: Session, value: u32) u32 {
-    return value +% session.bias;
-}
-
-pub fn withResource(comptime with_zrx: bool, items: []const u32, opened: *u32, closed: *u32, out: *u64) void {
-    const ledger: Ledger = .{ .opened = opened, .closed = closed };
-    if (with_zrx) {
-        const total = pipe(.{ zrx.resource(open, close), map(biased), fold(@as(u64, 0), add), subscribe(store) });
-        run(program(fromSlice(items), total), .{ ledger, Result{ .out = out } });
-    } else {
-        const session = open(ledger);
-        defer close(ledger, session);
-        var sum: u64 = 0;
-        for (items) |value| sum +%= value +% session.bias;
-        out.* = sum;
-    }
-}
-
-export fn same_resource(ptr: [*]const u32, len: usize, opened: *u32, closed: *u32, out: *u64) void {
-    withResource(exported_with_zrx, ptr[0..len], opened, closed, out);
-}
-
-// --- print --------------------------------------------------------------------------------------
-
-/// Formatting is a call into `std.Io.Writer` in both variants; what must match
-/// is everything around it.
-pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
-    if (with_zrx) {
-        const lines = pipe(.{ filter(isEven), zrx.print(*std.Io.Writer, "{d}\n") });
-        program(fromSlice(items), lines).run(.{writer}) catch return false;
-    } else {
-        for (items) |value| {
-            if (value % 2 != 0) continue;
-            writer.print("{d}\n", .{value}) catch return false;
-        }
-    }
-    return true;
-}
-
-export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
-    return printed(exported_with_zrx, ptr[0..len], writer);
-}
-
-// --- orElse -------------------------------------------------------------------------------------
-
-fn halved(_: error{TooSmall}, value: u32) u32 {
-    return value / 2;
-}
-
-/// Small values count for half instead of being dropped.
-pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
-    if (with_zrx) {
-        const total = pipe(.{ map(zrx.orElse(checked, halved)), fold(@as(u64, 0), add), subscribe(store) });
-        run(program(fromSlice(items), total), .{Result{ .out = out }});
-    } else {
-        var sum: u64 = 0;
-        for (items) |value| sum +%= if (value < 10) value / 2 else value;
-        out.* = sum;
-    }
-}
-
-export fn same_or_else(ptr: [*]const u32, len: usize, out: *u64) void {
-    fellBack(exported_with_zrx, ptr[0..len], out);
+export fn same_tap_drain(ptr: [*]const u32, len: usize, out: *u64) void {
+    tapped(exported_with_zrx, ptr[0..len], out);
 }

@@ -14,10 +14,7 @@
 //!
 //!     pub fn init(self: *Stage, op: *const Op, env: Env) !void
 //!     pub fn push(self: *Stage, item: In, down: anytype) !Flow
-//!     pub fn start(self: *Stage, down: anytype) !void    // optional: after every stage is initialized
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
-//!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
-//!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
 //!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
 //! `down.push(value)` hands a value to the rest of the pipe and returns `Flow`.
@@ -25,9 +22,9 @@
 //! every call is resolved at compile time. A pipe is itself an operator, which
 //! is all that nesting a pipe in a pipe means.
 //!
-//! A run goes: `init` every stage in order, `start` in reverse, `push` per
-//! item, then on a normal end `finish` in order and `flush` in reverse; and
-//! always, last, `deinit` in reverse. A failure skips `finish` and `flush`.
+//! A run goes: `init` every stage in order, `push` per item, then on a normal
+//! end `finish` in order. A failure skips `finish`. Nothing is torn down: no
+//! stage owns anything.
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -61,21 +58,7 @@ fn isSpliced(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_spliced");
 }
 
-/// An operator made of several stages, for when its parts must be stages of
-/// their own (see `batch`). `pipe` splices its `ops` in like a nested pipe's,
-/// but it is one operator to its user, not a `pipe(...)`: where a sub-pipe is
-/// expected it is rejected like any other bare operator.
-pub fn Spliced(comptime operator_name: []const u8, comptime Ops: type) type {
-    return struct {
-        ops: Ops,
-
-        pub const zrx_operator = {};
-        pub const zrx_spliced = {};
-        pub const name = operator_name;
-    };
-}
-
-/// For operators that take sub-pipelines.
+/// For whoever takes a pipeline (`program`).
 pub fn expectPipe(comptime who: []const u8, comptime T: type) void {
     if (comptime !isPipe(T)) @compileError(who ++ ": expected `pipe(.{ ... })`, got `" ++ @typeName(T) ++ "`");
 }
@@ -181,9 +164,8 @@ fn plan(comptime Ops: type, comptime Env: type, comptime In: type) Plan(di.types
 /// Every function works on `Refs`, a tuple of pointers to the stages, so the
 /// stages need not live together. A program gives each stage its own local
 /// variable (`withLocals`): the optimizer then treats them independently, and
-/// a stage it cannot keep in registers (one with an indexed buffer, say) does
-/// not drag its neighbours into memory. Where a chain is itself a stage (a
-/// sub-pipe of `branch` or `route`) it is stored as this struct.
+/// a stage it cannot keep in registers does not drag its neighbours into
+/// memory.
 ///
 /// Stages reach each other through `Down` handles: the `Refs` plus a comptime
 /// index, so a push is a chain of direct calls.
@@ -204,21 +186,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
     };
 
     return struct {
-        states: @Tuple(&stages),
-
-        const Self = @This();
-
         /// A pointer to every stage, in order.
         pub const Refs = @Tuple(&pointers);
-
-        /// Whether part of this chain runs on another task (it contains a `queue`).
-        pub const has_boundary = blk: {
-            for (stages) |S| {
-                if (@hasDecl(S, "zrx_boundary")) break :blk true;
-                if (@hasDecl(S, "has_boundary") and S.has_boundary) break :blk true;
-            }
-            break :blk false;
-        };
 
         fn Down(comptime Tail: type, comptime i: usize) type {
             return struct {
@@ -245,30 +214,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             fn initFrom(comptime i: usize, refs: Refs, operators: *const Ops, env: types.envs[i]) !void {
                 if (i == n) return;
                 try refs[i].init(&operators[i], env);
-                errdefer if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
                 const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
                 try initFrom(i + 1, refs, operators, next);
-            }
-
-            pub fn provide(refs: Refs, env: Env) types.envs[n] {
-                return provideFrom(0, refs, env);
-            }
-
-            fn provideFrom(comptime i: usize, refs: Refs, env: types.envs[i]) types.envs[n] {
-                if (i == n) return env;
-                const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
-                return provideFrom(i + 1, refs, next);
-            }
-
-            pub fn start(refs: Refs, tail: anytype) !void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "start")) {
-                        const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        try refs[i].start(next);
-                    }
-                }
             }
 
             pub fn push(refs: Refs, item: In, tail: anytype) !Flow {
@@ -282,23 +229,6 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                         const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
                         try refs[i].finish(next);
                     }
-                }
-            }
-
-            /// After every `finish`: stages that own buffered output write it out, last stage first.
-            pub fn flush(refs: Refs) !void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "flush")) try refs[i].flush();
-                }
-            }
-
-            pub fn deinit(refs: Refs) void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
                 }
             }
         };
@@ -319,42 +249,6 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             inline for (0..i) |k| next[k] = partial[k];
             next[i] = &state;
             return locals(i + 1, next, body);
-        }
-
-        // The same operations for a chain stored as one value: the stage contract.
-
-        fn refsOf(self: *Self) Refs {
-            var refs: Refs = undefined;
-            inline for (0..n) |i| refs[i] = &self.states[i];
-            return refs;
-        }
-
-        pub fn init(self: *Self, op: *const Pipe(Ops), env: Env) !void {
-            return at.init(self.refsOf(), &op.ops, env);
-        }
-
-        pub fn provide(self: *Self, env: Env) types.envs[n] {
-            return at.provide(self.refsOf(), env);
-        }
-
-        pub fn start(self: *Self, tail: anytype) !void {
-            return at.start(self.refsOf(), tail);
-        }
-
-        pub fn push(self: *Self, item: In, tail: anytype) !Flow {
-            return at.push(self.refsOf(), item, tail);
-        }
-
-        pub fn finish(self: *Self, tail: anytype) !void {
-            return at.finish(self.refsOf(), tail);
-        }
-
-        pub fn flush(self: *Self) !void {
-            return at.flush(self.refsOf());
-        }
-
-        pub fn deinit(self: *Self) void {
-            at.deinit(self.refsOf());
         }
     };
 }

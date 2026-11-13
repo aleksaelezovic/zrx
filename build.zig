@@ -9,7 +9,7 @@ comptime {
 }
 
 /// Behavior suites in `tests/`, each importing only the public `zrx` module.
-const suites = .{ "di", "operators", "handlers", "flow", "programs", "io", "extending" };
+const suites = .{ "di", "operators", "programs", "extending" };
 
 /// Runnable examples and the exact output they must produce.
 const examples = .{
@@ -17,38 +17,33 @@ const examples = .{
     .{
         .name = "dependencies",
         .stdout =
-        \\[log] database connected
         \\[log] transforming 5
         \\[log] saved 50 to measurements
         \\[log] transforming 12
         \\[log] saved 120 to measurements
         \\[log] transforming 19
         \\[log] saved 190 to measurements
-        \\[log] database closed after 3 rows
+        \\[log] 3 rows
         \\
         ,
         .stderr = "",
     },
-    .{ .name = "routing", .stdout = "order 1: 4000\norder 2: 25000\norder 3: 4000\nrevenue: 24750\n", .stderr = "" },
-    .{ .name = "errors", .stdout = "42\n8\n", .stderr = "rejected \"\": Empty\nrejected \"four\": NotANumber\n" },
-    .{ .name = "backpressure", .stdout = "archived sum: 465\n", .stderr = "batch sum: 55\nbatch sum: 155\nbatch sum: 255\n" },
-    .{ .name = "system", .stdout = "sensor 2 is at 95 C\nsensor 1 is at 81 C\n", .stderr = "" },
 };
 
 /// Targets whose optimized code the zero-overhead check compares. Fixed, so
 /// the result does not depend on the machine running the build.
 const code_targets = .{ "aarch64-linux", "x86_64-linux" };
 
-/// Targets everything must at least compile for. The core (no `std.Io`) must
-/// also compile without an operating system.
+/// Targets the library must at least compile for, with and without an
+/// operating system: nothing in it needs one.
 const cross_targets = .{
-    .{ .triple = "x86_64-linux", .hosted = true },
-    .{ .triple = "aarch64-linux", .hosted = true },
-    .{ .triple = "aarch64-macos", .hosted = true },
-    .{ .triple = "x86_64-windows", .hosted = true },
-    .{ .triple = "riscv64-linux", .hosted = true },
-    .{ .triple = "wasm32-freestanding", .hosted = false },
-    .{ .triple = "thumb-freestanding-eabi", .hosted = false },
+    "x86_64-linux",
+    "aarch64-linux",
+    "aarch64-macos",
+    "x86_64-windows",
+    "riscv64-linux",
+    "wasm32-freestanding",
+    "thumb-freestanding-eabi",
 };
 
 pub fn build(b: *std.Build) void {
@@ -107,22 +102,6 @@ pub fn build(b: *std.Build) void {
         example.dependOn(&run.step);
         b.step("example-" ++ entry.name, "Run the " ++ entry.name ++ " example").dependOn(&run.step);
     }
-    {
-        // copy_lines takes paths: give it a generated input and check both outputs.
-        const exe = exampleExecutable(b, zrx, "copy_lines", target, optimize);
-        const input = b.addWriteFiles().add("input.txt", "alpha\n\nbeta\ngamma\n");
-        const run = b.addRunArtifact(exe);
-        run.addFileArg(input);
-        const output = run.addOutputFileArg("output.txt");
-        run.expectStdOutEqual("copied 3 lines\n");
-        const copied = b.addCheckFile(output, .{ .expected_exact = "alpha\nbeta\ngamma\n" });
-        copied.step.dependOn(&run.step);
-        example.dependOn(&copied.step);
-        b.step("example-copy_lines", "Run the copy_lines example").dependOn(&copied.step);
-        b.step("install-copy-lines", "Install the copy_lines example as zig-out/bin/copy_lines")
-            .dependOn(&b.addInstallArtifact(exe, .{}).step);
-    }
-
     // --- zero overhead -------------------------------------------------------
     const same_code = b.addExecutable(.{ .name = "same_code", .root_module = b.createModule(.{
         .root_source_file = b.path("tools/same_code.zig"),
@@ -166,29 +145,14 @@ pub fn build(b: *std.Build) void {
     }, .check = true }).step);
 
     // --- cross compilation -------------------------------------------------------
-    inline for (cross_targets) |entry| {
-        const resolved = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = entry.triple }) catch unreachable);
+    inline for (cross_targets) |triple| {
+        const resolved = b.resolveTargetQuery(std.Target.Query.parse(.{ .arch_os_abi = triple }) catch unreachable);
         const core = b.addObject(.{
-            .name = "core-" ++ entry.triple,
+            .name = "core-" ++ triple,
             .root_module = casesModule(b, resolved, .ReleaseFast, true),
         });
         _ = core.getEmittedBin();
         cross.dependOn(&core.step);
-        if (entry.hosted) {
-            const hosted = b.addObject(.{ .name = "hosted-" ++ entry.triple, .root_module = b.createModule(.{
-                .root_source_file = b.path("tests/cross.zig"),
-                .target = resolved,
-                .optimize = .ReleaseFast,
-                .strip = true,
-                .imports = &.{.{ .name = "zrx", .module = b.createModule(.{
-                    .root_source_file = b.path("src/root.zig"),
-                    .target = resolved,
-                    .optimize = .ReleaseFast,
-                }) }},
-            }) });
-            _ = hosted.getEmittedBin();
-            cross.dependOn(&hosted.step);
-        }
     }
 
     // --- benchmark ---------------------------------------------------------------

@@ -1,22 +1,18 @@
-//! Sources, programs and systems.
+//! Sources and programs.
 const std = @import("std");
 const zrx = @import("zrx");
 const support = @import("support.zig");
-const io = std.testing.io;
 
 const pipe = zrx.pipe;
 const program = zrx.program;
-const system = zrx.system;
 const fromSlice = zrx.fromSlice;
 const fromValue = zrx.fromValue;
 const range = zrx.range;
 const fromIterator = zrx.fromIterator;
 const fromProducer = zrx.fromProducer;
-const merge = zrx.merge;
 const map = zrx.map;
 const fold = zrx.fold;
 const take = zrx.take;
-const queue = zrx.queue;
 const subscribe = zrx.subscribe;
 
 const Numbers = support.Recorder(u32);
@@ -98,117 +94,26 @@ test "a program is a value: every run starts from fresh state" {
     try seen.expect(&.{ 6, 6 });
 }
 
-// --- merge ----------------------------------------------------------------
-
-test "merge delivers every item of every source, each in its own order" {
-    var seen: Numbers = .{};
-    const low = [_]u32{ 1, 2, 3, 4 };
-    const high = [_]u32{ 100, 200, 300 };
-    try program(merge(.{ fromSlice(&low), fromSlice(&high) }), pipe(.{subscribe(record)})).run(.{ io, &seen });
-    try std.testing.expectEqual(@as(usize, 7), seen.len);
-    var last_low: u32 = 0;
-    var last_high: u32 = 0;
-    for (seen.slice()) |value| {
-        if (value < 100) {
-            try std.testing.expect(value > last_low);
-            last_low = value;
-        } else {
-            try std.testing.expect(value > last_high);
-            last_high = value;
-        }
-    }
-    try std.testing.expectEqual(@as(u32, 4), last_low);
-    try std.testing.expectEqual(@as(u32, 300), last_high);
-}
-
-test "merge stops every source when the pipe is done" {
-    var seen: Numbers = .{};
-    const endless = range(u32, 0, std.math.maxInt(u32));
-    try program(merge(.{ endless, endless }), pipe(.{ take(5), subscribe(record) })).run(.{ io, &seen });
-    try std.testing.expectEqual(@as(usize, 5), seen.len);
-}
+// --- errors -----------------------------------------------------------------
 
 fn failAtTwo(value: u32) error{Two}!u32 {
     if (value == 2) return error.Two;
     return value;
 }
 
-test "a failure under merge fails the run" {
+test "run has a precise error set" {
     var seen: Numbers = .{};
-    const result = program(merge(.{ range(u32, 0, 100), range(u32, 0, 100) }), pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen });
-    try std.testing.expectError(error.Two, result);
-}
+    const failing = program(range(u32, 0, 5), pipe(.{ map(failAtTwo), subscribe(record) }));
+    const plain = program(range(u32, 0, 2), pipe(.{subscribe(record)}));
 
-// --- system ---------------------------------------------------------------
+    const Failing = @typeInfo(@TypeOf(failing.run(.{&seen}))).error_union.error_set;
+    const names = comptime @typeInfo(Failing).error_set.error_names.?;
+    try std.testing.expectEqual(@as(usize, 1), names.len);
+    try std.testing.expectEqualStrings("Two", names[0]);
 
-const Left = struct { seen: *Numbers };
-const Right = struct { seen: *Numbers };
-fn toLeft(sink: Left, value: u32) void {
-    sink.seen.add(value);
-}
-fn toRight(sink: Right, value: u32) void {
-    sink.seen.add(value);
-}
-
-test "a system runs every program with the same dependencies" {
-    var left: Numbers = .{};
-    var right: Numbers = .{};
-    const totals = program(range(u32, 1, 5), pipe(.{ fold(@as(u32, 0), add), subscribe(toLeft) }));
-    const echo = program(range(u32, 7, 10), pipe(.{ queue(2), subscribe(toRight) }));
-    try system(.{ totals, echo }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    try left.expect(&.{10});
-    try right.expect(&.{ 7, 8, 9 });
-}
-
-test "systems nest, and a system of one needs no Io" {
-    var left: Numbers = .{};
-    var right: Numbers = .{};
-    const a = program(fromValue(@as(u32, 1)), pipe(.{subscribe(toLeft)}));
-    const b = program(fromValue(@as(u32, 2)), pipe(.{subscribe(toRight)}));
-    try system(.{a}).run(.{Left{ .seen = &left }});
-    try system(.{ system(.{a}), system(.{ b, b }) }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    try left.expect(&.{ 1, 1 });
-    try right.expect(&.{ 2, 2 });
-}
-
-fn patiently(clock: std.Io, out: anytype) !void {
-    var value: u32 = 0;
-    while (value < 200) : (value += 1) {
-        try clock.sleep(.fromMilliseconds(1), .awake);
-        if (try out.push(value) == .done) return;
-    }
-}
-
-test "the first failure in a system is returned and stops the others" {
-    var left: Numbers = .{};
-    var right: Numbers = .{};
-    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
-    const slow = program(fromProducer(u32, patiently), pipe(.{subscribe(toRight)}));
-    const result = system(.{ failing, slow }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    try std.testing.expectError(error.Two, result);
-    try left.expect(&.{ 0, 1 });
-}
-
-fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
-    for (names) |name| if (std.mem.eql(u8, name, wanted)) return true;
-    return false;
-}
-
-test "run has a precise error set, never anyerror" {
-    var left: Numbers = .{};
-    var right: Numbers = .{};
-    const queued = program(range(u32, 0, 2), pipe(.{ queue(2), map(failAtTwo), subscribe(toLeft) }));
-    const plain = program(range(u32, 0, 2), pipe(.{subscribe(toRight)}));
-    const deps = .{ io, Left{ .seen = &left }, Right{ .seen = &right } };
-
-    const Queued = @typeInfo(@TypeOf(queued.run(deps))).error_union.error_set;
-    const queued_names = comptime @typeInfo(Queued).error_set.error_names.?;
-    try std.testing.expectEqual(@as(usize, 3), queued_names.len);
-    try std.testing.expect(comptime has(queued_names, "Two") and has(queued_names, "Canceled") and has(queued_names, "ConcurrencyUnavailable"));
-
-    const Plain = @typeInfo(@TypeOf(plain.run(deps))).error_union.error_set;
+    const Plain = @typeInfo(@TypeOf(plain.run(.{&seen}))).error_union.error_set;
     try std.testing.expectEqual(@as(usize, 0), comptime @typeInfo(Plain).error_set.error_names.?.len);
 
-    const Both = @typeInfo(@TypeOf(system(.{ queued, plain }).run(deps))).error_union.error_set;
-    try std.testing.expectEqual(@as(usize, 3), comptime @typeInfo(Both).error_set.error_names.?.len);
+    try std.testing.expectError(error.Two, failing.run(.{&seen}));
+    try seen.expect(&.{ 0, 1 });
 }

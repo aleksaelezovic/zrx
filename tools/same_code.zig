@@ -144,7 +144,7 @@ fn parse(arena: std.mem.Allocator, text: []const u8) ![]Function {
     return functions.toOwnedSlice(arena);
 }
 
-/// `define internal fastcc void @cases.same_route(ptr %0)` is `same_route`.
+/// `define internal fastcc void @cases.same_scan(ptr %0)` is `same_scan`.
 fn definedName(line: []const u8) []const u8 {
     const at = std.mem.indexOfScalar(u8, line, '@') orelse return line;
     var name = line[at + 1 ..];

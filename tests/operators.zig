@@ -16,8 +16,6 @@ const take = zrx.take;
 const skip = zrx.skip;
 const takeWhile = zrx.takeWhile;
 const flatten = zrx.flatten;
-const batch = zrx.batch;
-const recover = zrx.recover;
 const subscribe = zrx.subscribe;
 const drain = zrx.drain;
 
@@ -147,24 +145,6 @@ test "flatten accepts slices" {
     try seen.expect(&.{ 1, 2, 3 });
 }
 
-fn sumOf(values: []const u32) u32 {
-    var total: u32 = 0;
-    for (values) |value| total += value;
-    return total;
-}
-fn count(values: []const u32) u32 {
-    return @intCast(values.len);
-}
-
-test "batch groups items and flushes the remainder at the end" {
-    var sums: Numbers = .{};
-    var sizes: Numbers = .{};
-    try program(range(u32, 1, 8), pipe(.{ batch(3), map(sumOf), subscribe(record) })).run(.{&sums});
-    try program(range(u32, 1, 8), pipe(.{ batch(3), map(count), subscribe(record) })).run(.{&sizes});
-    try sums.expect(&.{ 6, 15, 7 });
-    try sizes.expect(&.{ 3, 3, 1 });
-}
-
 test "drain ends a pipe" {
     var tapped: Numbers = .{};
     try program(range(u32, 0, 3), pipe(.{ tap(audit), drain() })).run(.{Audit{ .seen = &tapped }});
@@ -185,62 +165,4 @@ test "a handler error fails the run and stops the stream" {
     const result = program(range(u32, 0, 10), pipe(.{ map(evenOnly), subscribe(record) })).run(.{&seen});
     try std.testing.expectError(error.Odd, result);
     try seen.expect(&.{0});
-}
-
-const Rejected = struct { seen: *Numbers };
-fn reject(log: Rejected, _: anyerror, value: u32) void {
-    log.seen.add(value);
-}
-
-test "recover skips the items its guarded operators fail on" {
-    var seen: Numbers = .{};
-    var rejected: Numbers = .{};
-    try program(range(u32, 0, 6), pipe(.{ recover(reject), map(evenOnly), subscribe(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
-    try seen.expect(&.{ 0, 2, 4 });
-    try rejected.expect(&.{ 1, 3, 5 });
-}
-
-fn rejectOdd(log: Rejected, err: error{Odd}, value: u32) void {
-    std.debug.assert(err == error.Odd);
-    log.seen.add(value);
-}
-
-test "recover with an error set lets other errors through" {
-    var seen: Numbers = .{};
-    var rejected: Numbers = .{};
-    const values = [_]u32{ 2, 3, 4, 500, 6 };
-    const result = program(fromSlice(&values), pipe(.{ recover(rejectOdd), map(evenOnly), subscribe(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
-    try std.testing.expectError(error.TooBig, result);
-    try seen.expect(&.{ 2, 4 });
-    try rejected.expect(&.{3});
-}
-
-fn escalate(_: anyerror, value: u32) error{Fatal}!void {
-    if (value == 3) return error.Fatal;
-}
-
-test "a recover handler can fail the run itself" {
-    var seen: Numbers = .{};
-    const result = program(range(u32, 0, 6), pipe(.{ recover(escalate), map(evenOnly), subscribe(record) })).run(.{&seen});
-    try std.testing.expectError(error.Fatal, result);
-    try seen.expect(&.{ 0, 2 });
-}
-
-test "recover only guards what comes after it" {
-    var seen: Numbers = .{};
-    var rejected: Numbers = .{};
-    const result = program(range(u32, 0, 6), pipe(.{ map(evenOnly), recover(reject), subscribe(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
-    try std.testing.expectError(error.Odd, result);
-    try rejected.expect(&.{});
-}
-
-fn failOnFinish(_: u32) error{Late}!void {
-    return error.Late;
-}
-
-test "an error while the stream is finishing is not an item error" {
-    var rejected: Numbers = .{};
-    const result = program(range(u32, 0, 3), pipe(.{ recover(reject), fold(@as(u32, 0), add), subscribe(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
-    try std.testing.expectError(error.Late, result);
-    try rejected.expect(&.{});
 }

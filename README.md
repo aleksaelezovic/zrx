@@ -3,8 +3,9 @@
 Declarative push streams for Zig with type-keyed dependency injection, compiled
 down to the loop you would have written by hand.
 
-**Experimental.** This is a ground-up rewrite; the API is small on purpose and
-may still change.
+**Experimental, and deliberately minimal.** This is the core only: one
+synchronous loop, a handful of operators, nothing that owns a resource or
+starts a task. More returns one piece at a time, once this has been reviewed.
 
 ```zig
 const std = @import("std");
@@ -15,10 +16,10 @@ const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const filter = zrx.filter;
 const fold = zrx.fold;
-const stdout = zrx.stdout;
-const print = zrx.print;
+const subscribe = zrx.subscribe;
 
 const Scale = struct { by: u32 };
+const Out = struct { writer: *std.Io.Writer };
 
 fn scale(factor: Scale, value: u32) u32 { // `factor` is injected by its type
     return value * factor.by;
@@ -29,17 +30,23 @@ fn isLarge(value: u32) bool {
 fn add(sum: u64, value: u32) u64 {
     return sum + value;
 }
+fn report(out: Out, total: u64) !void {
+    try out.writer.print("total: {d}\n", .{total});
+}
 
 pub fn main(init: std.process.Init) !void {
+    var buffer: [64]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+
     const values = [_]u32{ 1, 2, 3, 4 };
     const total = pipe(.{
         map(scale),
         filter(isLarge),
         fold(0, add),
-        stdout(64),
-        print(zrx.Stdout, "total: {d}\n"),
+        subscribe(report),
     });
-    try program(fromSlice(&values), total).run(.{ init.io, Scale{ .by = 2 } });
+    try program(fromSlice(&values), total).run(.{ Scale{ .by = 2 }, Out{ .writer = &stdout.interface } });
+    try stdout.interface.flush();
 }
 ```
 
@@ -48,19 +55,16 @@ pub fn main(init: std.process.Init) !void {
 | Concept | What it is |
 |---|---|
 | **handler** | A plain function. Its leading parameters are dependencies, found by type; its last parameter is the data. |
-| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`, `provide(db)`. |
+| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `provide(db)`. |
 | **pipe** | Operators composed left to right. A pipe is itself an operator, so pipes nest. |
 | **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
-| **system** | Several programs run together with the same dependencies. |
 
 There is one way to write each thing, and mistakes are compile errors that say
 what to do: a missing dependency, a handler whose parameter does not match the
 stream, an operator after a terminal one, a pipe that never ends.
 
-Read the **[guide](docs/guide.md)** for every operator, the error and
-concurrency model, and how to write operators of your own. The
-[examples](examples) are small and each is run and checked by the build;
-[examples/apps](examples/apps/README.md) holds a complete application.
+The **[guide](docs/guide.md)** has every operator and how to write your own.
+The two [examples](examples) are run and checked by the build.
 
 ## Zero overhead, checked
 
@@ -70,14 +74,11 @@ and a push is a chain of direct calls the optimizer flattens. `zig build
 zero-overhead` compiles each fixture in
 [`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
 as a hand-written loop, and compares the optimized LLVM IR function by
-function. The fixtures cover every synchronous operator. Twelve of the
-fifteen consist of the same instructions (the same multiset, once value and
-block names are erased); the other three differ only in loop shape and are
-required to be free of calls and extra memory traffic. A separate test runs
-both variants of every fixture and requires equal results.
-
-`queue` is the one operator that costs something by design: it is a real
-bounded buffer between two tasks.
+function. Every operator is in a fixture. Seven of the eight fixtures consist
+of the same instructions (the same multiset, once value and block names are
+erased); the eighth (`take`) differs only in loop shape and is required to be
+free of calls and extra memory traffic. A separate test runs both variants of
+every fixture and requires equal results.
 
 ## Use
 
