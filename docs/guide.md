@@ -86,9 +86,10 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 ```
 
 `system` runs its programs together with the same dependencies and returns when
-all have finished. The first failure cancels the others and is returned. A
-system is itself runnable, so systems nest. Each program runs as a task of its
-own, so the `Io` must be able to run tasks concurrently; with one that cannot,
+all have finished. The first failure cancels the others and is returned; a
+program that had ended before that has flushed. A system is itself runnable,
+so systems nest. With more than one program, each runs as a task of its own,
+so the `Io` must be able to run tasks concurrently; with one that cannot,
 `run` returns `error.ConcurrencyUnavailable`.
 
 ## Sources
@@ -100,7 +101,7 @@ own, so the `Io` must be able to run tasks concurrently; with one that cannot,
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive. Each source runs as a task: needs `std.Io` with concurrency. Once the pipe is done, a source that is waiting is cancelled. |
+| `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -195,8 +196,8 @@ const wanted = all(.{ isHot, not(isMuted) });
 
 A handler that returns an error fails the run: the error comes out of `run`,
 after every resource has been released. `run`'s error set is inferred from your
-handlers and the operators you used; it is never `anyerror`, and a program
-whose handlers cannot fail has an empty one.
+handlers and the operators you used: it is `anyerror` only if a handler's is,
+and a program whose handlers cannot fail has an empty one.
 
 There are two ways to handle an error instead. To keep the item as a value of
 your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
@@ -223,8 +224,10 @@ pipe(.{
 - `error.Canceled` is never given to a handler.
 - A `recover` guards what comes *after* it, up to the next `queue`. Errors on
   the far side of a queue happen in another task and fail the run.
-- Errors raised while the stream is finishing (a final `fold` value, a flush)
-  do not belong to an item and fail the run.
+- A value that a stage *before* the `recover` emits at the end of the stream
+  (a final `fold` value) is an item like any other. Errors of a later
+  stage's own end of stream, and of a flush, do not belong to an item and
+  fail the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
 
@@ -238,19 +241,21 @@ finishes normally: `fold` emits, writers flush.
 `.done` is a hint that sticks: a stage that answered it keeps answering it,
 and whoever is answered it stops pushing items. A value emitted at the end of
 the stream (`fold`, `batch`) is still pushed and is refused by the stage that
-is done; a handler between the two may run for it.
+is done; a handler between the two may run for it. (A `route` whose cases
+rejoin drops such a value itself once the pipe after it is done.)
 
 To stop a run from outside, cancel the task that called `run`. With a queue,
-`run` then returns `error.Canceled` and nothing is flushed (see
+`run` then returns `error.Canceled` without flushing (see
 [what a run guarantees](#what-a-run-guarantees)); without one, the handlers
 and the source see `error.Canceled` from their own `Io` calls. To stop
 *gracefully*, end the source: when a source returns, everything it pushed is
-still handled, queues drain, and the stream finishes and flushes as usual.
+still handled (unless a stage is done, or something fails), queues drain,
+and the stream finishes and flushes as usual.
 
 ## Concurrency and backpressure
 
-Without `queue`, a program is one loop on the caller's task. `queue(n)` is the
-only task boundary: the stages before it push into a buffer of `n` items and
+Without `queue` (and without `merge`, whose sources are tasks), a program is
+one loop on the caller's task. `queue(n)` is the only task boundary in a pipe: the stages before it push into a buffer of `n` items and
 wait while it is full; another task feeds the stages after it. That waiting is
 the backpressure: a slow consumer slows the source instead of dropping items or
 growing memory.
@@ -258,7 +263,8 @@ growing memory.
 A queue splits the pipe into *segments*. The source with the stages up to the
 first queue is one segment, and each queue starts the next. With a queue in
 the pipe every segment runs as a task of its own, the source included, and
-`run` only waits for them: no handler runs on the task that called `run`. The
+`run` only waits for them: no item handler runs on the task that called `run`
+(a `resource` is still acquired and released there). The
 `Io` must be able to run tasks concurrently (`error.ConcurrencyUnavailable`
 otherwise).
 
@@ -280,8 +286,8 @@ branch(.{
 })
 ```
 
-- Each side of a queue runs on one task, so the stages of one side never run
-  concurrently with each other. Handlers on *different* sides do; a dependency
+- The stages of one side of a queue never run concurrently with each other:
+  one task runs them (under a `merge`, one source at a time). Handlers on *different* sides do; a dependency
   shared across a queue or between programs of a system must be safe for that.
 - Items cross a queue by value. A slice item must stay valid until consumed;
   slices from `batch` and `lines` are not, so copy before queueing them.
@@ -299,19 +305,21 @@ branch(.{
 
 ### What a run guarantees
 
-With a queue in the pipe:
+For one program with a queue in its pipe:
 
 - **On success**, every stage has finished once and then flushed once. The
   end of the stream travels with the items: a segment that runs out of input
   finishes its own stages and closes its queue, the next one drains the
   queue and finishes, and so on. Flushing starts after the last segment has
   finished.
-- **On an error**, `run` returns it and nothing has been flushed. Do not
+- **On an error**, `run` returns it and the flush step is skipped (if a
+  flush is what failed, the stages not yet flushed stay unflushed). Do not
   rely on whether a stage finished: a segment may have ended its stream
-  before the failure, or be cancelled part-way.
+  before the failure, or be cancelled part-way. Writers the library owns
+  still write out what they hold when they are torn down.
 - **Which error**: the first failure of any segment, or `error.Canceled` if
-  the task that called `run` has been asked to cancel by the time `run`
-  returns.
+  the task that called `run` was asked to cancel before the run had joined
+  its tasks.
 - **Always**, every task has returned before anything is torn down.
 - **A failure does not wait** for a source or a handler that is waiting in
   an `Io` call: it is cancelled there. Handlers may still run for a few
@@ -353,7 +361,7 @@ A run goes through these steps:
    drain), then owned writers flush, last stage first;
 4. always: stages are torn down in reverse order (`resource` releases, files close).
 
-An error ends the run at step 4, with nothing flushed. Every task has
+An error ends the run at step 4, skipping the flush step. Every task has
 returned before anything is torn down, and a resource is released after
 everything downstream of it is done, so a handler never sees a released
 value.

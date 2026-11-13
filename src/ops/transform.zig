@@ -398,8 +398,10 @@ fn BatchBuffer(comptime size: usize) type {
 ///
 /// The handler's error parameter selects what it handles: `anyerror` for
 /// everything, or an error set such as `ParseError` to let other errors pass.
-/// `error.Canceled` is never handed to the handler. Errors raised while the
-/// stream is finishing, or beyond a `queue`, are not per-item and fail the run.
+/// `error.Canceled` is never handed to the handler. A value that a stage
+/// *before* the `recover` emits at the end of the stream is an item like any
+/// other. Errors of a later stage's own `finish` or `flush`, or beyond a
+/// `queue`, are not per-item and fail the run.
 pub fn recover(comptime handler: anytype) Recover(handler) {
     return .{};
 }

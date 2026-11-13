@@ -31,33 +31,82 @@ defects followed (first review of PR 1):
 
 ## Guarantees
 
-Each is stated at a point a caller can observe: what `run` returns, what was
-flushed, what has been torn down, whether `run` returns at all. Nothing is
-promised about a moment inside the run.
+Each is about one program, stated at a point a caller can observe (what
+`run` returns, whether the flush step ran, what has been torn down, whether
+`run` returns at all), and each names the tests that pin it. A sentence
+without a test does not belong in this list. Nothing is promised about a
+moment inside the run.
 
-1. **On success**, every stage has finished exactly once and then flushed
-   exactly once. Stages of one segment finish in order, and flushing starts
-   after the last segment has finished, last stage first.
-2. **On an error**, `run` returns it and nothing has been flushed. Whether a
-   given stage finished is not promised.
+1. **On success**, every stage has finished exactly once, and then its
+   `flush` has run exactly once. Flushing starts after the last segment has
+   finished, last stage first.
+   *Tests: "the end of the stream travels with the data", "queued sub-pipes of
+   a branch each finish once", the six "invariants" (`tests/flow.zig`).*
+2. **On an error**, `run` returns it. If the error is known before flushing,
+   no `flush` runs; if a `flush` itself fails, the stages not yet flushed are
+   not flushed. Whether a given stage *finished* is not promised. A writer
+   the library owns (`stdout`, `createFile`) still writes out what it holds
+   when it is torn down, best effort, so output handed to it before the
+   error is not lost.
+   *Tests: the "invariants" with a failing side, "a flush that fails stops
+   the flushing" (`tests/flow.zig`), "a writer writes out what it holds when
+   the run fails" (`tests/io.zig`).*
 3. **Which error.** The first failure of any task. Where tasks are started
-   (a queue, `merge`, a `system`): `error.Canceled` instead, if the task that
-   called `run` has been asked to cancel by the time `run` returns.
-4. **Always**, every task has returned before any stage is torn down, and
-   stages are torn down in reverse order.
+   (a queue; a `merge` or `system` of more than one), `error.Canceled`
+   instead, if the task that called `run` has been asked to cancel before
+   those tasks have all been joined. Once they are joined, only the `Io`
+   calls of what still runs on the caller (flushes; after a `merge` without
+   a queue, the end of the stream) can see such a request; a flush of a
+   writer the library owns that is cancelled that way fails with
+   `error.Canceled`, not with a write error.
+   *Tests: "cancelling the caller of a queued program", "a cancel request
+   that reaches the caller while the run joins its tasks is not lost", "the
+   caller's cancellation also comes before a failure" (`tests/flow.zig`),
+   "cancelling the caller cancels every member" (`tests/programs.zig`), "a
+   request to cancel that reaches the caller while a file is flushed is a
+   cancellation" (`tests/io.zig`).*
+4. **Always**, every task of the program has returned before any of its
+   stages is torn down, and stages are torn down in reverse order.
+   *Test: "nothing is released while a handler behind a queue is still using
+   it" (`tests/flow.zig`).*
 5. **A failure does not wait.** `run` returns without waiting for a source or
-   a handler that is waiting in an `Io` call: it is cancelled there.
+   a handler that is waiting in an `Io` call: it is cancelled there, also
+   when another task does not notice that it was asked to cancel, and also
+   when a task's own request was lost on the way (see "Not promised" on
+   writes).
+   *Tests: "a failure after a queue ends the run while the source is
+   waiting", "a failure behind two queues, or in a queued sub-pipe", "every
+   task is asked to cancel at once" (`tests/flow.zig`), "a failure ends the
+   run although the segment it interrupts is printing under a recover"
+   (`tests/io.zig`).*
 6. **A queue whose task has ended takes no more.** However the task ended
    (its input ran out, it was done, it failed, it was cancelled), a push
    into that queue answers `.done`; no producer is left waiting on it.
+   *Tests: the "invariants" (a producer left waiting hangs them), "a
+   boundary written against the contract splits the pipe like a queue"
+   (`tests/extending.zig`).*
 7. **Graceful end.** When the source returns, everything it pushed is still
    handled: each queue drains and each segment finishes in turn. Only a
    stage that is done, or an error, cuts this short.
-8. **A program without a queue is one loop on the caller's task**, and its
-   code is what the zero-overhead fixtures compare.
+   *Tests: "the stream end waits for the queue to drain", "the end of the
+   stream travels with the data" (`tests/flow.zig`).*
+8. **A program with neither a queue nor a `merge` is one loop on the caller's
+   task**, and its code is what the zero-overhead fixtures compare.
+   *Test: `zig build zero-overhead`.*
 9. **`run`'s error set is inferred**: the handlers' and operators' errors,
    plus `error.Canceled` and `error.ConcurrencyUnavailable` where tasks are
-   started. There is no sequential fallback for `merge` and `system`.
+   started. It is `anyerror` only if a handler's is.
+   *Tests: "run has a precise error set" (`tests/programs.zig`), "a queue
+   works in a pipe whose handlers return anyerror" (`tests/flow.zig`).*
+10. **A `system` or `merge` of more than one starts a task per member**, on
+    an `Io` that can; otherwise `error.ConcurrencyUnavailable`, with no
+    sequential fallback. Of one, it runs that one in place. The programs of
+    a system are independent: each keeps 1 to 7 by itself, `system.run`
+    returns the first failure of any of them and cancels the others, and a
+    program that ended before that has flushed and been torn down.
+    *Tests: "a system returns a failure while another program is waiting",
+    "without concurrency, a system and a merge fail before anything runs",
+    "systems nest, and a system of one needs no Io" (`tests/programs.zig`).*
 
 ## Not promised
 
@@ -65,8 +114,14 @@ A review finding against one of these is answered by pointing here.
 
 - That a source waiting for input is interrupted when the stages behind a
   queue are done. It finds out at its next push, as on `main`. (See "Taken
-  out".) `merge` does cancel its other sources when a push of one of them is
-  answered `.done`.
+  out".) `merge` cancels its other sources when a push of one of them is
+  answered `.done`, which with a queue after the merge is likewise only at
+  a push.
+- That a sub-pipe beside one that fails gets the items meant for it. A
+  failure ends the run.
+- That a run fails with `error.ConcurrencyUnavailable` when a member cannot
+  be started although the run already has an outcome: a failure, or a
+  `merge` whose pipe is done, comes first.
 - That no handler runs for a final value once a later stage is done. Stages
   between the one that emits it and the one that is done may run for it.
 - That nothing of a segment's end runs after a failure elsewhere. A segment
@@ -80,19 +135,29 @@ A review finding against one of these is answered by pointing here.
   `error.Canceled` is (guarantee 3).
 - Interrupting a handler or source that never calls into `std.Io`, or that
   swallows `error.Canceled` and goes on.
+- That a request to cancel looks like one everywhere. `std.Io.Writer`
+  reports every failure as `error.WriteFailed`, so a request that reaches a
+  segment inside a write (`print`) comes out as a failed write; a `recover`
+  may take it for an item error and carry on. The run still ends: its
+  queues are closed when it is over.
+- That members on different `Io` instances are asked to cancel together.
+  Those on one `Io` are; the instances are told one after another.
 - Exact item counts before a queue: stages before it may have handled more
   items than the stages after it take.
-- Anything about cancelling a program without a queue, beyond what its own
-  handlers and source do with `error.Canceled`: it has no `Io` to ask.
+- Anything about cancelling a program that starts no task (no queue, no
+  `merge`), beyond what its own handlers and source do with
+  `error.Canceled`: the run itself has no `Io` to ask.
 
 ## How it works
 
 Mechanism, not promises. It may change as long as the guarantees hold.
 
 - **The end of the stream travels with the data.** `finish` runs in order up
-  to and including a queue, on the task that pushed into it; the queue's task
-  finishes what follows. No task finishes another segment's stages. `flush`
-  and `deinit` run on the caller after every task has returned.
+  to and including a queue, on the task of the segment before it; the
+  queue's task finishes what follows. No task finishes another segment's
+  stages. `init`, `flush` and `deinit` run on the caller, the last two after
+  every task has returned. (With `merge`, the sources run as tasks of their
+  own and take turns pushing; the segment's own task ends the stream.)
 - **Every task ends its work through the same steps**, in one function
   (`Scope.Runner`). A segment and an operator only say what each step is.
 
@@ -105,13 +170,16 @@ Mechanism, not promises. It may change as long as the guarantees hold.
   5. `end`: finish the segment's stages. A failure here fails the run too.
 
 - **The supervising task** waits in one place, and that wait can be
-  cancelled. On an outcome it joins every task, cancelling those still
-  running unless all returned by themselves. Before it returns it looks at
-  its own cancellation once more: joining is not a cancelation point.
+  cancelled. When the run is over and not every task returned by itself,
+  everyone is told at once: every queue is closed (each boundary is
+  retired), so that no task waits on a queue again whatever became of its
+  request to cancel, and all tasks on one `Io` are asked to cancel
+  together (they are one `Io.Group`). Then the tasks are joined, and before
+  it returns the supervising task looks at its own cancellation once more:
+  joining need not be a cancelation point.
 - **Each segment runs on the `Io` in force at its queue**; segment 0 on the
-  `Io` of the first queue. Tasks are started with `Io.concurrent`, never run
-  on the caller, and are cancelled one after another (`std.Io` sends a
-  cancel request by joining).
+  `Io` of the first queue. Tasks are started with `Io.concurrent` and never
+  run on the caller.
 - **`merge`** tells its scope when a push is answered `.done`; the scope then
   cancels the other sources and ends as a success.
 
@@ -134,11 +202,17 @@ lock, right before what it allows and after every step that can take time.
 - **"Done" is a hint, sticky where it originates.** A stage that answers
   `.done` of its own accord keeps answering `.done`. Whoever is answered
   `.done` stops pushing items. Final values (`fold`, `batch`) are still pushed
-  and are refused by the stage that is done.
+  and are refused by the stage that is done. `branch`, `route` and `merge`
+  remember which of their own sub-pipes or pushes were answered `.done`; a
+  `route` whose cases rejoin drops a case's final value itself once the pipe
+  after it is done.
 - **Stage hooks**: `init`, `push`, `finish`, `flush`, `deinit`, `provide`.
   There is no `start`: no stage emits before the first item.
 - **A task boundary** declares `zrx_boundary`, `work` (the body of its task),
-  `retire` (from now on `push` answers `.done`) and `taskIo`.
+  `retire` (from now on `push` answers `.done` and `work` runs out) and
+  `taskIo`. `retire` is called by the boundary's own task when its work is
+  over and by the supervising task when the run is: more than once, from
+  two tasks, and it must not wait.
 - **A stage with sub-pipes** declares `has_boundary`, `Tasks` and `tasks`.
 - `src/pipe.zig` knows these markers and hooks, not `queue`.
 
@@ -186,11 +260,10 @@ Until then the behaviour is `main`'s: the segment finds out at its next push.
 
 ## Costs
 
-- With a queue, no handler runs on the task that called `run`: the source is
-  a task too, so that a failure can interrupt it.
-- Tasks are cancelled one after another. One that is slow to notice delays
-  the request to those after it; the run returns at the same moment either
-  way.
+- With a queue, no item handler runs on the task that called `run`: the
+  source is a task too, so that a failure can interrupt it. What runs at
+  `init`, `flush` and `deinit` (a `resource`'s acquire and release) stays on
+  the caller.
 - A queue costs what `std.Io.Queue` costs when two threads contend for it.
   Measured with std alone on macOS aarch64: about 9 ns/item with no second
   thread, 45 to 60 with one put per item against a consumer on another
@@ -238,15 +311,17 @@ itself.
 8. Six shapes of pipe (segments in a row, beside a direct sub-pipe of the
    source and of a segment, two queued sub-pipes, a branch behind a queue,
    queued cases of a route), each with one side running out, being done
-   after one item, and failing on the first: `run` returns; a sub-pipe
-   beside that side gets every item meant for it; on success every stage
-   finishes once and flushes once; on failure nothing flushes. (1, 2, 6.)
+   after one item, and failing on the first: `run` returns; unless that side
+   failed, a sub-pipe beside it gets every item meant for it and every stage
+   finishes once and flushes once; if it failed, nothing flushes. (1, 2, 6.)
 9. A failure elsewhere, then a segment whose input has ended: it does not
    end its stream; nor does the source's segment when the source returns
    after the failure. A segment that takes its time retiring decides after
-   it has retired. ("How it works", steps 2 to 4.)
+   it has retired; a failure is on record before the queue behind it lets
+   its producer go; a failure while a segment ends its stream fails the
+   run. ("How it works", steps 2 to 5.)
 10. The caller is cancelled while the run waits: `error.Canceled`, every
-    task joined, nothing finishes or flushes. (3.)
+    task joined, nothing flushes. (3.)
 11. The caller is cancelled while the run joins its tasks, after a success
     and after a failure: `error.Canceled`, nothing flushes. (3.)
 12. A queue's task runs on the `Io` in force at the queue; a program can run
@@ -262,8 +337,13 @@ itself.
 4. The guide and `AGENTS.md`.
 5. After the first review: every task ends its work in one place.
 6. After the second: each decision is taken right before what it allows.
-7. After the third: step 3 taken out; the caller's cancellation is looked at
-   where `run` returns; one list of guarantees, here.
+7. After the third: step 3 taken out; one list of guarantees, here.
+8. After two independent reviews run before handing it back: every
+   guarantee names its tests (four lines of the first list were false);
+   every task of one `Io` is asked to cancel at once, and every queue is
+   closed when the run is over (a request to cancel that `print` reported
+   as a failed write, swallowed by a `recover`, hung the run; a task that
+   did not notice its request kept the request from the next one).
 
 Not built, by explicit decision only: the stop trigger for sources; an
 owning chunk so that `batch` can cross a queue.

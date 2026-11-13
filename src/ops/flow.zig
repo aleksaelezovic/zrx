@@ -83,8 +83,10 @@ fn Queue(comptime capacity: usize) type {
                     }
                 }
 
-                /// The task is gone, whatever ended it: a producer waiting
-                /// for space, or pushing later, is answered `.done`.
+                /// The task is gone, or the run is over: a producer waiting
+                /// for space, or pushing later, is answered `.done`, and the
+                /// task runs out of input once the buffer is empty. Safe to
+                /// call again and from any task.
                 pub fn retire(self: *Self) void {
                     self.channel.close(self.io);
                 }

@@ -37,7 +37,7 @@ fn Result(comptime Task: type) type {
 /// A member is a value with `run`, and optionally more:
 ///
 ///     pub fn run(member) !void       // its work
-///     pub fn retire(member) void     // its work is over, however it ended: nobody may wait on it again
+///     pub fn retire(member) void     // nobody may wait on its work again; see below
 ///     pub fn end(member) !void       // what follows its work when that ended well
 ///     pub fn io(member) Io           // the `Io` its task runs on, instead of the scope's
 ///
@@ -53,8 +53,15 @@ fn Result(comptime Task: type) type {
 /// 5. `end`. A failure of `end` fails the run like any other.
 ///
 /// The supervising task waits in one place, for a change, and that wait can
-/// be cancelled. Then it joins every member, and before it returns it looks
-/// at its own cancellation once more (see `run`).
+/// be cancelled. When the run is over without every member having returned
+/// by itself, everyone is told at once: every member is retired, so that
+/// nobody waits on anybody's work again, and all members are asked to cancel
+/// together. Then they are joined, and the supervising task looks at its own
+/// cancellation once more (see `run`).
+///
+/// `retire` is therefore called by the member's own task when its work is
+/// over, and by the supervising task when the run is: more than once, from
+/// two tasks. It must not wait for anything.
 pub const Scope = struct {
     mutex: Io.Mutex = .init,
     changed: Io.Condition = .init,
@@ -111,19 +118,22 @@ pub const Scope = struct {
     /// The task of one member: the steps every member takes (see `Scope`).
     fn Runner(comptime Task: type) type {
         return struct {
-            fn run(task: Task, scope: *Scope, io: Io, index: usize) Result(Task) {
+            fn run(task: Task, scope: *Scope, io: Io, index: usize, result: *Result(Task)) void {
                 const worked = task.run();
                 if (worked) |_| {} else |_| scope.workFailed(io, index);
                 if (@hasDecl(Task, "retire")) task.retire();
-                const ended: Result(Task) = if (worked) |_| ending: {
+                result.* = if (worked) |_| ending: {
                     if (!@hasDecl(Task, "end") or !scope.mayEnd(io)) break :ending {};
                     break :ending task.end();
                 } else |_| worked;
                 // (A failed `run` is on record already.)
-                scope.memberReturned(io, index, if (worked) |_| if (ended) |_| false else |_| true else |_| false);
-                return ended;
+                scope.memberReturned(io, index, if (worked) |_| if (result.*) |_| false else |_| true else |_| false);
             }
         };
+    }
+
+    fn sameIo(a: Io, b: Io) bool {
+        return a.userdata == b.userdata and a.vtable == b.vtable;
     }
 
     /// Runs every member of the tuple `members`, each as a task of its own,
@@ -132,72 +142,102 @@ pub const Scope = struct {
     /// Members are started with `Io.concurrent` and never run on the calling
     /// task, which only waits: it has to stay free to see a failure and
     /// cancel the rest. A member is started, joined and cancelled on its own
-    /// `Io` if it names one, and on `io` otherwise. If a member cannot be
-    /// started, those already running are cancelled and the run fails with
-    /// `error.ConcurrencyUnavailable`.
+    /// `Io` if it names one, and on `io` otherwise. A member that cannot be
+    /// started is an outcome like any other: unless the run already has one
+    /// (a member failed, or said the group is done), those already running
+    /// are cancelled and the run fails with `error.ConcurrencyUnavailable`.
     ///
-    /// If the calling task has been asked to cancel by the time `run` would
-    /// return, `run` returns `error.Canceled`, whatever the members did. A
-    /// request that arrives while it waits ends the wait and cancels every
-    /// member; one that arrives while it joins them is seen in a last look
-    /// before it returns.
+    /// If the calling task is asked to cancel before this function has
+    /// joined its members, the result is `error.Canceled`, whatever the
+    /// members did. A request that arrives while it waits ends the wait and
+    /// cancels every member; one that arrives while it joins them (which is
+    /// not a cancelation point) is taken in a last look after the joins.
     ///
-    /// Members are cancelled one after another, in order: a task is sent a
-    /// cancel request by joining it. One that is slow to notice delays the
-    /// request to those after it.
+    /// Members on the same `Io` are asked to cancel together (they share an
+    /// `Io.Group`). Members on different `Io`s are asked one `Io` after
+    /// another: a group is told by joining it.
     pub fn run(scope: *Scope, io: Io, members: anytype) Errors(@TypeOf(members))!void {
         const types = comptime di.types(@TypeOf(members));
         const n = types.len;
-        const Futures = comptime blk: {
+        const Results = comptime blk: {
             var list: [n]type = undefined;
-            for (types, 0..) |Task, i| list[i] = Io.Future(Result(Task));
+            for (types, 0..) |Task, i| list[i] = Result(Task);
             break :blk @Tuple(&list);
         };
 
+        // Members on the same `Io` share a group: the one of the first of them.
         var ios: [n]Io = undefined;
-        inline for (0..n) |i| ios[i] = if (@hasDecl(types[i], "io")) members[i].io() else io;
+        var group_of: [n]usize = undefined;
+        inline for (0..n) |i| {
+            ios[i] = if (@hasDecl(types[i], "io")) members[i].io() else io;
+            group_of[i] = i;
+            for (0..i) |earlier| {
+                if (sameIo(ios[earlier], ios[i])) {
+                    group_of[i] = group_of[earlier];
+                    break;
+                }
+            }
+        }
 
-        var futures: Futures = undefined;
+        var groups: [n]Io.Group = @splat(.init);
+        var results: Results = undefined;
         var started: usize = 0;
         inline for (0..n) |i| {
             if (started == i) {
-                if (ios[i].concurrent(Runner(types[i]).run, .{ members[i], scope, ios[i], i })) |future| {
-                    futures[i] = future;
+                if (groups[group_of[i]].concurrent(ios[i], Runner(types[i]).run, .{ members[i], scope, ios[i], i, &results[i] })) |_| {
                     started += 1;
                 } else |_| scope.settle(io, .unlaunched);
             }
         }
 
+        // This task was asked to cancel while it waited, or while it joined.
+        var interrupted = false;
         const outcome = waiting: {
             scope.mutex.lockUncancelable(io);
             defer scope.mutex.unlock(io);
             while (scope.outcome == .running and scope.returned < n) {
                 scope.changed.wait(io, &scope.mutex) catch {
-                    scope.outcome = .canceled;
+                    interrupted = true;
+                    // The members are told through the outcome: none of
+                    // them goes on to end.
+                    if (scope.outcome == .running) scope.outcome = .canceled;
                 };
             }
             break :waiting scope.outcome;
         };
 
-        // Join everyone: those still running are cancelled unless every
-        // member has returned by itself.
-        inline for (0..n) |i| {
-            if (i < started) {
-                const result = if (outcome == .running) futures[i].await(ios[i]) else futures[i].cancel(ios[i]);
-                if (result) |_| {} else |_| {}
+        if (outcome != .running) {
+            // The run is over and not every member returned by itself.
+            // Nobody is to wait on anybody's work again: a member whose
+            // request to cancel gets lost on the way (an `Io` layer may
+            // report it as another error) still comes to an end.
+            inline for (0..n) |i| {
+                if (@hasDecl(types[i], "retire")) members[i].retire();
             }
         }
-        // Joining is not a cancelation point. A request that came for this
-        // task meanwhile is taken here, as the last thing before returning.
+        for (&groups, 0..) |*group, i| {
+            if (group_of[i] != i) continue;
+            if (outcome == .running) {
+                // Every member has returned; this only gives them back.
+                group.await(ios[i]) catch {
+                    interrupted = true;
+                };
+            } else group.cancel(ios[i]);
+        }
+
+        // This task's own cancellation comes before whatever the members
+        // did: a request that ended the wait, or one that came while joining
+        // (which need not be a cancelation point).
+        if (interrupted) return error.Canceled;
         try io.checkCancel();
         switch (outcome) {
             // Every member returned, and none failed.
             .running, .done => {},
             .failed => |culprit| inline for (0..n) |i| {
-                // Already joined: this only reads what the member returned.
-                if (culprit == i) return futures[i].cancel(ios[i]);
+                if (culprit == i) return results[i];
             },
-            .canceled => return error.Canceled,
+            // Only ever set when the wait was interrupted.
+            .canceled => unreachable,
             .unlaunched => return error.ConcurrencyUnavailable,
         }
     }

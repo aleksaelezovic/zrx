@@ -26,7 +26,8 @@
 //!
 //! A run goes: `init` every stage in order, `push` per item, then on a normal
 //! end `finish` in order and `flush` in reverse; and always, last, `deinit` in
-//! reverse. A failure skips `finish` and `flush`.
+//! reverse. After a failure `flush` is skipped; whether a stage finished
+//! depends on where the failure struck (`docs/spec-segments.md`).
 //!
 //! ## Task boundaries
 //!
@@ -36,7 +37,7 @@
 //!
 //!     pub const zrx_boundary = {};
 //!     pub fn work(self: *Stage, down: anytype) !void  // the task: feeds `down` until its input ends or `down` is done
-//!     pub fn retire(self: *Stage) void                // the task is gone: `push` answers `.done` from now on
+//!     pub fn retire(self: *Stage) void                // from now on `push` answers `.done` and `work` runs out
 //!     pub fn taskIo(self: *Stage) Io                  // the `Io` its task is started and joined on
 //!
 //! Its `push` hands an item over and its `finish` says that no more will come.
@@ -46,11 +47,14 @@
 //! one. No task finishes another's stages. A program runs every such task and
 //! the source under one `tasks.Scope`, then flushes and tears down by itself.
 //!
-//! A boundary whose task is gone never keeps a producer waiting: `retire` is
-//! called when `work` is over, however it ended (the input ran out, `down`
-//! was done, it failed, it was cancelled). `work` itself only returns. What a
-//! segment's end means, and in which order others get to see it, is decided
-//! in one place for every task: `tasks.Scope`.
+//! Nobody is left waiting on a boundary. `retire` is called by the boundary's
+//! own task when `work` is over, however it ended (the input ran out, `down`
+//! was done, it failed, it was cancelled), and by the task that supervises
+//! the run when the run is over without success. So it may be called more
+//! than once and from another task than the one in `work`, and it must not
+//! wait. `work` itself only returns. What a segment's end means, and in
+//! which order others get to see it, is decided in one place for every
+//! task: `tasks.Scope`.
 //!
 //! A stage that holds sub-pipes (`branch`, `route`) says which tasks they need:
 //!

@@ -168,8 +168,9 @@ fn Emitter(comptime T: type, comptime Down: type) type {
 
 /// The items of several sources, interleaved as they arrive; each source keeps
 /// its own order. Sources run together, each as a task (see `tasks.Scope`),
-/// and take turns pushing, so the pipe still sees one item at a time. Once the
-/// pipe is done, or a source fails, the others are cancelled where they wait.
+/// and take turns pushing, so the pipe still sees one item at a time. Once a
+/// push is answered `.done`, or a source fails, the others are cancelled
+/// where they wait.
 /// Needs `std.Io` with concurrency: `error.ConcurrencyUnavailable` otherwise.
 pub fn merge(sources: anytype) Merge(Sources(@TypeOf(sources))) {
     var out: Sources(@TypeOf(sources)) = undefined;

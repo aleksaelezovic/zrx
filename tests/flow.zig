@@ -383,6 +383,8 @@ fn Trace(comptime id: u8) type {
         events: support.Recorder(u8) = .{},
         at: support.Recorder(usize) = .{},
 
+        /// Never read: it makes `Trace(0)` and `Trace(1)` different types,
+        /// so that each mark finds its own trace among the dependencies.
         const tag = id;
 
         fn add(self: *@This(), ticks: *Ticks, event: u8) void {
@@ -755,6 +757,16 @@ test "a source that returns after a failure elsewhere does not end the stream" {
     try before.events.expect("ipd");
 }
 
+/// Runs a program on a task of its own, so that a test can cancel its caller.
+fn Called(comptime Program: type, comptime Deps: type) type {
+    return struct {
+        fn run(called: *const Program, deps: Deps) ?anyerror {
+            called.run(deps) catch |err| return err;
+            return null;
+        }
+    };
+}
+
 const Caught = struct {
     handled: std.atomic.Value(bool) = .init(false),
 };
@@ -775,15 +787,8 @@ test "cancelling the caller of a queued program cancels every segment and skips 
         subscribe(noteHandled),
     });
     const waiting = program(fromProducer(u32, PushThenStall(1).run), work);
-    const Waiting = @TypeOf(waiting);
     const Deps = struct { std.Io, *Stalled, *Caught, *Ticks, *Trace(0), *Trace(1) };
-    const Caller = struct {
-        fn run(queued: *const Waiting, deps: Deps) ?anyerror {
-            queued.run(deps) catch |err| return err;
-            return null;
-        }
-    };
-    var caller = try io.concurrent(Caller.run, .{ &waiting, Deps{ io, &stalled, &caught, &ticks, &before, &after } });
+    var caller = try io.concurrent(Called(@TypeOf(waiting), Deps).run, .{ &waiting, Deps{ io, &stalled, &caught, &ticks, &before, &after } });
     // An item got through, so both segments are running and the caller waits.
     while (!caught.handled.load(.seq_cst)) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
@@ -1066,16 +1071,6 @@ test "a program can run its segments on two Io instances" {
     }
 }
 
-/// Runs a program on a task of its own, so that a test can cancel its caller.
-fn Called(comptime Program: type, comptime Deps: type) type {
-    return struct {
-        fn run(called: *const Program, deps: Deps) ?anyerror {
-            called.run(deps) catch |err| return err;
-            return null;
-        }
-    };
-}
-
 test "a cancel request that reaches the caller while the run joins its tasks is not lost" {
     var seen: Numbers = .{};
     var ticks: Ticks = .{};
@@ -1109,4 +1104,186 @@ test "the caller's cancellation also comes before a failure the run already has"
     var caller = try io.concurrent(Called(@TypeOf(failing), Deps).run, .{ &failing, Deps{ held, &seen } });
     while (!support.JoinHeld.joining.load(.seq_cst)) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
+}
+
+/// Lets a retiring `handoff` go once the stream has ended where this stands.
+const ReleaseGateAtEnd = struct {
+    pub const zrx_operator = {};
+    pub const name = "releaseGateAtEnd";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            gate: *support.RetireGate,
+
+            pub fn init(self: *@This(), _: *const ReleaseGateAtEnd, env: Env) !void {
+                self.gate = zrx.di.get(env, *support.RetireGate);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), _: anytype) !void {
+                self.gate.released.store(true, .seq_cst);
+            }
+        };
+    }
+};
+
+fn pushUntilDone(out: anytype) !void {
+    var value: u32 = 0;
+    while (try out.push(value) != .done) value += 1;
+}
+
+test "a failure is on record before the queue behind it lets its producer go" {
+    var right: Numbers = .{};
+    var ticks: Ticks = .{};
+    var before: Trace(0) = .{};
+    // The far side fails on the first item. Its boundary lets the producer
+    // go as soon as it retires and then waits: for the run to interrupt it,
+    // or for the producer's segment to end its stream, which is what a
+    // producer does that was let go without a failure on record.
+    var gate: support.RetireGate = .{ .close_first = true };
+    const work = pipe(.{
+        mark(0),
+        ReleaseGateAtEnd{},
+        support.handoff(8),
+        map(failAlways),
+        subscribe(toRight),
+    });
+    const result = program(fromProducer(u32, pushUntilDone), work).run(.{ io, &ticks, &before, &gate, Right{ .seen = &right } });
+    try std.testing.expectError(error.Ended, result);
+    try std.testing.expectEqual(@as(usize, 0), before.count('f'));
+}
+
+test "a failure while a segment ends its stream fails the run" {
+    var seen: Numbers = .{};
+    // Behind a queue, and in the source's own segment: the fold's final value
+    // fails in the stage after it.
+    const behind = pipe(.{ queue(2), fold(@as(u32, 0), add), map(failAlways), subscribe(record) });
+    try std.testing.expectError(error.Ended, program(range(u32, 1, 4), behind).run(.{ io, &seen }));
+    const before = pipe(.{ fold(@as(u32, 0), add), map(failAlways), queue(2), subscribe(record) });
+    try std.testing.expectError(error.Ended, program(range(u32, 1, 4), before).run(.{ io, &seen }));
+    try seen.expect(&.{});
+}
+
+/// A stage whose `flush` fails.
+const FailingFlush = struct {
+    pub const zrx_operator = {};
+    pub const name = "failingFlush";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            pub fn init(_: *@This(), _: *const FailingFlush, _: Env) !void {}
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn flush(_: *@This()) error{FlushFailed}!void {
+                return error.FlushFailed;
+            }
+        };
+    }
+};
+
+test "a flush that fails stops the flushing" {
+    var seen: Numbers = .{};
+    var ticks: Ticks = .{};
+    var earlier: Trace(0) = .{};
+    var later: Trace(1) = .{};
+    const work = pipe(.{
+        mark(0),
+        queue(2),
+        FailingFlush{},
+        mark(1),
+        subscribe(record),
+    });
+    const result = program(range(u32, 0, 3), work).run(.{ io, &seen, &ticks, &earlier, &later });
+    try std.testing.expectError(error.FlushFailed, result);
+    // Flushing goes last stage first: the stage after the failing one was
+    // flushed, the one before it was not.
+    try later.events.expect("ipppfFd");
+    try earlier.events.expect("ipppfd");
+}
+
+const Acked = struct {
+    /// The handler behind the first queue is waiting in its `Io` call.
+    waiting: std.atomic.Value(bool) = .init(false),
+    /// That handler has returned, one way or the other.
+    returned: std.atomic.Value(bool) = .init(false),
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+};
+
+/// Pushes one item and then waits, without calling into `std.Io`, until the
+/// handler that took it has returned. It never notices a request to cancel.
+fn pushThenAwaitAck(acked: *Acked, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    while (!acked.returned.load(.seq_cst)) std.Thread.yield() catch {};
+}
+
+/// Waits in an `Io` call far longer than the test.
+fn waitInIo(clock: std.Io, acked: *Acked, _: u32) !void {
+    defer acked.returned.store(true, .seq_cst);
+    acked.waiting.store(true, .seq_cst);
+    try clock.sleep(.fromSeconds(5), .awake);
+    acked.woke_by_itself.store(true, .seq_cst);
+}
+
+/// Fails once the handler beside it is waiting.
+fn failOnceWaiting(acked: *Acked, _: u32) error{Late}!u32 {
+    while (!acked.waiting.load(.seq_cst)) std.Thread.yield() catch {};
+    return error.Late;
+}
+
+fn ignore(_: u32) void {}
+
+test "every task is asked to cancel at once: one that does not notice does not shield another" {
+    var acked: Acked = .{};
+    // The source does not notice a request and waits for the handler; the
+    // handler waits in an `Io` call. Asked one after another, the source
+    // first, the handler would never be asked.
+    const waiting = pipe(.{
+        queue(2),
+        subscribe(waitInIo),
+    });
+    const failing = pipe(.{
+        queue(2),
+        map(failOnceWaiting),
+        subscribe(ignore),
+    });
+    const work = pipe(.{branch(.{ waiting, failing })});
+    const result = program(fromProducer(u32, pushThenAwaitAck), work).run(.{ io, &acked });
+    try std.testing.expectError(error.Late, result);
+    try std.testing.expect(!acked.woke_by_itself.load(.seq_cst));
+}
+
+test "the caller is asked to cancel while the run starts its tasks" {
+    // Not `std.testing.io`: in Debug its allocator takes a stack trace
+    // through a lock that can be cancelled, and so uses up a request that
+    // is pending while a task is being started (6 of 300 runs here lost it;
+    // none did over a plain allocator, nor in ReleaseFast).
+    var backend: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer backend.deinit();
+    const plain = backend.io();
+    // Held at the start of the first task, and of the second: by then the
+    // first is already running.
+    inline for (.{ 1, 2 }) |nth| {
+        var seen: Numbers = .{};
+        var stalled: Stalled = .{};
+        const waiting = program(fromProducer(u32, PushThenStall(1).run), pipe(.{ queue(2), subscribe(record) }));
+        const Deps = struct { std.Io, *Numbers, *Stalled };
+        var caller = try plain.concurrent(Called(@TypeOf(waiting), Deps).run, .{ &waiting, Deps{ support.LaunchHeld.over(plain, nth), &seen, &stalled } });
+        while (!support.LaunchHeld.launching.load(.seq_cst)) std.Thread.yield() catch {};
+        try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(plain));
+        try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+    }
 }

@@ -34,9 +34,11 @@ to this file; edit `AGENTS.md`, not copies.
 - **"Done" is a hint, sticky where it originates.** A stage that answered
   `.done` of its own accord may still be pushed to and keeps answering
   `.done`; whoever is answered `.done` stops pushing items. Final values
-  (`fold`, `batch`) are still pushed and refused there. Nothing remembers a
-  "done" on behalf of another stage, and no promise is made that no handler
-  runs for a value nobody takes. PR 3 tried to make that a guarantee and
+  (`fold`, `batch`) are still pushed and refused there. Only an operator
+  that pushes into several places keeps track of them (`branch` and `route`
+  of their sub-pipes, a rejoining `route` of the pipe after it, `merge` of
+  its gate); the chain remembers nothing, and no promise is made that no
+  handler runs for a value nobody takes. PR 3 tried to make that a guarantee and
   needed machinery in the chain, across tasks, that kept regressing.
 - **Operators are values; state is separate.** An operator declares
   `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
@@ -54,8 +56,10 @@ to this file; edit `AGENTS.md`, not copies.
   forward their children's requirements. No closures, no runtime function pointers.
 - **Errors are Zig errors.** A handler error fails the run after teardown.
   `recover(handler)` guards the operators after it per item; its error
-  parameter type selects what it handles; `error.Canceled` is never handled;
-  errors during finish, or beyond a `queue`, are not item errors. No error lane,
+  parameter type selects what it handles; `error.Canceled` is never handled.
+  A final value from a stage before the `recover` is an item like any other;
+  errors of a later stage's own finish or flush, or beyond a `queue`, are
+  not item errors. No error lane,
   no rollback.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
@@ -63,9 +67,13 @@ to this file; edit `AGENTS.md`, not copies.
 - **A queue splits a pipe into segments; each segment is a task.**
   [docs/spec-segments.md](docs/spec-segments.md) is the design record.
   Segment 0 is the source and the stages up to the first queue. A program
-  without a queue is a plain loop on the caller's task.
+  with neither a queue nor a `merge` is a plain loop on the caller's task.
 - **What a run guarantees is written in one place**: the "Guarantees" list
-  of the spec. The guide repeats it in short and links there; this file and
+  of the spec, where every line names the tests that pin it. A sentence
+  nobody has a test for is not a guarantee: the first version of that list
+  was written from the design and an independent review found four lines of
+  it false (writers flush at teardown, a failing flush, a system, the
+  moment cancellation is looked at). The guide repeats it in short and links there; this file and
   the comments in `src/` say how it is done, not what is promised. Do not
   restate a guarantee anywhere else. Each review of PR 5 found a copy that
   had drifted or had been worded more strongly than the code.
@@ -73,21 +81,26 @@ to this file; edit `AGENTS.md`, not copies.
   flushed, what has been torn down, whether `run` returns. Never a moment
   inside the run, and never "always", "never after" or "whatever else"
   about two tasks: between a look and the act that follows it, the other
-  task can move. The caller's cancellation is looked at where `run`
-  returns, for that reason.
+  task can move. The caller's cancellation is looked at once the run has
+  joined its tasks, and the guarantee says exactly that.
 - **The end of the stream travels with the data.** `finish` runs in order up
-  to and including a boundary, on the task that pushed into it; the
+  to and including a boundary, on the task of the segment before it; the
   boundary's task finishes what follows. No task finishes, joins or waits
-  for another segment's stages. Only `flush` and `deinit` run on the caller,
-  after every task has returned.
+  for another segment's stages. `init`, `flush` and `deinit` run on the
+  caller, the last two after every task has returned.
 - **One scope supervises every group of tasks** (`tasks.Scope`): the segments
   of a program, the sources of `merge`, the programs of `system`. Members are
   started with `Io.concurrent`, each on its own `Io`, and never run on the
-  supervising task. That task waits in one place, which can be cancelled;
-  then it joins every member and looks at its own cancellation once more
-  before it returns. A failure is a task's return value: nothing is
+  supervising task. That task waits in one place, which can be cancelled.
+  When the run is over without success it tells everyone at once: every
+  member is retired (queues close, so nobody waits on one whatever became
+  of its request to cancel) and all members on one `Io` are asked to cancel
+  together (one `Io.Group`). Then it joins them and looks at its own
+  cancellation once more before it returns. Do not go back to asking tasks
+  one after another, nor rely on a request to cancel arriving as
+  `error.Canceled`: `std.Io.Writer` reports it as a failed write. A failure is a task's return value: nothing is
   reported on the side, and nothing is cast from `anyerror`. There is no
-  sequential fallback.
+  sequential fallback; a `merge` or `system` of one runs that one in place.
 - **Every task ends its work in one place** (`Scope.Runner`), in a fixed
   order: `run`; under the mutex, put a failure on record; `retire` (nobody
   waits on it again: a queue closes); under the mutex, as the last thing
@@ -182,6 +195,14 @@ to this file; edit `AGENTS.md`, not copies.
   state): if it sleeps it is cancelled where it sleeps, and the test passes
   without the check. Before a test cancels a task, it waits until that task
   has started everything it starts.
+- In Debug, `std.testing.io` can lose a request to cancel that is pending
+  while the task starts another one: its allocator captures a stack trace
+  through a lock that can be cancelled. Measured: 6 of 300 Debug runs lost
+  it, none over `std.heap.smp_allocator`, none in ReleaseFast. A test that
+  has a request pending while tasks are started uses an `Io` over a plain
+  allocator; suspect this before the library when only Debug fails so.
+- A mutant that does not compile proves nothing: the runner must report a
+  failed build as such. Twice a check here passed for that reason.
 - A change to the scope or to segments is checked by removing each safeguard
   in turn and seeing a test fail, and by repeating the `flow`, `programs`
   and `extending` suites a few hundred times in Debug and ReleaseFast under

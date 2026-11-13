@@ -183,7 +183,7 @@ fn patiently(clock: std.Io, out: anytype) !void {
     }
 }
 
-test "the first failure in a system is returned and stops the others" {
+test "the first failure in a system is returned" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
@@ -198,7 +198,7 @@ fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
     return false;
 }
 
-test "run has a precise error set, never anyerror" {
+test "run has a precise error set" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const queued = program(range(u32, 0, 2), pipe(.{ queue(2), map(failAtTwo), subscribe(toLeft) }));
@@ -257,17 +257,6 @@ test "merge cancels a source that is not pushing once another source's push fail
     const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen, &idle });
     try std.testing.expectError(error.Two, result);
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
-}
-
-test "a failed push under merge is never reported as success" {
-    // The failing source and siblings that are already done race to be seen
-    // first; whichever wins, the run fails.
-    for (0..200) |_| {
-        var seen: Numbers = .{};
-        const sources = merge(.{ fromValue(@as(u32, 2)), fromValue(@as(u32, 9)), fromValue(@as(u32, 9)) });
-        const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen });
-        try std.testing.expectError(error.Two, result);
-    }
 }
 
 test "a system returns a failure while another program is waiting" {

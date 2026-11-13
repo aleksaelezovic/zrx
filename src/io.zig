@@ -141,7 +141,7 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
                 }
 
                 pub fn flush(self: *@This()) !void {
-                    try self.file.interface.flush();
+                    return flushOwned(&self.file);
                 }
 
                 /// Whatever is written after `flush` (by a `release`, or before a
@@ -215,7 +215,7 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
                 }
 
                 pub fn flush(self: *@This()) !void {
-                    try self.writer.interface.flush();
+                    return flushOwned(&self.writer);
                 }
 
                 pub fn deinit(self: *@This()) void {
@@ -303,5 +303,18 @@ fn FileLines(comptime max_line_bytes: usize) type {
             var reader = file.reader(io, &buffer);
             return pushLines(&reader.interface, down);
         }
+    };
+}
+
+/// Flushes a writer this library owns. `std.Io.Writer` reports every failure
+/// as `error.WriteFailed` and keeps the cause; when the cause is that the
+/// task was asked to cancel, that is what comes out of here, so that a
+/// cancelled flush is a cancellation and not a write error.
+fn flushOwned(file: *Io.File.Writer) (Io.Writer.Error || Io.Cancelable)!void {
+    file.interface.flush() catch |err| {
+        if (file.err) |cause| {
+            if (cause == error.Canceled) return error.Canceled;
+        }
+        return err;
     };
 }
