@@ -1221,3 +1221,109 @@ test "a segment cancelled for working for nothing ends its stream even if the re
     try program(fromProducer(u32, pushThenReturnUnaware), work).run(.{ io, &pace, Left{ .seen = &ended } });
     try ended.expect(&.{0});
 }
+
+// --- decisions ------------------------------------------------------------------
+//
+// A decision is taken right before what it allows, after every step that can
+// take time. Each test here makes one such step take its time.
+
+/// Fails once the boundary beside it has begun to retire.
+fn failOnceRetiring(gate: *support.RetireGate, _: u32) error{Late}!u32 {
+    while (!gate.retiring.load(.seq_cst)) std.Thread.yield() catch {};
+    return error.Late;
+}
+
+test "a segment decides to end its stream after it has retired, not before" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var ticks: Ticks = .{};
+    var beyond: Trace(1) = .{};
+    var gate: support.RetireGate = .{};
+    // The first sub-pipe has every item and its input has ended. It takes
+    // its time retiring; meanwhile the other one fails.
+    const retiring = pipe(.{
+        support.handoff(8),
+        mark(1),
+        subscribe(toLeft),
+    });
+    const failing = pipe(.{
+        queue(8),
+        map(failOnceRetiring),
+        subscribe(toRight),
+    });
+    const work = pipe(.{branch(.{ retiring, failing })});
+    const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &beyond, &gate, Left{ .seen = &left }, Right{ .seen = &right } });
+    try std.testing.expectError(error.Late, result);
+    try left.expect(&.{ 1, 2, 3 });
+    try beyond.events.expect("ipppd");
+}
+
+const Held = struct {
+    holding: std.atomic.Value(bool) = .init(false),
+    go: std.atomic.Value(bool) = .init(false),
+};
+
+/// A stage whose `finish` holds until the test lets it go, and then a while
+/// longer.
+const HoldAtEnd = struct {
+    pub const zrx_operator = {};
+    pub const name = "holdAtEnd";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            held: *Held,
+
+            pub fn init(self: *@This(), _: *const HoldAtEnd, env: Env) !void {
+                self.held = zrx.di.get(env, *Held);
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), _: anytype) !void {
+                self.held.holding.store(true, .seq_cst);
+                while (!self.held.go.load(.seq_cst)) std.Thread.yield() catch {};
+                for (0..2000) |_| std.Thread.yield() catch {};
+            }
+        };
+    }
+};
+
+test "a cancel request that arrives while the run joins a retired segment wins over success" {
+    var stalled: Stalled = .{};
+    var held: Held = .{};
+    var ticks: Ticks = .{};
+    var before: Trace(0) = .{};
+    var ended: Numbers = .{};
+    var pace: Pace = .{ .hold_back = false };
+    // The far side is done after one item, so the run retires the source's
+    // segment, which then ends its stream; that is where it is held.
+    const work = pipe(.{
+        mark(0),
+        HoldAtEnd{},
+        queue(4),
+        take(1),
+        subscribe(endedSink),
+    });
+    const waiting = program(fromProducer(u32, PushThenStall(1).run), work);
+    const Waiting = @TypeOf(waiting);
+    const Deps = struct { std.Io, *Stalled, *Held, *Ticks, *Trace(0), *Pace, Left };
+    const Caller = struct {
+        fn run(queued: *const Waiting, deps: Deps) ?anyerror {
+            queued.run(deps) catch |err| return err;
+            return null;
+        }
+    };
+    var caller = try io.concurrent(Caller.run, .{ &waiting, Deps{ io, &stalled, &held, &ticks, &before, &pace, Left{ .seen = &ended } } });
+    while (!held.holding.load(.seq_cst)) std.Thread.yield() catch {};
+    held.go.store(true, .seq_cst);
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+    // The segment had finished; nothing was flushed.
+    try before.events.expect("ipfd");
+}

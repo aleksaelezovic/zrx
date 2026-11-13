@@ -45,9 +45,9 @@ into a guarantee. This spec changes the structure instead.
    this short. *(accepted)*
 5. **Failure.** The first task that fails is the result of the run. The
    failure is on record before anybody can see that the task's work ended;
-   the scope then cancels every other task and joins them. A segment does
-   not begin `finish` once a failure is on record, and `flush` is skipped.
-   *(accepted)*
+   the scope then cancels every other task and joins them. A segment decides
+   whether to end its stream as the last thing before it does, and does not
+   once a failure is on record; `flush` is skipped. *(accepted)*
 6. **Working for nothing.** A segment whose every output is a queue is
    cancelled once every segment fed by those queues has returned, if it is
    still at work. That is as good as its work having ended well: what the
@@ -58,11 +58,14 @@ into a guarantee. This spec changes the structure instead.
    first review of PR 5)*
 7. **After every task is joined**, on the caller: `flush` in reverse order (on
    success), then `deinit` in reverse order. *(accepted)*
-8. **Cancelling the run** (the caller's task is cancelled) while it waits
-   for an outcome cancels every segment, skips `finish` and `flush`, and
-   returns `error.Canceled`. *(accepted)* A request that arrives once the
-   run has an outcome stays pending for the caller, and `run` returns that
-   outcome. *(proposed, after the first review of PR 5)*
+8. **Cancelling the run** (the caller's task is cancelled) cancels every
+   segment, skips `flush`, and returns `error.Canceled`. *(accepted)* The
+   run looks for such a request each time it has waited for anything, as the
+   first thing when it settles its outcome: a request that is there then
+   wins, whatever the segments have done, also when it arrived while the run
+   was joining a segment it had cancelled for working for nothing. A request
+   that arrives after the outcome is settled stays pending for the caller,
+   and `run` returns that outcome. *(proposed, after the reviews of PR 5)*
 9. **`merge` and `system` use the same scope.** In `merge`, a member that is
    answered `.done` ends the group as a success and the others are cancelled.
    On an `Io` without concurrency both return
@@ -94,9 +97,33 @@ invariant is missing here or the finding is against something not promised.
    cancelled; the run's result, what every sub-pipe receives and which
    hooks run are the same either way.
 4. **On success every stage finishes once and then flushes once.**
-5. **On failure nothing flushes, and no segment begins to finish after the
-   failure is on record.** It is on record before anybody is let go by it.
+5. **On failure nothing flushes, and no segment decides to end its stream
+   once the failure is on record.** It is on record before anybody is let go
+   by it, and a segment decides as the last thing before it ends.
 6. **Every task has returned before anything is torn down.**
+
+## Decisions
+
+Two tasks cannot agree on "never after": between a look and the act that
+follows it, the other task can always move. So every decision is taken
+under the scope's lock, right before what it allows and after every step
+that can take time, and it reads everything it depends on at that moment.
+Rules and invariants are promises about these points, not about instants
+across tasks.
+
+| Decision | Taken by | When |
+|---|---|---|
+| This task's failure fails the run | the task | when its work is over, before it retires |
+| This task ends its stream | the task | after it has retired, as the last thing before it ends |
+| A task works for nothing and is cancelled | the run | when a task returns |
+| The outcome of the run | the run | each time it has waited for anything; its own cancellation first |
+| Flush | the caller | after the run returned success |
+
+The second review of PR 5 found two decisions taken too early: the run
+accepted success without looking at its own cancellation after a join, and
+a task decided to end its stream before retiring. A decision that seems to
+be taken at the wrong moment is fixed by moving it in this table, not by a
+check where the symptom showed.
 
 ## Contract
 
@@ -144,8 +171,12 @@ invariant is missing here or the finding is against something not promised.
 - Which wins when a failure and a "done" happen together: whichever the
   scope has on record first. The same goes for a failure in the work of a
   segment that is being cancelled for working for nothing: it is dropped.
-- That a cancel request for the caller wins over an outcome the run already
-  has.
+- That a cancel request for the caller wins over an outcome the run has
+  already settled.
+- That nothing of a segment's end runs after a failure is recorded
+  elsewhere. The end is decided right before it begins; one that has begun
+  is cancelled, not undone.
+- That no task starts after another has failed. All are started together.
 - That items already in a queue are not handled after a failure elsewhere.
   Handlers may run for some of them until the cancel request arrives; no
   `finish` runs.
@@ -165,6 +196,18 @@ not by a change.
   takes the queue's lock once per item, and when the consumer has caught up
   it sleeps and has to be woken: the benchmark's pipeline makes roughly 70
   to 130 futex calls per 1,000 items, on `main` and here alike.
+- In the benchmark's pipeline through zrx: about 35 ns/item with
+  `queue(256)`, and 13 when the far side never has to wait (the queue holds
+  everything before it starts). So about 22 of the 35 are the two sides
+  waking each other, and 13 are the floor of one lock per item. A bigger
+  queue alone barely helps (29 with `queue(65536)`), and slowing the far
+  side down on purpose (a `tap` that sleeps every few thousand items) gets
+  to about 21: the sleeping costs what it saves.
+- Handing over chunks instead of items gets under that floor: `batch(64)`,
+  a `map` to an array, `queue(64)`, `flatten()` measures about 4.7 ns/item.
+  It needs an owning chunk, which `batch` does not emit (its slices are not
+  valid across a queue) and which cannot be a fixed array for a short last
+  chunk. That is a gap in the library, not built.
 - No cost is attributed to running the source as a task. The project's
   benchmark reads about 36 ns/item on `main` and 47 to 57 here, but another
   harness of the same pipeline reads 35 to 37 here and 43 to 47 on `main`,

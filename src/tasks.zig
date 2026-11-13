@@ -49,12 +49,32 @@ fn Result(comptime Task: type) type {
 ///
 /// 1. `run`.
 /// 2. Under the scope's mutex: if `run` failed, the run has failed, and that
-///    is on record. If the run is over for another reason, the member stops
-///    here.
+///    is on record.
 /// 3. `retire`: from here on nobody waits on this member's work. It comes
 ///    after step 2, so whoever is let go by it finds a failure on record.
-/// 4. `end`, unless the member stopped in step 2. A failure of `end` fails
-///    the run like any other.
+/// 4. Under the mutex again: whether to end. Not if the run is over.
+/// 5. `end`. A failure of `end` fails the run like any other.
+///
+/// ## Decisions
+///
+/// Two tasks cannot agree on "never after": between a look and the act that
+/// follows it, the other task can always move. So each decision here is
+/// taken under the mutex, right before what it allows and after every step
+/// that can take time, and it reads everything it depends on at that
+/// moment. What the scope promises is stated at these points:
+///
+/// - *A member's failure fails the run*: decided by the member, before it
+///   retires.
+/// - *A member ends*: decided by the member, after it has retired, as the
+///   last thing before `end`. A failure recorded later does not undo an end
+///   that has begun; it cancels it.
+/// - *A member is retired for working for nothing*: decided by the
+///   supervising task.
+/// - *The outcome of the run*: decided by the supervising task, in one
+///   place, each time it has waited for anything (a change, or a member it
+///   retired). It looks at its own cancellation first: a request that is
+///   there at that moment wins, whatever the members have done. One that
+///   arrives after the outcome is settled stays pending for the caller.
 ///
 /// ## Working for nothing
 ///
@@ -112,31 +132,36 @@ pub const Scope = struct {
         scope.changed.signal(io);
     }
 
-    /// What a member does once its work is over.
-    const Next = enum {
-        /// It failed, and that is on record: return the failure.
-        fail,
-        /// The run is over: return.
-        stop,
-        /// Go on to `end`.
-        end,
-        /// Go on to `end`; the scope has cancelled this member, or is about to.
-        end_retired,
-    };
-
-    fn workEnded(scope: *Scope, io: Io, index: usize, failed: bool) Next {
+    /// A member's work is over. Whether that is its failure: not when the
+    /// scope retired it, and then what the work returned is dropped. A
+    /// failure is put on record here, before the member retires.
+    fn workFailed(scope: *Scope, io: Io, index: usize, failed: bool) bool {
         scope.mutex.lockUncancelable(io);
         defer scope.mutex.unlock(io);
+        if (!failed or scope.members[index].retired) return false;
+        if (scope.outcome == .running) scope.outcome = .{ .failed = index };
+        scope.changed.signal(io);
+        return true;
+    }
+
+    const End = enum {
+        /// The run is over.
+        no,
+        yes,
+        /// The scope has cancelled this member, or is about to.
+        yes_retired,
+    };
+
+    /// Whether a member that has retired goes on to `end`: asked as the last
+    /// thing before it would.
+    fn mayEnd(scope: *Scope, io: Io, index: usize) End {
+        scope.mutex.lockUncancelable(io);
+        defer scope.mutex.unlock(io);
+        if (scope.outcome != .running) return .no;
         const member = &scope.members[index];
-        if (failed and !member.retired) {
-            if (scope.outcome == .running) scope.outcome = .{ .failed = index };
-            scope.changed.signal(io);
-            return .fail;
-        }
-        if (scope.outcome != .running) return .stop;
         // From here on the scope does not cancel it for working for nothing.
         member.phase = .ending;
-        return if (member.retired) .end_retired else .end;
+        return if (member.retired) .yes_retired else .yes;
     }
 
     fn memberReturned(scope: *Scope, io: Io, index: usize, failed: bool) void {
@@ -165,27 +190,30 @@ pub const Scope = struct {
         return struct {
             fn run(task: Task, scope: *Scope, io: Io, index: usize) Result(Task) {
                 const worked = task.run();
-                const next = scope.workEnded(io, index, if (worked) |_| false else |_| true);
+                if (scope.workFailed(io, index, if (worked) |_| false else |_| true)) {
+                    if (@hasDecl(Task, "retire")) task.retire();
+                    scope.memberReturned(io, index, false);
+                    return worked;
+                }
                 if (@hasDecl(Task, "retire")) task.retire();
-                const result: Result(Task) = switch (next) {
-                    .fail => worked,
-                    .stop => {},
-                    .end, .end_retired => ending: {
+                const ended: Result(Task) = switch (scope.mayEnd(io, index)) {
+                    .no => {},
+                    .yes, .yes_retired => |how| ending: {
                         if (!@hasDecl(Task, "end")) break :ending {};
                         // The request that retires this member may not have
                         // reached it yet. It must not land in `end`, where
                         // it would look like a failure; and it is the only
                         // request this task will ever be sent.
                         var before: Io.CancelProtection = .unblocked;
-                        if (next == .end_retired) before = io.swapCancelProtection(.blocked);
-                        defer if (next == .end_retired) {
+                        if (how == .yes_retired) before = io.swapCancelProtection(.blocked);
+                        defer if (how == .yes_retired) {
                             _ = io.swapCancelProtection(before);
                         };
                         break :ending task.end();
                     },
                 };
-                scope.memberReturned(io, index, next != .fail and if (result) |_| false else |_| true);
-                return result;
+                scope.memberReturned(io, index, if (ended) |_| false else |_| true);
+                return ended;
             }
         };
     }
@@ -200,8 +228,9 @@ pub const Scope = struct {
     /// started, those already running are cancelled and the run fails with
     /// `error.ConcurrencyUnavailable`.
     ///
-    /// Cancelling the calling task while it waits for an outcome cancels
-    /// every member and returns `error.Canceled`. Once there is an outcome
+    /// A cancel request for the calling task that is there when it settles
+    /// the outcome cancels every member and returns `error.Canceled`,
+    /// whatever the members have done by then. Once the outcome is settled
     /// the calling task only joins, which is not a cancelation point: a
     /// request that arrives then stays pending for the caller, and `run`
     /// returns the outcome it had.
@@ -251,7 +280,15 @@ pub const Scope = struct {
         const outcome = waiting: {
             scope.mutex.lockUncancelable(io);
             defer scope.mutex.unlock(io);
-            while (scope.outcome == .running and scope.returned < n) {
+            while (true) {
+                // The one place the outcome is settled. Whatever this task
+                // waited for since it last looked (a change, or a member it
+                // retired, which is not a cancelation point), a request to
+                // cancel it comes first.
+                io.checkCancel() catch {
+                    scope.outcome = .canceled;
+                };
+                if (scope.outcome != .running or scope.returned == n) break;
                 if (scope.idleMember()) |index| {
                     // Marked first, under the mutex: the member then knows
                     // that this request is not a failure.

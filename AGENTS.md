@@ -77,22 +77,33 @@ to this file; edit `AGENTS.md`, not copies.
   or a member saying the group is done (`merge`, when the pipe answers
   `.done`); the rest are cancelled and joined. There is no sequential
   fallback: an `Io` that cannot start a member is
-  `error.ConcurrencyUnavailable`. Being cancelled from outside wins while
-  the scope waits for an outcome; once it has one it only joins. A failure
-  is a task's return value: nothing is reported on the side, and nothing is
-  cast from `anyerror`. A member is started and joined on its own `Io`.
+  `error.ConcurrencyUnavailable`. A cancel request for the caller that is
+  there when the scope settles the outcome wins; once the outcome is
+  settled the scope only joins. A failure is a task's return value: nothing
+  is reported on the side, and nothing is cast from `anyerror`. A member is
+  started and joined on its own `Io`.
 - **Every task ends its work in one place** (`Scope.Runner`), in a fixed
-  order: `run`; under the mutex, decide what its end means and put a
-  failure on record; `retire` (nobody waits on it again: a queue closes);
-  `end` (finish the segment's stages) unless the run is over. A segment and
+  order: `run`; under the mutex, put a failure on record; `retire` (nobody
+  waits on it again: a queue closes); under the mutex, decide whether to
+  end; `end` (finish the segment's stages). A segment and
   an operator only say what each step is. Do not decide any of it elsewhere:
   the first review of PR 5 found three defects that were one, a segment's
   end handled in three files (the queue closed itself only when done, the
   segment looked at a flag set after it had returned, the program picked the
   `Io`).
-- **After a failure no segment begins to end its stream**, and nothing
-  flushes. That is all a failure promises: handlers may run for items
-  already queued until the cancel request arrives.
+- **Decide right before acting, and promise only that.** Two tasks cannot
+  agree on "never after X": between a look and the act, the other can move.
+  Every decision is taken under the scope's lock, as the last thing before
+  what it allows and after every step that can take time (a join, a
+  `retire`), and reads all it depends on then, the caller's cancellation
+  included. The spec lists them in one table. Never write "always",
+  "never after" or "whatever else has happened" about two tasks: say which
+  decision it is and when it is taken. Both reviews of PR 5 found promises
+  worded as absolutes, and decisions taken one step too early.
+- **After a failure is on record no segment decides to end its stream**,
+  and nothing flushes. That is all a failure promises: handlers may run for
+  items already queued until the cancel request arrives, and an end that
+  has begun is cancelled, not undone.
 - **Working for nothing is decided from a static tree.** A member names who
   feeds it (`fed_by`) and whether everything it puts out goes to other
   members (`feeds_only_members`, from `sinks_directly`). Once all of those

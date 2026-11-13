@@ -178,3 +178,25 @@ test "a custom composite handler forwards dependencies" {
     try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), subscribe(record) })).run(.{ &seen, Limit{ .max = 3 } });
     try seen.expect(&.{ 0, 1, 2 });
 }
+
+// --- a task boundary of your own -------------------------------------------------
+
+test "a boundary written against the contract splits the pipe like a queue" {
+    var seen: Numbers = .{};
+    const io = std.testing.io;
+    try program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.fold(@as(u32, 0), sumUp), subscribe(record) })).run(.{ io, &seen });
+    try seen.expect(&.{190});
+
+    var taken: Numbers = .{};
+    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ support.handoff(2), zrx.take(3), subscribe(record) })).run(.{ io, &taken });
+    try taken.expect(&.{ 0, 1, 2 });
+
+    var failed: Numbers = .{};
+    const result = program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.map(failAtTwo), subscribe(record) })).run(.{ io, &failed });
+    try std.testing.expectError(error.Two, result);
+    try failed.expect(&.{ 0, 1 });
+}
+
+fn sumUp(sum: u32, value: u32) u32 {
+    return sum + value;
+}
