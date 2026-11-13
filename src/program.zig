@@ -63,7 +63,8 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         // returned before anything is flushed or torn down.
                         var scope: tasks.Scope = .{};
                         const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .scope = &scope };
-                        const segments = Frame.at.tasks(refs, Closed{}, &scope);
+                        // The feed is member 0; the segments follow it.
+                        const segments = Frame.at.tasks(refs, Closed{}, &scope, 0, 1);
                         try scope.run(segments[0].io(), .{feed} ++ segments);
                     }
                     try Frame.at.flush(refs);
@@ -82,6 +83,9 @@ fn Feed(comptime S: type, comptime Env: type, comptime Frame: type) type {
         env: Env,
         refs: Frame.Refs,
         scope: *tasks.Scope,
+
+        /// Everything the source pushes ends up in a queue (see `tasks.Scope`).
+        pub const feeds_only_members = !Frame.sinks_directly;
 
         pub fn run(feed: @This()) !void {
             try feed.source.run(feed.env, Entry(Frame, S.Item){ .refs = feed.refs });

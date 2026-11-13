@@ -48,8 +48,17 @@
 //! A stage that holds sub-pipes (`branch`, `route`) says which tasks they need:
 //!
 //!     pub const has_boundary: bool                     // whether a sub-pipe has a boundary
+//!     pub const sinks_directly: bool                   // whether a sub-pipe ends on the task that pushes into it
 //!     pub fn Tasks(comptime Down: type) type           // `TasksOf` its chains
-//!     pub fn tasks(self: *Stage, down: anytype, scope: *Scope) Tasks(@TypeOf(down))
+//!     pub fn tasks(self: *Stage, down: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(down))
+//!
+//! `feeder` is the index, among the scope's members, of the task that pushes
+//! into the stage, and `first` the index of the first task returned. With
+//! them each task says which one feeds it, and the scope cancels a task whose
+//! every output is a boundary once the tasks behind those have returned: it
+//! works for nothing. A terminal stage that does not declare `sinks_directly`
+//! counts as ending on the task that pushes into it, so that task is never
+//! cancelled that way.
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -105,6 +114,13 @@ pub fn anyBoundary(comptime Chains: type) bool {
     return false;
 }
 
+/// Whether any of the chains in the tuple type `Chains` ends on the task that
+/// pushes into it, without crossing a boundary.
+pub fn anySinksDirectly(comptime Chains: type) bool {
+    for (di.types(Chains)) |C| if (C.sinks_directly) return true;
+    return false;
+}
+
 /// The tasks of the chains in the tuple type `Chains`, each of which pushes
 /// into a `Tail`: what a stage with sub-pipes declares as its `Tasks`.
 pub fn TasksOf(comptime Chains: type, comptime Tail: type) type {
@@ -115,12 +131,18 @@ pub fn TasksOf(comptime Chains: type, comptime Tail: type) type {
 
 /// The tasks of `chains`, a pointer to a tuple of chains: what a stage with
 /// sub-pipes returns from its `tasks`.
-pub fn tasksOf(chains: anytype, tail: anytype, scope: *Scope) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
+pub fn tasksOf(
+    chains: anytype,
+    tail: anytype,
+    scope: *Scope,
+    feeder: usize,
+    first: usize,
+) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
     const Chains = @typeInfo(@TypeOf(chains)).pointer.child;
     var out: TasksOf(Chains, @TypeOf(tail)) = undefined;
     comptime var next = 0;
     inline for (0..comptime di.types(Chains).len) |i| {
-        const inner = chains[i].tasks(tail, scope);
+        const inner = chains[i].tasks(tail, scope, feeder, first + next);
         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
             out[next] = inner[k];
             next += 1;
@@ -328,17 +350,22 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             }
 
             /// One task per boundary in this chain and its sub-pipes, in
-            /// order: members of a `Scope`.
-            pub fn tasks(refs: Refs, tail: anytype, scope: *Scope) Tasks(@TypeOf(tail)) {
+            /// order: members of a `Scope`, where the first of them has the
+            /// index `first` and the task that pushes into this chain the
+            /// index `feeder`.
+            pub fn tasks(refs: Refs, tail: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
                 var out: Tasks(@TypeOf(tail)) = undefined;
+                // The task that runs the stage being looked at.
+                var current = feeder;
                 comptime var next = 0;
                 inline for (0..n) |i| {
                     if (comptime @hasDecl(stages[i], "zrx_boundary")) {
-                        out[next] = .{ .refs = refs, .tail = tail, .scope = scope };
+                        out[next] = .{ .refs = refs, .tail = tail, .scope = scope, .fed_by = current };
+                        current = first + next;
                         next += 1;
                     } else if (comptime @hasDecl(stages[i], "Tasks")) {
                         const down: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        const inner = refs[i].tasks(down, scope);
+                        const inner = refs[i].tasks(down, scope, current, first + next);
                         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
                             out[next] = inner[k];
                             next += 1;
@@ -373,6 +400,22 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return n;
         }
 
+        /// Whether an item pushed into stage `from` can come to an end on
+        /// the same task: it reaches a terminal stage without crossing a
+        /// boundary. A chain that rejoins a pipe ends nothing itself.
+        fn sinksDirectlyFrom(comptime from: usize) bool {
+            for (from..n) |i| {
+                if (@hasDecl(stages[i], "zrx_boundary")) return false;
+                if (types.items[i + 1] == End)
+                    return if (@hasDecl(stages[i], "sinks_directly")) stages[i].sinks_directly else true;
+            }
+            return false;
+        }
+
+        /// Whether an item pushed into this chain can come to an end on the
+        /// task that pushed it.
+        pub const sinks_directly = sinksDirectlyFrom(0);
+
         fn finishFrom(comptime from: usize, refs: Refs, tail: anytype) !void {
             inline for (from..comptime segmentEnd(from)) |i| {
                 if (@hasDecl(stages[i], "finish")) {
@@ -405,6 +448,11 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 refs: Refs,
                 tail: Tail,
                 scope: *Scope,
+                /// The member that pushes into stage `j` (see `Scope`).
+                fed_by: usize,
+
+                /// Everything this task puts out goes into another boundary.
+                pub const feeds_only_members = !sinksDirectlyFrom(j + 1);
 
                 pub fn io(segment: @This()) Io {
                     return segment.refs[j].taskIo();
@@ -461,8 +509,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.finish(self.refsOf(), tail);
         }
 
-        pub fn tasks(self: *Self, tail: anytype, scope: *Scope) Tasks(@TypeOf(tail)) {
-            return at.tasks(self.refsOf(), tail, scope);
+        pub fn tasks(self: *Self, tail: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
+            return at.tasks(self.refsOf(), tail, scope, feeder, first);
         }
 
         pub fn flush(self: *Self) !void {

@@ -791,3 +791,112 @@ test "cancelling the caller of a queued program cancels every segment and skips 
     try before.events.expect("ipd");
     try after.events.expect("ipd");
 }
+
+// --- working for nothing ------------------------------------------------------
+
+test "a waiting source is cancelled once the pipe behind its queue is done" {
+    var seen: Numbers = .{};
+    var stalled: Stalled = .{};
+    const source = fromProducer(u32, PushThenStall(1).run);
+    try program(source, pipe(.{ queue(2), take(1), subscribe(record) })).run(.{ io, &seen, &stalled });
+    try seen.expect(&.{1});
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+const Busy = struct {
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+};
+
+/// Passes the first item on and then waits over the second, far longer than
+/// a test should take.
+fn stallOnSecond(clock: std.Io, busy: *Busy, value: u32) !u32 {
+    if (value == 2) {
+        try clock.sleep(.fromSeconds(5), .awake);
+        busy.woke_by_itself.store(true, .seq_cst);
+    }
+    return value;
+}
+
+fn pushTwoThenStall(clock: std.Io, stalled: *Stalled, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    _ = try out.push(@as(u32, 2));
+    try clock.sleep(.fromSeconds(5), .awake);
+    stalled.woke_by_itself.store(true, .seq_cst);
+}
+
+test "a segment at work between two queues is cancelled once the last one is done" {
+    var seen: Numbers = .{};
+    var stalled: Stalled = .{};
+    var busy: Busy = .{};
+    const work = pipe(.{
+        queue(2),
+        map(stallOnSecond),
+        queue(2),
+        take(1),
+        subscribe(record),
+    });
+    try program(fromProducer(u32, pushTwoThenStall), work).run(.{ io, &seen, &stalled, &busy });
+    try seen.expect(&.{1});
+    try std.testing.expect(!busy.woke_by_itself.load(.seq_cst));
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+test "queued sub-pipes that are all done end a waiting source, in a branch and in a route" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var stalled: Stalled = .{};
+    const first = pipe(.{
+        queue(2),
+        take(1),
+        subscribe(toLeft),
+    });
+    const second = pipe(.{
+        queue(2),
+        take(1),
+        subscribe(toRight),
+    });
+    const deps = .{ io, &stalled, Left{ .seen = &left }, Right{ .seen = &right } };
+    try program(fromProducer(u32, pushTwoThenStall), pipe(.{branch(.{ first, second })})).run(deps);
+    try left.expect(&.{1});
+    try right.expect(&.{1});
+
+    const cases = route(.{ when(isEven, first), otherwise(second) });
+    try program(fromProducer(u32, pushTwoThenStall), pipe(.{cases})).run(deps);
+    try left.expect(&.{ 1, 2 });
+    try right.expect(&.{ 1, 1 });
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+const Direct = struct {
+    queued_done: std.atomic.Value(bool) = .init(false),
+    interrupted: std.atomic.Value(bool) = .init(false),
+};
+fn noteQueuedDone(direct: *Direct, _: u32) void {
+    direct.queued_done.store(true, .seq_cst);
+}
+
+/// Pushes one item, waits until the queued sub-pipe has had it, gives the
+/// run every chance to interrupt this task, and pushes the rest.
+fn pushAcrossInterruption(clock: std.Io, direct: *Direct, out: anytype) !void {
+    _ = try out.push(@as(u32, 0));
+    while (!direct.queued_done.load(.seq_cst)) std.Thread.yield() catch {};
+    for (0..2000) |_| {
+        clock.checkCancel() catch direct.interrupted.store(true, .seq_cst);
+        std.Thread.yield() catch {};
+    }
+    for (1..5) |value| _ = try out.push(@as(u32, @intCast(value)));
+}
+
+test "a segment with a direct sub-pipe keeps running after its queued one is done" {
+    var seen: Numbers = .{};
+    var direct: Direct = .{};
+    const queued = pipe(.{
+        queue(2),
+        take(1),
+        subscribe(noteQueuedDone),
+    });
+    const work = pipe(.{branch(.{ queued, pipe(.{subscribe(record)}) })});
+    try program(fromProducer(u32, pushAcrossInterruption), work).run(.{ io, &seen, &direct });
+    try seen.expect(&.{ 0, 1, 2, 3, 4 });
+    try std.testing.expect(!direct.interrupted.load(.seq_cst));
+}

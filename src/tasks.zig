@@ -27,6 +27,15 @@ fn Result(comptime Member: type) type {
 ///
 /// In the first two cases the other members are cancelled. In every case all
 /// members have returned before `run` does.
+///
+/// A member may say how it relates to the others:
+///
+///     fed_by: usize                               // a field: the index of the member whose output it takes
+///     pub const feeds_only_members = true;        // everything it puts out goes to members that name it
+///
+/// A member that feeds only members works for nothing once all of those
+/// have returned. It is then cancelled, and what it returns is discarded:
+/// that is not a failure, and the run goes on for the others.
 pub const Scope = struct {
     mutex: Io.Mutex = .init,
     changed: Io.Condition = .init,
@@ -35,6 +44,21 @@ pub const Scope = struct {
     returned: usize = 0,
     /// The run is over and not a success. Read without the mutex.
     failed: std.atomic.Value(bool) = .init(false),
+    /// One per member, for the length of `run`.
+    members: []Member = &.{},
+
+    const Member = struct {
+        /// The member whose output this one takes.
+        fed_by: ?usize,
+        /// Everything it puts out goes to the members it feeds.
+        feeds_only_members: bool,
+        /// How many members it feeds, and how many of those are still running.
+        feeds: usize = 0,
+        feeding: usize = 0,
+        returned: bool = false,
+        /// It works for nothing: the scope cancels it and discards its result.
+        idle: bool = false,
+    };
 
     const Outcome = union(enum) {
         running,
@@ -73,21 +97,34 @@ pub const Scope = struct {
         if (outcome != .done) scope.failed.store(true, .release);
     }
 
-    fn memberReturned(scope: *Scope, io: Io, failed: ?usize) void {
+    fn memberReturned(scope: *Scope, io: Io, index: usize, failed: bool) void {
         scope.mutex.lockUncancelable(io);
         defer scope.mutex.unlock(io);
+        const member = &scope.members[index];
+        member.returned = true;
         scope.returned += 1;
-        if (failed) |index| {
+        if (member.fed_by) |feeder| scope.members[feeder].feeding -= 1;
+        if (failed and !member.idle) {
             if (scope.outcome == .running) scope.set(.{ .failed = index });
         }
         scope.changed.signal(io);
     }
 
-    fn Runner(comptime Member: type) type {
+    /// A member that is still running although everything it puts out goes
+    /// to members that have all returned.
+    fn idleMember(scope: *const Scope) ?usize {
+        for (scope.members, 0..) |member, index| {
+            if (member.returned or member.idle) continue;
+            if (member.feeds_only_members and member.feeds > 0 and member.feeding == 0) return index;
+        }
+        return null;
+    }
+
+    fn Runner(comptime Task: type) type {
         return struct {
-            fn run(member: Member, scope: *Scope, io: Io, index: usize) Result(Member) {
-                const result = member.run();
-                scope.memberReturned(io, if (result) |_| null else |_| index);
+            fn run(task: Task, scope: *Scope, io: Io, index: usize) Result(Task) {
+                const result = task.run();
+                scope.memberReturned(io, index, if (result) |_| false else |_| true);
                 return result;
             }
         };
@@ -106,15 +143,30 @@ pub const Scope = struct {
     ///
     /// Members are cancelled one after another, in order: a task is sent a
     /// cancel request by joining it. One that is slow to notice delays the
-    /// request to those after it.
+    /// request to those after it, and, when it is cancelled for working for
+    /// nothing, anything else the calling task would react to.
     pub fn run(scope: *Scope, io: Io, members: anytype) Errors(@TypeOf(members))!void {
         const types = comptime di.types(@TypeOf(members));
         const n = types.len;
         const Futures = comptime blk: {
             var list: [n]type = undefined;
-            for (types, 0..) |Member, i| list[i] = Io.Future(Result(Member));
+            for (types, 0..) |Task, i| list[i] = Io.Future(Result(Task));
             break :blk @Tuple(&list);
         };
+
+        var state: [n]Member = undefined;
+        inline for (0..n) |i| state[i] = .{
+            .fed_by = if (@hasField(types[i], "fed_by")) members[i].fed_by else null,
+            .feeds_only_members = @hasDecl(types[i], "feeds_only_members") and types[i].feeds_only_members,
+        };
+        for (state) |member| {
+            if (member.fed_by) |feeder| {
+                state[feeder].feeds += 1;
+                state[feeder].feeding += 1;
+            }
+        }
+        scope.members = &state;
+        defer scope.members = &.{};
 
         var futures: Futures = undefined;
         var started: usize = 0;
@@ -131,14 +183,29 @@ pub const Scope = struct {
             scope.mutex.lockUncancelable(io);
             defer scope.mutex.unlock(io);
             while (scope.outcome == .running and scope.returned < n) {
+                if (scope.idleMember()) |index| {
+                    // Marked first, so that whatever it returns on being
+                    // cancelled is not taken for a failure.
+                    state[index].idle = true;
+                    scope.mutex.unlock(io);
+                    inline for (0..n) |i| {
+                        if (i == index) {
+                            if (futures[i].cancel(io)) |_| {} else |_| {}
+                        }
+                    }
+                    scope.mutex.lockUncancelable(io);
+                    continue;
+                }
                 scope.changed.wait(io, &scope.mutex) catch scope.set(.canceled);
             }
             break :waiting scope.outcome;
         };
 
         if (outcome == .running) {
-            // Every member returned, and none with an error.
-            inline for (0..n) |i| try futures[i].await(io);
+            // Every member returned, and none with an error that counts.
+            inline for (0..n) |i| {
+                if (!state[i].idle) try futures[i].await(io);
+            }
             return;
         }
         inline for (0..n) |i| {

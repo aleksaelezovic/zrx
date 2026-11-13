@@ -155,6 +155,6 @@ Each step is one reviewable change, from `main`.
    scope tested through them (cases 4, 5). *Done.*
 2. Segments: the boundary hook, `finish` stopping at a boundary, the source as
    segment 0, `start` removed (cases 1 to 3, 6 to 8, 11 to 15). *Done.*
-3. Rule 6 (cases 9, 10).
+3. Rule 6 (cases 9, 10). *Done.*
 4. The guide, and the design decisions in `AGENTS.md`.
 5. *(proposed)* The stop trigger for sources.
