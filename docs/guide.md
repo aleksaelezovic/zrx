@@ -223,8 +223,7 @@ pipe(.{
   its members and lets everything else through; `anyerror` handles everything.
 - `error.Canceled` is never given to a handler. A write that was interrupted
   because the run is being cancelled is: `std.Io.Writer` reports it as
-  `error.WriteFailed` like any failed write. With `stdout` and `createFile`
-  the segment is still cancelled at its next `Io` call.
+  `error.WriteFailed` like any failed write.
 - A `recover` guards what comes *after* it, up to the next `queue`. Errors on
   the far side of a queue happen in another task and fail the run.
 - A value that a stage *before* the `recover` emits at the end of the stream

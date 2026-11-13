@@ -122,19 +122,18 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
         pub fn Stage(comptime Env: type, comptime In: type) type {
             return struct {
                 buffer: [buffer_size]u8,
-                out: Owned,
+                file: Io.File.Writer,
 
                 pub fn init(self: *@This(), _: *const Op, env: Env) !void {
-                    const io = di.get(env, Io);
                     const file: Io.File = switch (which) {
                         .stdout => .stdout(),
                         .stderr => .stderr(),
                     };
-                    self.out = .init(io, file.writerStreaming(io, &.{}), &self.buffer);
+                    self.file = file.writerStreaming(di.get(env, Io), &self.buffer);
                 }
 
                 pub fn provide(self: *@This(), env: Env) Provides(Env) {
-                    return di.extend(env, Role{ .writer = &self.out.interface });
+                    return di.extend(env, Role{ .writer = &self.file.interface });
                 }
 
                 pub fn push(_: *@This(), item: In, down: anytype) !Flow {
@@ -142,13 +141,13 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
                 }
 
                 pub fn flush(self: *@This()) !void {
-                    return self.out.flush();
+                    try self.file.interface.flush();
                 }
 
                 /// Whatever is written after `flush` (by a `release`, or before a
                 /// failure) still goes out, on a best-effort basis.
                 pub fn deinit(self: *@This()) void {
-                    self.out.interface.flush() catch {};
+                    self.file.interface.flush() catch {};
                 }
             };
         }
@@ -199,16 +198,16 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
                 io: Io,
                 buffer: [buffer_size]u8,
                 file: Io.File,
-                out: Owned,
+                writer: Io.File.Writer,
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) !void {
                     self.io = di.get(env, Io);
                     self.file = try Io.Dir.cwd().createFile(self.io, op.path, .{ .exclusive = op.options.exclusive });
-                    self.out = .init(self.io, self.file.writer(self.io, &.{}), &self.buffer);
+                    self.writer = self.file.writer(self.io, &self.buffer);
                 }
 
                 pub fn provide(self: *@This(), env: Env) Provides(Env) {
-                    return di.extend(env, Role{ .writer = &self.out.interface });
+                    return di.extend(env, Role{ .writer = &self.writer.interface });
                 }
 
                 pub fn push(_: *@This(), item: In, down: anytype) !Flow {
@@ -216,11 +215,11 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
                 }
 
                 pub fn flush(self: *@This()) !void {
-                    return self.out.flush();
+                    try self.writer.interface.flush();
                 }
 
                 pub fn deinit(self: *@This()) void {
-                    self.out.interface.flush() catch {};
+                    self.writer.interface.flush() catch {};
                     self.file.close(self.io);
                 }
             };
@@ -306,67 +305,3 @@ fn FileLines(comptime max_line_bytes: usize) type {
         }
     };
 }
-
-/// The writer in front of a file this library owns: it holds the buffer and
-/// passes what is written on to the file.
-///
-/// `std.Io.Writer` reports every failure as `error.WriteFailed`, a request to
-/// cancel included, and by then the request has been used up: a `recover`
-/// that takes the failed write for an item error would leave its task deaf
-/// to being cancelled. So when a write fails because the task was asked to
-/// cancel, the request is put back. The write still fails; the task's next
-/// cancelation point answers `error.Canceled`.
-const Owned = struct {
-    io: Io,
-    /// Unbuffered: `interface` holds the buffer.
-    file: Io.File.Writer,
-    interface: Io.Writer,
-    /// The last write failed because the task was asked to cancel, and the
-    /// request is pending again.
-    interrupted: bool,
-
-    fn init(io: Io, file: Io.File.Writer, buffer: []u8) Owned {
-        return .{
-            .io = io,
-            .file = file,
-            .interface = .{ .buffer = buffer, .vtable = &.{ .drain = drain } },
-            .interrupted = false,
-        };
-    }
-
-    fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-        const owned: *Owned = @alignCast(@fieldParentPtr("interface", w));
-        owned.interrupted = false;
-        const written = owned.file.interface.writeSplatHeader(w.buffered(), data, splat) catch |err| {
-            if (owned.file.err) |cause| {
-                if (cause == error.Canceled) {
-                    // Not kept: a later failure with another cause must not
-                    // be mistaken for this one.
-                    owned.file.err = null;
-                    owned.io.recancel();
-                    owned.interrupted = true;
-                }
-            }
-            return err;
-        };
-        if (written < w.end) {
-            const rest = w.buffer[written..w.end];
-            @memmove(w.buffer[0..rest.len], rest);
-            w.end = rest.len;
-            return 0;
-        }
-        const consumed = written - w.end;
-        w.end = 0;
-        return consumed;
-    }
-
-    /// A flush that fails because the task was asked to cancel is a
-    /// cancellation, not a write error: the request that was put back is
-    /// taken here.
-    fn flush(owned: *Owned) (Io.Writer.Error || Io.Cancelable)!void {
-        owned.interface.flush() catch |err| {
-            if (owned.interrupted) try owned.io.checkCancel();
-            return err;
-        };
-    }
-};

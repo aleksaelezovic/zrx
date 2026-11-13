@@ -99,8 +99,9 @@ to this file; edit `AGENTS.md`, not copies.
   cancellation once more before it returns. Do not go back to asking tasks
   one after another, nor rely on a request to cancel arriving as
   `error.Canceled`: `std.Io.Writer` reports it as a failed write, and the
-  request is used up. A writer the library owns puts it back (`Owned` in
-  `src/io.zig`); a `recover` over a writer of the user's can still take it. A failure is a task's return value: nothing is
+  request is used up. That is `std`'s behaviour and stays on the spec's
+  "not promised" list. Do not wrap `std` writers to change it: one attempt
+  corrupted short writes and dropped `sendFile`. A failure is a task's return value: nothing is
   reported on the side, and nothing is cast from `anyerror`. There is no
   sequential fallback; a `merge` or `system` of one runs that one in place.
 - **Every task ends its work in one place** (`Scope.Runner`), in a fixed

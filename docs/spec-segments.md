@@ -68,16 +68,12 @@ moment inside the run.
    it" (`tests/flow.zig`).*
 5. **A failure does not wait.** `run` returns without waiting for a source or
    a handler that is waiting in an `Io` call: it is cancelled there, also
-   when another task does not notice that it was asked to cancel. A request
-   that interrupts a write to a writer the library owns (`stdout`,
-   `createFile`) is not used up by that: the write fails, and the task's
-   next `Io` call is still cancelled.
+   when another task does not notice that it was asked to cancel.
    *Tests: "a failure after a queue ends the run while the source is
    waiting", "a failure behind two queues, or in a queued sub-pipe", "every
    task is asked to cancel at once" (`tests/flow.zig`), "a failure ends the
-   run although the segment it interrupts is printing under a recover", "a
-   request to cancel that interrupts a write to the library's own writer is
-   not used up" (`tests/io.zig`).*
+   run although the segment it interrupts is printing under a recover"
+   (`tests/io.zig`).*
 6. **A queue whose task has ended takes no more.** However the task ended
    (its input ran out, it was done, it failed, it was cancelled), a push
    into that queue answers `.done`; no producer is left waiting on it.
@@ -138,11 +134,11 @@ A review finding against one of these is answered by pointing here.
 - That a request to cancel looks like one everywhere. `std.Io.Writer`
   reports every failure as `error.WriteFailed`, so a request that reaches a
   segment inside a write (`print`) comes out as a failed write, and a
-  `recover` may take it for an item error and carry on. With a writer the
-  library owns the request is put back (guarantee 5). With a writer of your
-  own it is used up: the segment still ends the next time it takes from or
-  pushes into a queue, because queues are closed when the run is over, but
-  it is not interrupted in an `Io` call of its own after that.
+  `recover` may take it for an item error and carry on. The request is used
+  up by then: the segment still ends the next time it takes from or pushes
+  into a queue, because queues are closed when the run is over, but it is
+  not interrupted in an `Io` call of its own after that. That is how `std`
+  behaves; the library does not wrap writers to change it.
 - That members on different `Io` instances are asked to cancel together.
   Those on one `Io` are; the instances are told one after another.
 - Exact item counts before a queue: stages before it may have handled more
@@ -183,10 +179,6 @@ Mechanism, not promises. It may change as long as the guarantees hold.
 - **Each segment runs on the `Io` in force at its queue**; segment 0 on the
   `Io` of the first queue. Tasks are started in an `Io.Group` and never run
   on the caller.
-- **The writers the library owns** (`stdout`, `createFile`) sit behind a
-  writer of the library's that puts a request to cancel back when it has
-  interrupted a write, and turns a flush that failed for that reason into
-  `error.Canceled`.
 - **`merge`** tells its scope when a push is answered `.done`; the scope then
   cancels the other sources and ends as a success.
 
@@ -351,11 +343,11 @@ itself.
    closed when the run is over (a request to cancel that `print` reported
    as a failed write, swallowed by a `recover`, hung the run; a task that
    did not notice its request kept the request from the next one).
-9. After a third: the library's own writers put a request back that
-   interrupted a write (closing queues did not help a task that went on to
-   wait in an `Io` call of its own); the run joins its tasks one way only;
-   two tests that depended on which task reached a step first were made
-   deterministic.
+9. After a third: the run joins its tasks one way only; two tests that
+   depended on which task reached a step first were made deterministic. A
+   writer of the library's own that put a cancel request back was added
+   here and removed again: it corrupted short writes and dropped `sendFile`.
+   `src/io.zig` is what `main` has.
 
 Not built, by explicit decision only: the stop trigger for sources; an
 owning chunk so that `batch` can cross a queue.
