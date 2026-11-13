@@ -1,6 +1,7 @@
 //! Byte and line I/O.
 const std = @import("std");
 const zrx = @import("zrx");
+const support = @import("support.zig");
 const io = std.testing.io;
 
 const pipe = zrx.pipe;
@@ -15,6 +16,9 @@ const print = zrx.print;
 const lines = zrx.lines;
 const fileLines = zrx.fileLines;
 const createFile = zrx.createFile;
+const fromProducer = zrx.fromProducer;
+const queue = zrx.queue;
+const recover = zrx.recover;
 
 const Report = struct { writer: *std.Io.Writer };
 const Log = struct { writer: *std.Io.Writer };
@@ -100,6 +104,28 @@ test "createFile and fileLines round-trip through the file system" {
     try std.testing.expectEqualStrings("RED,GREEN,BLUE,", writer.buffered());
 }
 
+fn failAtThree(value: u32) error{Three}!u32 {
+    if (value == 3) return error.Three;
+    return value;
+}
+
+test "a writer writes out what it holds when the run fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/partial.txt", .{tmp.sub_path});
+
+    // The flush step is skipped after a failure; the file's own writer still
+    // writes out, at teardown, what was handed to it before.
+    const failing = program(range(u32, 0, 10), pipe(.{ createFile(Report, path, 64, .{}), map(failAtThree), print(Report, "{d}\n") }));
+    try std.testing.expectError(error.Three, failing.run(.{io}));
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(path, 64), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+}
+
 test "createFile replaces an existing file unless asked to be exclusive" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -146,4 +172,47 @@ test "a missing file fails the run before any item" {
     var writer: std.Io.Writer = .fixed(&buffer);
     const result = program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{s}")})).run(.{ io, &writer });
     try std.testing.expectError(error.FileNotFound, result);
+}
+
+// --- cancellation inside a write --------------------------------------------------
+//
+// `std.Io.Writer` reports every failure as `error.WriteFailed`, a request to
+// cancel included. `support.WriteHeld` holds a write until its task has been
+// asked to cancel, so that this happens at a chosen moment.
+
+const Skipped = struct {
+    count: std.atomic.Value(usize) = .init(0),
+};
+
+/// An ordinary `recover` handler: note the item and go on.
+fn skip(skipped: *Skipped, _: anyerror, _: u32) void {
+    _ = skipped.count.fetchAdd(1, .seq_cst);
+}
+
+/// Fails once the segment behind the queue is writing its first line.
+fn pushThenFailOnceWriting(out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    while (!support.WriteHeld.writing.load(.seq_cst)) std.Thread.yield() catch {};
+    return error.SourceFailed;
+}
+
+test "a failure ends the run although the segment it interrupts is printing under a recover" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/out.txt", .{tmp.sub_path});
+
+    var skipped: Skipped = .{};
+    // A buffer of one byte: every line is written as it is printed. The
+    // request to cancel reaches the segment inside that write and comes out
+    // as a failed write, which the recover takes for an item error. The
+    // segment has no request left, and still comes to an end.
+    const work = pipe(.{
+        createFile(Report, path, 1, .{}),
+        queue(2),
+        recover(skip),
+        print(Report, "{d}\n"),
+    });
+    const result = program(fromProducer(u32, pushThenFailOnceWriting), work).run(.{ support.WriteHeld.over(io), &skipped });
+    try std.testing.expectError(error.SourceFailed, result);
 }

@@ -14,7 +14,8 @@ const lift = core.lift;
 
 /// A backpressure boundary. Upstream pushes into a bounded buffer of
 /// `capacity` items and waits when it is full; a separate task feeds
-/// everything after the queue. Needs `std.Io` among the dependencies.
+/// everything after the queue, and ends the stream for it once the buffer has
+/// drained. Needs `std.Io` among the dependencies.
 pub fn queue(comptime capacity: usize) Queue(capacity) {
     return .{};
 }
@@ -37,9 +38,6 @@ fn Queue(comptime capacity: usize) type {
                 io: Io,
                 buffer: [capacity]In,
                 channel: Io.Queue(In),
-                consumer: ?Io.Future(void),
-                /// The error that stopped the consumer; read only after it is joined.
-                failure: ?anyerror,
 
                 const Self = @This();
                 pub const zrx_boundary = {};
@@ -47,64 +45,50 @@ fn Queue(comptime capacity: usize) type {
                 pub fn init(self: *Self, _: *const Op, env: Env) !void {
                     self.io = di.get(env, Io);
                     self.channel = .init(&self.buffer);
-                    self.consumer = null;
-                    self.failure = null;
                 }
 
-                pub fn start(self: *Self, down: anytype) !void {
-                    self.consumer = try self.io.concurrent(Consumer(@TypeOf(down)).run, .{ self, down });
-                }
-
-                fn Consumer(comptime Down: type) type {
-                    return struct {
-                        fn run(self: *Self, down: Down) void {
-                            // Take whatever is ready in one go rather than one lock per item.
-                            var ready: [@min(capacity, 32)]In = undefined;
-                            consuming: while (true) {
-                                // Closed: upstream ended and the buffer is empty. Canceled: torn down.
-                                const count = self.channel.get(self.io, &ready, 1) catch break;
-                                for (ready[0..count]) |item| {
-                                    const flow = down.push(item) catch |err| {
-                                        self.failure = err;
-                                        break :consuming;
-                                    };
-                                    if (flow == .done) break :consuming;
-                                }
-                            }
-                            // Unblocks a producer waiting for space; it then sees `.done`.
-                            self.channel.close(self.io);
-                        }
-                    };
+                pub fn taskIo(self: *Self) Io {
+                    return self.io;
                 }
 
                 pub fn push(self: *Self, item: In, _: anytype) !Flow {
                     self.channel.putOne(self.io, item) catch |err| switch (err) {
+                        // The far side is done.
                         error.Closed => return .done,
                         error.Canceled => return error.Canceled,
                     };
                     return .more;
                 }
 
-                pub fn finish(self: *Self, down: anytype) !void {
-                    const Failure = @typeInfo(@TypeOf(down.push(@as(In, undefined)))).error_union.error_set;
+                /// No more items will come: the task drains the buffer and
+                /// then ends the stream for what follows.
+                pub fn finish(self: *Self, _: anytype) !void {
                     self.channel.close(self.io);
-                    if (self.consumer) |*consumer| {
-                        consumer.await(self.io);
-                        self.consumer = null;
-                    }
-                    if (self.failure) |err| {
-                        // `failure` only ever holds an error that `down.push` returned.
-                        if (comptime @typeInfo(Failure).error_set.error_names.?.len == 0) unreachable;
-                        return @as(Failure, @errorCast(err));
+                }
+
+                /// The task of the far side. Returns when the near side has
+                /// finished and the buffer is empty, or when `down` is done;
+                /// fails with what `down` failed with.
+                pub fn work(self: *Self, down: anytype) !void {
+                    // Take whatever is ready in one go rather than one lock per item.
+                    var ready: [@min(capacity, 32)]In = undefined;
+                    while (true) {
+                        const count = self.channel.get(self.io, &ready, 1) catch |err| switch (err) {
+                            error.Closed => return,
+                            error.Canceled => return error.Canceled,
+                        };
+                        for (ready[0..count]) |item| {
+                            if (try down.push(item) == .done) return;
+                        }
                     }
                 }
 
-                pub fn deinit(self: *Self) void {
-                    if (self.consumer) |*consumer| {
-                        self.channel.close(self.io);
-                        consumer.cancel(self.io);
-                        self.consumer = null;
-                    }
+                /// The task is gone, or the run is over: a producer waiting
+                /// for space, or pushing later, is answered `.done`, and the
+                /// task runs out of input once the buffer is empty. Safe to
+                /// call again and from any task.
+                pub fn retire(self: *Self) void {
+                    self.channel.close(self.io);
                 }
             };
         }
@@ -166,6 +150,16 @@ fn Branch(comptime Ps: type) type {
                 chains: @Tuple(&chains),
                 live: [n]bool,
 
+                pub const has_boundary = core.anyBoundary(@Tuple(&chains));
+
+                pub fn Tasks(comptime _: type) type {
+                    return core.TasksOf(@Tuple(&chains), Closed);
+                }
+
+                pub fn tasks(self: *@This(), down: anytype) Tasks(@TypeOf(down)) {
+                    return core.tasksOf(&self.chains, Closed{});
+                }
+
                 pub fn init(self: *@This(), op: *const Op, env: Env) !void {
                     self.live = @splat(true);
                     inline for (0..n) |i| {
@@ -174,10 +168,6 @@ fn Branch(comptime Ps: type) type {
                             return err;
                         };
                     }
-                }
-
-                pub fn start(self: *@This(), _: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(Closed{});
                 }
 
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
@@ -328,12 +318,12 @@ fn Route(comptime Cs: type) type {
                 ///
                 /// Once the pipe after the route is done, nothing is forwarded
                 /// to it again, whenever the answer came (a case may emit as
-                /// the run starts, as items flow, or as the stream ends):
+                /// items flow or as the stream ends):
                 /// - every case is marked as wanting no more, which `push`
                 ///   already checks before handing a case an item;
                 /// - with `guarded`, an emission is dropped: that is how cases
-                ///   are started and finished, where each one still runs but
-                ///   what it emits must not get past a pipe that is done.
+                ///   are finished, where each one still runs but what it
+                ///   emits must not get past a pipe that is done.
                 ///   (Checking the flag itself on every push as well would
                 ///   cost nothing per item but makes the optimizer peel the loop.)
                 fn Rejoin(comptime Down: type, comptime guarded: bool) type {
@@ -362,6 +352,17 @@ fn Route(comptime Cs: type) type {
                     return if (rejoins) .{ .down = down, .route = self } else .{};
                 }
 
+                /// Only terminal cases can hold a boundary (see `Out`).
+                pub const has_boundary = core.anyBoundary(@Tuple(&chains));
+
+                pub fn Tasks(comptime _: type) type {
+                    return if (rejoins) @Tuple(&.{}) else core.TasksOf(@Tuple(&chains), Closed);
+                }
+
+                pub fn tasks(self: *Self, down: anytype) Tasks(@TypeOf(down)) {
+                    return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{});
+                }
+
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {
                     self.live = @splat(true);
                     self.done = false;
@@ -373,10 +374,6 @@ fn Route(comptime Cs: type) type {
                             return err;
                         };
                     }
-                }
-
-                pub fn start(self: *Self, down: anytype) !void {
-                    inline for (0..n) |i| try self.chains[i].start(self.tail(down, true));
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {

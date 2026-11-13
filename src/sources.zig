@@ -167,8 +167,11 @@ fn Emitter(comptime T: type, comptime Down: type) type {
 }
 
 /// The items of several sources, interleaved as they arrive; each source keeps
-/// its own order. Sources run together (see `tasks.all`) and take turns
-/// pushing, so the pipe still sees one item at a time. Needs `std.Io`.
+/// its own order. Sources run together, each as a task (see `tasks.Scope`),
+/// and take turns pushing, so the pipe still sees one item at a time. Once a
+/// push is answered `.done`, or a source fails, the others are cancelled
+/// where they wait.
+/// Needs `std.Io` with concurrency: `error.ConcurrencyUnavailable` otherwise.
 pub fn merge(sources: anytype) Merge(Sources(@TypeOf(sources))) {
     var out: Sources(@TypeOf(sources)) = undefined;
     inline for (0..sources.len) |i| out[i] = sources[i];
@@ -204,7 +207,8 @@ fn Merge(comptime Ss: type) type {
             if (comptime !di.has(Env, Io)) @compileError("merge: needs `std.Io` to run sources together; pass `io` to `run(.{ io, ... })`");
             const io = di.get(env, Io);
 
-            var turn: Turn = .{ .mutex = .init, .stopped = false };
+            var scope: tasks.Scope = .{};
+            var turn: Turn = .{ .mutex = .init, .stopped = false, .scope = &scope };
             const Gate = Serialized(Item, @TypeOf(down));
             const gate: Gate = .{ .io = io, .turn = &turn, .down = down };
 
@@ -215,7 +219,7 @@ fn Merge(comptime Ss: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .source = &self.sources[i], .env = env, .gate = gate };
-            return tasks.all(io, group);
+            return scope.run(io, group);
         }
     };
 }
@@ -224,6 +228,9 @@ const Turn = struct {
     mutex: Io.Mutex,
     /// Set once the pipe wants no more or a push failed; every source then stops.
     stopped: bool,
+    /// The sources' scope, which is told when the pipe wants no more: a
+    /// source that is not pushing would never find out here.
+    scope: *tasks.Scope,
 };
 
 fn Serialized(comptime T: type, comptime Down: type) type {
@@ -237,9 +244,12 @@ fn Serialized(comptime T: type, comptime Down: type) type {
             defer gate.turn.mutex.unlock(gate.io);
             if (gate.turn.stopped) return .done;
             errdefer gate.turn.stopped = true;
-            const flow = try gate.down.push(item);
-            if (flow == .done) gate.turn.stopped = true;
-            return flow;
+            if (try gate.down.push(item) == .done) {
+                gate.turn.stopped = true;
+                gate.turn.scope.done(gate.io);
+                return .done;
+            }
+            return .more;
         }
     };
 }

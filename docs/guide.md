@@ -86,10 +86,11 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 ```
 
 `system` runs its programs together with the same dependencies and returns when
-all have finished. The first failure cancels the others and is returned. A
-system is itself runnable, so systems nest. Programs are started with
-`Io.async`: they run concurrently when the `Io` can do so and one after another
-when it cannot.
+all have finished. The first failure cancels the others and is returned; a
+program that had ended before that has flushed. A system is itself runnable,
+so systems nest. With more than one program, each runs as a task of its own,
+so the `Io` must be able to run tasks concurrently; with one that cannot,
+`run` returns `error.ConcurrencyUnavailable`.
 
 ## Sources
 
@@ -100,7 +101,7 @@ when it cannot.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io`. |
+| `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -195,8 +196,8 @@ const wanted = all(.{ isHot, not(isMuted) });
 
 A handler that returns an error fails the run: the error comes out of `run`,
 after every resource has been released. `run`'s error set is inferred from your
-handlers and the operators you used; it is never `anyerror`, and a program
-whose handlers cannot fail has an empty one.
+handlers and the operators you used: it is `anyerror` only if a handler's is,
+and a program whose handlers cannot fail has an empty one.
 
 There are two ways to handle an error instead. To keep the item as a value of
 your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
@@ -220,11 +221,15 @@ pipe(.{
 
 - The handler's error parameter selects what it handles: an error set handles
   its members and lets everything else through; `anyerror` handles everything.
-- `error.Canceled` is never given to a handler.
+- `error.Canceled` is never given to a handler. A write that was interrupted
+  because the run is being cancelled is: `std.Io.Writer` reports it as
+  `error.WriteFailed` like any failed write.
 - A `recover` guards what comes *after* it, up to the next `queue`. Errors on
   the far side of a queue happen in another task and fail the run.
-- Errors raised while the stream is finishing (a final `fold` value, a flush)
-  do not belong to an item and fail the run.
+- A value that a stage *before* the `recover` emits at the end of the stream
+  (a final `fold` value) is an item like any other. Errors of a later
+  stage's own end of stream, and of a flush, do not belong to an item and
+  fail the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
 
@@ -235,13 +240,35 @@ another item. `take` and `takeWhile` answer `.done`; sources stop when they see
 it; `branch` and `route` answer `.done` once every sub-pipe has. The stream then
 finishes normally: `fold` emits, writers flush.
 
+`.done` is a hint that sticks: a stage that answered it keeps answering it,
+and whoever is answered it stops pushing items. A value emitted at the end of
+the stream (`fold`, `batch`) is still pushed and is refused by the stage that
+is done; a handler between the two may run for it. (A `route` whose cases
+rejoin drops such a value itself once the pipe after it is done.)
+
+To stop a run from outside, cancel the task that called `run`. With a queue,
+`run` then returns `error.Canceled` without flushing (see
+[what a run guarantees](#what-a-run-guarantees)); without one, the handlers
+and the source see `error.Canceled` from their own `Io` calls. To stop
+*gracefully*, end the source: when a source returns, everything it pushed is
+still handled (unless a stage is done, or something fails), queues drain,
+and the stream finishes and flushes as usual.
+
 ## Concurrency and backpressure
 
-Without `queue`, a program is one loop on the caller's task. `queue(n)` is the
-only task boundary: the stages before it push into a buffer of `n` items and
-wait while it is full; a second task feeds the stages after it. That waiting is
+Without `queue` (and without `merge`, whose sources are tasks), a program is
+one loop on the caller's task. `queue(n)` is the only task boundary in a pipe: the stages before it push into a buffer of `n` items and
+wait while it is full; another task feeds the stages after it. That waiting is
 the backpressure: a slow consumer slows the source instead of dropping items or
 growing memory.
+
+A queue splits the pipe into *segments*. The source with the stages up to the
+first queue is one segment, and each queue starts the next. With a queue in
+the pipe every segment runs as a task of its own, the source included, and
+`run` only waits for them: no item handler runs on the task that called `run`
+(a `resource` is still acquired and released there). The
+`Io` must be able to run tasks concurrently (`error.ConcurrencyUnavailable`
+otherwise).
 
 `branch` itself is a plain loop over its sub-pipes. A sub-pipe becomes
 concurrent by starting with a queue:
@@ -261,15 +288,49 @@ branch(.{
 })
 ```
 
-- Each side of a queue runs on one task, so the stages of one side never run
-  concurrently with each other. Handlers on *different* sides do; a dependency
+- The stages of one side of a queue never run concurrently with each other:
+  one task runs them (under a `merge`, one source at a time). Handlers on *different* sides do; a dependency
   shared across a queue or between programs of a system must be safe for that.
 - Items cross a queue by value. A slice item must stay valid until consumed;
   slices from `batch` and `lines` are not, so copy before queueing them.
-- When the stream ends, the queue drains before anything after it finishes.
-  When the far side fails or is done, the near side stops.
+- A queue's task runs on the `Io` in force where the queue stands, so
+  `provide(io)` before a queue decides where its far side runs.
+- Stages before a queue may have handled more items than the stages after it
+  take: the queue holds some, and the source runs ahead.
+- Cancellation is cooperative: a handler or source that never calls into
+  `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a queue (the pipe after
   the route would be pushed to from two tasks); put the queue after the route.
+- When the stages after a queue are done (`take`), the segment before it
+  finds out at its next push. A source that is waiting for input at that
+  moment keeps waiting until its next item or its end.
+
+### What a run guarantees
+
+For one program with a queue in its pipe:
+
+- **On success**, every stage has finished once and then flushed once. The
+  end of the stream travels with the items: a segment that runs out of input
+  finishes its own stages and closes its queue, the next one drains the
+  queue and finishes, and so on. Flushing starts after the last segment has
+  finished.
+- **On an error**, `run` returns it and the flush step is skipped (if a
+  flush is what failed, the stages not yet flushed stay unflushed). Do not
+  rely on whether a stage finished: a segment may have ended its stream
+  before the failure, or be cancelled part-way. Writers the library owns
+  still write out what they hold when they are torn down.
+- **Which error**: the first failure of any segment, or `error.Canceled` if
+  the task that called `run` was asked to cancel before the run had joined
+  its tasks.
+- **Always**, every task has returned before anything is torn down.
+- **A failure does not wait** for a source or a handler that is waiting in
+  an `Io` call: it is cancelled there. Handlers may still run for a few
+  items that were already in a queue.
+- **A queue whose far side has ended**, for whatever reason, takes no more:
+  a push into it answers `.done`.
+
+That list is short on purpose. [The segments spec](spec-segments.md) is the
+full statement, with what is *not* promised.
 
 ## Input and output
 
@@ -296,14 +357,16 @@ A line is valid until the next one is read.
 A run goes through these steps:
 
 1. every stage is initialized, in order (`resource` acquires here);
-2. tasks are started (`queue`);
-3. the source pushes items;
-4. on a normal end, stages finish in order (`fold` and `batch` emit, queues
+2. the source pushes items (with a `queue`, the source and each side of a
+   queue run as tasks, and `run` waits for them);
+3. on a normal end, stages finish in order (`fold` and `batch` emit, queues
    drain), then owned writers flush, last stage first;
-5. always: stages are torn down in reverse order (`resource` releases, files close).
+4. always: stages are torn down in reverse order (`resource` releases, files close).
 
-A failure at any step skips to 5. A resource is released after everything
-downstream of it is done, so a handler never sees a released value.
+An error ends the run at step 4, skipping the flush step. Every task has
+returned before anything is torn down, and a resource is released after
+everything downstream of it is done, so a handler never sees a released
+value.
 
 ## Writing your own
 
@@ -345,10 +408,14 @@ const Counted = struct {
 };
 ```
 
-A stage may also declare `start`, `finish`, `flush`, `deinit` and, with
+A stage may also declare `finish`, `flush`, `deinit` and, with
 `Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
+
+An operator that hands items to a task of its own, as `queue` does, declares
+a task boundary; one that holds sub-pipes, as `branch` does, passes their
+tasks on. Both contracts are in [`src/pipe.zig`](../src/pipe.zig).
 
 **A source** declares `zrx_source`, `Item`, and
 `run(self, env, down) !void`, which pushes until it has no more or a push
@@ -400,6 +467,11 @@ Two things make it work, and are worth knowing when writing an operator:
   `batch` is a counter stage followed by a buffer stage for this reason.
 
 ## Not here yet
+
+Stopping a source from outside, so that a signal or a timeout ends a run
+gracefully, is proposed in [the segments spec](spec-segments.md) and not
+built. Nor is interrupting a source that waits for input once the stages
+behind a queue are done; the spec says why.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

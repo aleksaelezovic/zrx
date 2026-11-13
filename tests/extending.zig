@@ -84,10 +84,6 @@ const Echoed = struct {
                 self.journal.add('i');
             }
 
-            pub fn start(self: *@This(), _: anytype) !void {
-                self.journal.add('s');
-            }
-
             pub fn push(self: *@This(), item: In, down: anytype) !zrx.Flow {
                 self.journal.add('p');
                 if (try down.push(item) == .done) return .done;
@@ -115,7 +111,7 @@ test "stage hooks run in the documented order" {
     var journal: Journal = .{};
     try program(range(u32, 1, 3), pipe(.{ echoed(9), subscribe(record) })).run(.{ &seen, &journal });
     try seen.expect(&.{ 1, 1, 2, 2, 9 });
-    try journal.expect("isppfFd");
+    try journal.expect("ippfFd");
 }
 
 fn failAtTwo(value: u32) error{Two}!u32 {
@@ -128,7 +124,7 @@ test "a failed run skips finish and flush but not deinit" {
     var journal: Journal = .{};
     const result = program(range(u32, 1, 3), pipe(.{ echoed(9), map(failAtTwo), subscribe(record) })).run(.{ &seen, &journal });
     try std.testing.expectError(error.Two, result);
-    try journal.expect("isppd");
+    try journal.expect("ippd");
 }
 
 // --- a source -----------------------------------------------------------------
@@ -181,4 +177,26 @@ test "a custom composite handler forwards dependencies" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), subscribe(record) })).run(.{ &seen, Limit{ .max = 3 } });
     try seen.expect(&.{ 0, 1, 2 });
+}
+
+// --- a task boundary of your own -------------------------------------------------
+
+test "a boundary written against the contract splits the pipe like a queue" {
+    var seen: Numbers = .{};
+    const io = std.testing.io;
+    try program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.fold(@as(u32, 0), sumUp), subscribe(record) })).run(.{ io, &seen });
+    try seen.expect(&.{190});
+
+    var taken: Numbers = .{};
+    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ support.handoff(2), zrx.take(3), subscribe(record) })).run(.{ io, &taken });
+    try taken.expect(&.{ 0, 1, 2 });
+
+    var failed: Numbers = .{};
+    const result = program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.map(failAtTwo), subscribe(record) })).run(.{ io, &failed });
+    try std.testing.expectError(error.Two, result);
+    try failed.expect(&.{ 0, 1 });
+}
+
+fn sumUp(sum: u32, value: u32) u32 {
+    return sum + value;
 }

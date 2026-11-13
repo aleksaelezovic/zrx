@@ -160,15 +160,25 @@ test "a system runs every program with the same dependencies" {
     try right.expect(&.{ 7, 8, 9 });
 }
 
+test "a merge of one source runs it in place and needs no Io" {
+    var seen: Numbers = .{};
+    try program(merge(.{range(u32, 0, 3)}), pipe(.{subscribe(record)})).run(.{&seen});
+    try seen.expect(&.{ 0, 1, 2 });
+}
+
 test "systems nest, and a system of one needs no Io" {
+    // Programs of a system run at the same time: each writes to its own log.
     var left: Numbers = .{};
     var right: Numbers = .{};
+    var seen: Numbers = .{};
     const a = program(fromValue(@as(u32, 1)), pipe(.{subscribe(toLeft)}));
     const b = program(fromValue(@as(u32, 2)), pipe(.{subscribe(toRight)}));
+    const c = program(fromValue(@as(u32, 3)), pipe(.{subscribe(record)}));
     try system(.{a}).run(.{Left{ .seen = &left }});
-    try system(.{ system(.{a}), system(.{ b, b }) }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try system(.{ system(.{a}), system(.{ b, c }) }).run(.{ io, &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 1, 1 });
-    try right.expect(&.{ 2, 2 });
+    try right.expect(&.{2});
+    try seen.expect(&.{3});
 }
 
 fn patiently(clock: std.Io, out: anytype) !void {
@@ -179,7 +189,7 @@ fn patiently(clock: std.Io, out: anytype) !void {
     }
 }
 
-test "the first failure in a system is returned and stops the others" {
+test "the first failure in a system is returned" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
@@ -194,7 +204,7 @@ fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
     return false;
 }
 
-test "run has a precise error set, never anyerror" {
+test "run has a precise error set" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const queued = program(range(u32, 0, 2), pipe(.{ queue(2), map(failAtTwo), subscribe(toLeft) }));
@@ -211,4 +221,124 @@ test "run has a precise error set, never anyerror" {
 
     const Both = @typeInfo(@TypeOf(system(.{ queued, plain }).run(deps))).error_union.error_set;
     try std.testing.expectEqual(@as(usize, 3), comptime @typeInfo(Both).error_set.error_names.?.len);
+}
+
+// --- supervision ------------------------------------------------------------
+//
+// Nothing here measures time. A party that should be interrupted waits far
+// longer than a test should take and records whether it woke by itself.
+
+const Idle = struct {
+    /// Producers that have begun to wait.
+    waiting: std.atomic.Value(usize) = .init(0),
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+};
+
+fn idleThenPush(clock: std.Io, idle: *Idle, out: anytype) !void {
+    _ = idle.waiting.fetchAdd(1, .seq_cst);
+    try clock.sleep(.fromSeconds(5), .awake);
+    idle.woke_by_itself.store(true, .seq_cst);
+    _ = try out.push(@as(u32, 2));
+}
+
+fn idleProgram() @TypeOf(program(fromProducer(u32, idleThenPush), pipe(.{subscribe(toRight)}))) {
+    return program(fromProducer(u32, idleThenPush), pipe(.{subscribe(toRight)}));
+}
+
+test "merge cancels a source that is not pushing once the pipe is done" {
+    var seen: Numbers = .{};
+    var idle: Idle = .{};
+    const first = merge(.{ fromValue(@as(u32, 7)), fromProducer(u32, idleThenPush) });
+    try program(first, pipe(.{ take(1), subscribe(record) })).run(.{ io, &seen, &idle });
+    const second = merge(.{ fromProducer(u32, idleThenPush), fromValue(@as(u32, 8)) });
+    try program(second, pipe(.{ take(1), subscribe(record) })).run(.{ io, &seen, &idle });
+    try seen.expect(&.{ 7, 8 });
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "merge cancels a source that is not pushing once another source's push fails" {
+    var seen: Numbers = .{};
+    var idle: Idle = .{};
+    const sources = merge(.{ fromValue(@as(u32, 2)), fromProducer(u32, idleThenPush) });
+    const result = program(sources, pipe(.{ map(failAtTwo), subscribe(record) })).run(.{ io, &seen, &idle });
+    try std.testing.expectError(error.Two, result);
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "a system returns a failure while another program is waiting" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
+    const deps = .{ io, &idle, Left{ .seen = &left }, Right{ .seen = &right } };
+    try std.testing.expectError(error.Two, system(.{ failing, idleProgram() }).run(deps));
+    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing }).run(deps));
+    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing, idleProgram() }).run(deps));
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "members never run on the supervising task, however busy the async pool is" {
+    // With no async capacity, `Io.async` would run a member on the caller,
+    // which then could not see the other one fail.
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .async_limit = .nothing });
+    defer backend.deinit();
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), subscribe(toLeft) }));
+    const deps = .{ backend.io(), &idle, Left{ .seen = &left }, Right{ .seen = &right } };
+    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing }).run(deps));
+
+    var seen: Numbers = .{};
+    const sources = merge(.{ fromProducer(u32, idleThenPush), fromValue(@as(u32, 7)) });
+    try program(sources, pipe(.{ take(1), subscribe(record) })).run(.{ backend.io(), &seen, &idle });
+    try seen.expect(&.{7});
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "without concurrency, a system and a merge fail before anything runs" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
+    defer backend.deinit();
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const a = program(fromValue(@as(u32, 1)), pipe(.{subscribe(toLeft)}));
+    const b = program(fromValue(@as(u32, 2)), pipe(.{subscribe(toRight)}));
+    const together = system(.{ a, b }).run(.{ backend.io(), Left{ .seen = &left }, Right{ .seen = &right } });
+    try std.testing.expectError(error.ConcurrencyUnavailable, together);
+    try left.expect(&.{});
+    try right.expect(&.{});
+
+    var seen: Numbers = .{};
+    const merged = program(merge(.{ fromValue(@as(u32, 1)), fromValue(@as(u32, 2)) }), pipe(.{subscribe(record)}));
+    try std.testing.expectError(error.ConcurrencyUnavailable, merged.run(.{ backend.io(), &seen }));
+    try seen.expect(&.{});
+}
+
+test "running out of concurrency part-way cancels the members already started" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .limited(1) });
+    defer backend.deinit();
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const result = system(.{ idleProgram(), idleProgram() }).run(.{ backend.io(), &idle, Right{ .seen = &right } });
+    try std.testing.expectError(error.ConcurrencyUnavailable, result);
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
+}
+
+test "cancelling the caller cancels every member" {
+    var right: Numbers = .{};
+    var idle: Idle = .{};
+    const both = system(.{ idleProgram(), idleProgram() });
+    const Both = @TypeOf(both);
+    const Deps = struct { std.Io, *Idle, Right };
+    const Caller = struct {
+        fn run(members: *const Both, deps: Deps) ?anyerror {
+            members.run(deps) catch |err| return err;
+            return null;
+        }
+    };
+    var caller = try io.concurrent(Caller.run, .{ &both, Deps{ io, &idle, Right{ .seen = &right } } });
+    // Both members are waiting, so the caller is past starting them.
+    while (idle.waiting.load(.seq_cst) < 2) std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
+    try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }

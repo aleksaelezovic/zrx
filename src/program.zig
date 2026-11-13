@@ -51,13 +51,51 @@ pub fn Program(comptime S: type, comptime P: type) type {
                 pub fn call(body: @This(), refs: Frame.Refs) !void {
                     try Frame.at.init(refs, &body.program.pipe.ops, body.env);
                     defer Frame.at.deinit(refs);
-                    try Frame.at.start(refs, Closed{});
-                    try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
-                    try Frame.at.finish(refs, Closed{});
+                    if (comptime !Frame.has_boundary) {
+                        // The whole program is one loop on this task.
+                        try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
+                        try Frame.at.finish(refs, Closed{});
+                    } else {
+                        // The pipe crosses a task boundary: the source and
+                        // every boundary's task run as members of one scope,
+                        // and this task only waits. Each segment ends the
+                        // stream for its own stages; all of them have
+                        // returned before anything is flushed or torn down.
+                        // The feed runs on the `Io` of the first boundary.
+                        const segments = Frame.at.tasks(refs, Closed{});
+                        const io = segments[0].io();
+                        const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .on = io };
+                        var scope: tasks.Scope = .{};
+                        try scope.run(io, .{feed} ++ segments);
+                    }
                     try Frame.at.flush(refs);
                 }
             };
             return Frame.withLocals(Body{ .program = self, .env = env });
+        }
+    };
+}
+
+/// Segment 0 of a program whose pipe has a task boundary, as a member of a
+/// `tasks.Scope`: the source and the stages up to the first boundary. Its
+/// work is the source; its end is the end of the stream for those stages.
+fn Feed(comptime S: type, comptime Env: type, comptime Frame: type) type {
+    return struct {
+        source: *const S,
+        env: Env,
+        refs: Frame.Refs,
+        on: Io,
+
+        pub fn io(feed: @This()) Io {
+            return feed.on;
+        }
+
+        pub fn run(feed: @This()) !void {
+            return feed.source.run(feed.env, Entry(Frame, S.Item){ .refs = feed.refs });
+        }
+
+        pub fn end(feed: @This()) !void {
+            return Frame.at.finish(feed.refs, Closed{});
         }
     };
 }
@@ -73,9 +111,11 @@ fn Entry(comptime Frame: type, comptime Item: type) type {
     };
 }
 
-/// Several programs (or systems) run together with the same dependencies.
-/// Returns when all have completed; the first failure cancels the rest.
-/// With more than one member, `std.Io` must be among the dependencies.
+/// Several programs (or systems) run together with the same dependencies,
+/// each as a task (see `tasks.Scope`). Returns when all have completed; the
+/// first failure cancels the rest. With more than one member, `std.Io` must
+/// be among the dependencies and able to run tasks concurrently
+/// (`error.ConcurrencyUnavailable` otherwise).
 pub fn system(programs: anytype) System(Programs(@TypeOf(programs))) {
     var out: Programs(@TypeOf(programs)) = undefined;
     inline for (0..programs.len) |i| out[i] = programs[i];
@@ -114,7 +154,8 @@ pub fn System(comptime Ps: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .program = &self.programs[i], .env = env };
-            return tasks.all(di.get(env, Io), group);
+            var scope: tasks.Scope = .{};
+            return scope.run(di.get(env, Io), group);
         }
     };
 }

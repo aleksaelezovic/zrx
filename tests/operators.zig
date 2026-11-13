@@ -238,7 +238,15 @@ fn failOnFinish(_: u32) error{Late}!void {
     return error.Late;
 }
 
-test "an error while the stream is finishing is not an item error" {
+test "a final value from before a recover is an item like any other" {
+    var rejected: Numbers = .{};
+    // The fold stands before the recover: what it emits when the stream ends
+    // passes through the recover, which guards what fails for it.
+    try program(range(u32, 0, 4), pipe(.{ fold(@as(u32, 0), add), recover(reject), subscribe(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
+    try rejected.expect(&.{6});
+}
+
+test "an error of a later stage's own end of stream is not an item error" {
     var rejected: Numbers = .{};
     const result = program(range(u32, 0, 3), pipe(.{ recover(reject), fold(@as(u32, 0), add), subscribe(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
     try std.testing.expectError(error.Late, result);
