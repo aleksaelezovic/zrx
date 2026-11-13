@@ -158,8 +158,22 @@ not by a change.
 
 ## Costs
 
-- With a queue, the source runs as a task so that it can be cancelled. The
-  queue benchmark went from about 36 to about 53 ns/item on macOS aarch64.
+- A queue costs what `std.Io.Queue` costs when two threads contend for it.
+  Measured with std alone on macOS aarch64: about 9 ns/item with no second
+  thread, 45 to 60 with one put per item against a consumer on another
+  thread, about 10 when the producer puts 32 items at a time. The producer
+  takes the queue's lock once per item, and when the consumer has caught up
+  it sleeps and has to be woken: the benchmark's pipeline makes roughly 70
+  to 130 futex calls per 1,000 items, on `main` and here alike.
+- No cost is attributed to running the source as a task. The project's
+  benchmark reads about 36 ns/item on `main` and 47 to 57 here, but another
+  harness of the same pipeline reads 35 to 37 here and 43 to 47 on `main`,
+  and std alone shows no difference between producing on the calling thread
+  and producing on a task. The figure moves within the contended band with
+  the timing of the two threads. (An earlier version of this section, the
+  commit message of step 2 and the description of PR 5 said the source
+  running as a task cost about 17 ns/item. That was one benchmark read as a
+  cause.)
 - Tasks are cancelled one after another: `std.Io` sends a cancel request by
   joining the task. One that is slow to notice delays the request to the
   others; the run returns at the same moment either way.
