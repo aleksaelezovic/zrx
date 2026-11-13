@@ -61,10 +61,20 @@ to this file; edit `AGENTS.md`, not copies.
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
 - **A queue splits a pipe into segments; each segment is a task.**
-  [docs/spec-segments.md](docs/spec-segments.md) is the design record: its
-  rules, what is *not promised*, and the acceptance cases. Segment 0 is the
-  source and the stages up to the first queue. A program without a queue is
-  a plain loop on the caller's task.
+  [docs/spec-segments.md](docs/spec-segments.md) is the design record.
+  Segment 0 is the source and the stages up to the first queue. A program
+  without a queue is a plain loop on the caller's task.
+- **What a run guarantees is written in one place**: the "Guarantees" list
+  of the spec. The guide repeats it in short and links there; this file and
+  the comments in `src/` say how it is done, not what is promised. Do not
+  restate a guarantee anywhere else. Each review of PR 5 found a copy that
+  had drifted or had been worded more strongly than the code.
+- **Promise only what a caller can observe**: what `run` returns, what was
+  flushed, what has been torn down, whether `run` returns. Never a moment
+  inside the run, and never "always", "never after" or "whatever else"
+  about two tasks: between a look and the act that follows it, the other
+  task can move. The caller's cancellation is looked at where `run`
+  returns, for that reason.
 - **The end of the stream travels with the data.** `finish` runs in order up
   to and including a boundary, on the task that pushed into it; the
   boundary's task finishes what follows. No task finishes, joins or waits
@@ -72,55 +82,30 @@ to this file; edit `AGENTS.md`, not copies.
   after every task has returned.
 - **One scope supervises every group of tasks** (`tasks.Scope`): the segments
   of a program, the sources of `merge`, the programs of `system`. Members are
-  started with `Io.concurrent` and never run on the supervising task, which
-  only waits. The first outcome is the result: a member returning an error,
-  or a member saying the group is done (`merge`, when the pipe answers
-  `.done`); the rest are cancelled and joined. There is no sequential
-  fallback: an `Io` that cannot start a member is
-  `error.ConcurrencyUnavailable`. A cancel request for the caller that is
-  there when the scope settles the outcome wins; once the outcome is
-  settled the scope only joins. A failure is a task's return value: nothing
-  is reported on the side, and nothing is cast from `anyerror`. A member is
-  started and joined on its own `Io`.
+  started with `Io.concurrent`, each on its own `Io`, and never run on the
+  supervising task. That task waits in one place, which can be cancelled;
+  then it joins every member and looks at its own cancellation once more
+  before it returns. A failure is a task's return value: nothing is
+  reported on the side, and nothing is cast from `anyerror`. There is no
+  sequential fallback.
 - **Every task ends its work in one place** (`Scope.Runner`), in a fixed
   order: `run`; under the mutex, put a failure on record; `retire` (nobody
-  waits on it again: a queue closes); under the mutex, decide whether to
-  end; `end` (finish the segment's stages). A segment and
-  an operator only say what each step is. Do not decide any of it elsewhere:
-  the first review of PR 5 found three defects that were one, a segment's
-  end handled in three files (the queue closed itself only when done, the
-  segment looked at a flag set after it had returned, the program picked the
-  `Io`).
-- **Decide right before acting, and promise only that.** Two tasks cannot
-  agree on "never after X": between a look and the act, the other can move.
-  Every decision is taken under the scope's lock, as the last thing before
-  what it allows and after every step that can take time (a join, a
-  `retire`), and reads all it depends on then, the caller's cancellation
-  included. The spec lists them in one table. Never write "always",
-  "never after" or "whatever else has happened" about two tasks: say which
-  decision it is and when it is taken. Both reviews of PR 5 found promises
-  worded as absolutes, and decisions taken one step too early.
-- **After a failure is on record no segment decides to end its stream**,
-  and nothing flushes. That is all a failure promises: handlers may run for
-  items already queued until the cancel request arrives, and an end that
-  has begun is cancelled, not undone.
-- **Working for nothing is decided from a static tree.** A member names who
-  feeds it (`fed_by`) and whether everything it puts out goes to other
-  members (`feeds_only_members`, from `sinks_directly`). Once all of those
-  have returned the scope cancels it if it is still at work. That is only a
-  faster way of learning "done": the member then retires and ends its
-  stream as if a push had told it, and nothing may depend on which it was.
-  Stages are not asked anything from another task.
-- **Invariants before cases.** `docs/spec-segments.md` lists what must hold
-  whatever happens. A defect is first matched to the invariant it breaks,
-  and the fix restores that invariant where it is decided, for every shape,
-  not for the reported one. If it breaks none, an invariant is missing or
-  the finding is against something not promised.
+  waits on it again: a queue closes); under the mutex, as the last thing
+  before it, decide whether to end; `end` (finish the segment's stages). A
+  segment and an operator only say what each step is. A decision that turns
+  out to be taken at the wrong moment is moved in that sequence, not patched
+  where the symptom showed.
+- **Not in the library: interrupting a part of the pipe because what it
+  feeds is done.** PR 5 had it and took it out; the spec says why ("Taken
+  out"). It needs a task to be cancelled and still end its stream, which
+  put phases, a retired state, cancel protection and a join that cannot be
+  cancelled into the scope, and it drew most of the review findings. It
+  returns only by explicit decision, as a PR of its own.
 - **Do not add to the stage contract for concurrency.** A boundary stage has
   `zrx_boundary`, `work`, `retire` and `taskIo`; a stage with sub-pipes has
-  `has_boundary`, `sinks_directly`, `Tasks` and `tasks`. A review finding
-  against something the spec lists as not promised is answered by pointing
-  there, not by a change.
+  `has_boundary`, `Tasks` and `tasks`. A review finding against something
+  the spec lists as not promised is answered by pointing there, not by a
+  change.
 - **Lifecycle.** `init` in order, pushes, then on a normal end `finish` in
   order and `flush` in reverse; always `deinit` in reverse. There is no
   `start` hook: no stage emits before the first item.
@@ -181,24 +166,28 @@ to this file; edit `AGENTS.md`, not copies.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
-  timing or scheduling order for their assertions. Things that run at the
-  same time (programs of a system, segments, queued sub-pipes) get a log
-  each: the test logs are not synchronized. To show that something is
-  interrupted, have it wait far longer than the test and record whether it
-  woke by itself, rather than measuring how long the run took. To show that
-  a check stops something, the party that waits for the event must wait
-  without sleeping (spin on `checkCancel` or on shared state with
-  `std.Thread.yield() catch {}`): if it sleeps it is cancelled where it
-  sleeps, and the test passes without the check. Before a test cancels a
-  task, it waits until that task has started everything it starts.
+  timing or scheduling order, neither to pass nor to catch what they are
+  for. Never wait a length of time or a number of yields for something to
+  have happened: wait on an event the test can observe. To put a request at
+  a chosen point of another task, hold that task there with a test `Io`
+  (`support.JoinHeld` holds a task at its join until it has been asked to
+  cancel). The third review of PR 5 found a test that waited 2000 yields
+  and failed when the test thread was held up.
+- Things that run at the same time (programs of a system, segments, queued
+  sub-pipes) get a log each: the test logs are not synchronized. To show
+  that something is interrupted, have it wait far longer than the test and
+  record whether it woke by itself, rather than measuring how long the run
+  took. To show that a check stops something, the party that waits for the
+  event must wait without sleeping (spin on `checkCancel` or on shared
+  state): if it sleeps it is cancelled where it sleeps, and the test passes
+  without the check. Before a test cancels a task, it waits until that task
+  has started everything it starts.
 - A change to the scope or to segments is checked by removing each safeguard
-  in turn and seeing a test fail, and by repeating the `flow` and `programs`
-  suites a few hundred times in Debug and ReleaseFast under a watchdog that
-  also fails when the binary is missing. A hang is a failure.
+  in turn and seeing a test fail, and by repeating the `flow`, `programs`
+  and `extending` suites a few hundred times in Debug and ReleaseFast under
+  a watchdog that also fails when the binary is missing. A hang is a
+  failure. Repetition finds little by itself: 300 clean runs hid a hang
+  that one differently paced source showed at once.
 - Concurrency is tested as invariants over shapes (`tests/flow.zig`): every
   shape of pipe is run with its ended side running out, being done and
-  failing. A new shape goes there, not into a one-off test. When "done" is
-  involved the source holds back, so that both ways of learning it (the
-  answer to a push, being cancelled) are taken: a fast source hides the
-  second, which is how the first review of PR 5 found a hang the tests had
-  not.
+  failing. A new shape goes there, not into a one-off test.

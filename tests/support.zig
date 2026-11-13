@@ -113,3 +113,49 @@ fn Handoff(comptime capacity: usize) type {
         }
     };
 }
+
+/// An `Io` that holds the first task to join another one (to await or cancel
+/// a future) until that task has itself been asked to cancel, and leaves the
+/// request in place. For showing what a task does about a request that
+/// reaches it while it joins, without leaving that to the scheduler.
+/// One at a time: its state is global.
+pub const JoinHeld = struct {
+    /// A task is being held at its join.
+    pub var joining: std.atomic.Value(bool) = .init(false);
+
+    var inner: std.Io = undefined;
+    var vtable: std.Io.VTable = undefined;
+    var armed: std.atomic.Value(bool) = .init(false);
+
+    pub fn over(io: std.Io) std.Io {
+        inner = io;
+        vtable = io.vtable.*;
+        vtable.await = heldAwait;
+        vtable.cancel = heldCancel;
+        joining.store(false, .seq_cst);
+        armed.store(true, .seq_cst);
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn hold() void {
+        if (!armed.swap(false, .seq_cst)) return;
+        joining.store(true, .seq_cst);
+        while (true) {
+            inner.checkCancel() catch {
+                inner.recancel();
+                return;
+            };
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn heldAwait(userdata: ?*anyopaque, future: *std.Io.AnyFuture, result: []u8, alignment: std.mem.Alignment) void {
+        hold();
+        inner.vtable.await(userdata, future, result, alignment);
+    }
+
+    fn heldCancel(userdata: ?*anyopaque, future: *std.Io.AnyFuture, result: []u8, alignment: std.mem.Alignment) void {
+        hold();
+        inner.vtable.cancel(userdata, future, result, alignment);
+    }
+};

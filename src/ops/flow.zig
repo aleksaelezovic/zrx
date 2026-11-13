@@ -149,14 +149,13 @@ fn Branch(comptime Ps: type) type {
                 live: [n]bool,
 
                 pub const has_boundary = core.anyBoundary(@Tuple(&chains));
-                pub const sinks_directly = core.anySinksDirectly(@Tuple(&chains));
 
                 pub fn Tasks(comptime _: type) type {
                     return core.TasksOf(@Tuple(&chains), Closed);
                 }
 
-                pub fn tasks(self: *@This(), down: anytype, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
-                    return core.tasksOf(&self.chains, Closed{}, feeder, first);
+                pub fn tasks(self: *@This(), down: anytype) Tasks(@TypeOf(down)) {
+                    return core.tasksOf(&self.chains, Closed{});
                 }
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) !void {
@@ -353,14 +352,13 @@ fn Route(comptime Cs: type) type {
 
                 /// Only terminal cases can hold a boundary (see `Out`).
                 pub const has_boundary = core.anyBoundary(@Tuple(&chains));
-                pub const sinks_directly = core.anySinksDirectly(@Tuple(&chains));
 
                 pub fn Tasks(comptime _: type) type {
                     return if (rejoins) @Tuple(&.{}) else core.TasksOf(@Tuple(&chains), Closed);
                 }
 
-                pub fn tasks(self: *Self, down: anytype, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
-                    return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{}, feeder, first);
+                pub fn tasks(self: *Self, down: anytype) Tasks(@TypeOf(down)) {
+                    return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{});
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {

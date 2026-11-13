@@ -240,11 +240,12 @@ and whoever is answered it stops pushing items. A value emitted at the end of
 the stream (`fold`, `batch`) is still pushed and is refused by the stage that
 is done; a handler between the two may run for it.
 
-To stop a run from outside, cancel the task that called `run`: every task of
-the run is cancelled, nothing finishes or flushes, and `run` returns
-`error.Canceled`. To stop *gracefully*, end the source: when a source returns,
-everything it pushed is still handled, queues drain, and the stream finishes
-and flushes as usual.
+To stop a run from outside, cancel the task that called `run`. With a queue,
+`run` then returns `error.Canceled` and nothing is flushed (see
+[what a run guarantees](#what-a-run-guarantees)); without one, the handlers
+and the source see `error.Canceled` from their own `Io` calls. To stop
+*gracefully*, end the source: when a source returns, everything it pushed is
+still handled, queues drain, and the stream finishes and flushes as usual.
 
 ## Concurrency and backpressure
 
@@ -284,22 +285,6 @@ branch(.{
   shared across a queue or between programs of a system must be safe for that.
 - Items cross a queue by value. A slice item must stay valid until consumed;
   slices from `batch` and `lines` are not, so copy before queueing them.
-- The end of the stream travels with the items. A segment that runs out of
-  input finishes its own stages and closes its queue; the next segment drains
-  the queue, finishes, and so on. Writers flush after the last segment has
-  finished.
-- The first failure in any segment is the result of the run. The other
-  segments are cancelled where they wait (a source waiting for input, a
-  handler in an `Io` call), and none of them goes on to finish its stream;
-  nothing flushes. Handlers may still run for a few items that were already
-  in a queue.
-- When the stages after a queue are done (`take`), the segment before it is
-  answered `.done` at its next push. If everything that segment produces goes
-  into queues, it is not left waiting for that push: it is interrupted as
-  soon as the segments behind those queues have returned, and then finishes
-  its stages as it would have otherwise. A segment that also feeds a
-  sub-pipe directly (a `branch` with one direct and one queued sub-pipe)
-  goes on for that sub-pipe, and the queue that is done takes no more.
 - A queue's task runs on the `Io` in force where the queue stands, so
   `provide(io)` before a queue decides where its far side runs.
 - Stages before a queue may have handled more items than the stages after it
@@ -308,6 +293,34 @@ branch(.{
   `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a queue (the pipe after
   the route would be pushed to from two tasks); put the queue after the route.
+- When the stages after a queue are done (`take`), the segment before it
+  finds out at its next push. A source that is waiting for input at that
+  moment keeps waiting until its next item or its end.
+
+### What a run guarantees
+
+With a queue in the pipe:
+
+- **On success**, every stage has finished once and then flushed once. The
+  end of the stream travels with the items: a segment that runs out of input
+  finishes its own stages and closes its queue, the next one drains the
+  queue and finishes, and so on. Flushing starts after the last segment has
+  finished.
+- **On an error**, `run` returns it and nothing has been flushed. Do not
+  rely on whether a stage finished: a segment may have ended its stream
+  before the failure, or be cancelled part-way.
+- **Which error**: the first failure of any segment, or `error.Canceled` if
+  the task that called `run` has been asked to cancel by the time `run`
+  returns.
+- **Always**, every task has returned before anything is torn down.
+- **A failure does not wait** for a source or a handler that is waiting in
+  an `Io` call: it is cancelled there. Handlers may still run for a few
+  items that were already in a queue.
+- **A queue whose far side has ended**, for whatever reason, takes no more:
+  a push into it answers `.done`.
+
+That list is short on purpose. [The segments spec](spec-segments.md) is the
+full statement, with what is *not* promised.
 
 ## Input and output
 
@@ -340,9 +353,10 @@ A run goes through these steps:
    drain), then owned writers flush, last stage first;
 4. always: stages are torn down in reverse order (`resource` releases, files close).
 
-A failure at any step skips to 4. Every task has returned before anything is
-torn down, and a resource is released after everything downstream of it is
-done, so a handler never sees a released value.
+An error ends the run at step 4, with nothing flushed. Every task has
+returned before anything is torn down, and a resource is released after
+everything downstream of it is done, so a handler never sees a released
+value.
 
 ## Writing your own
 
@@ -446,7 +460,8 @@ Two things make it work, and are worth knowing when writing an operator:
 
 Stopping a source from outside, so that a signal or a timeout ends a run
 gracefully, is proposed in [the segments spec](spec-segments.md) and not
-built.
+built. Nor is interrupting a source that waits for input once the stages
+behind a queue are done; the spec says why.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

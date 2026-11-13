@@ -61,9 +61,8 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         // and this task only waits. Each segment ends the
                         // stream for its own stages; all of them have
                         // returned before anything is flushed or torn down.
-                        // The feed is member 0; the segments follow it. It
-                        // runs on the `Io` of the first boundary it feeds.
-                        const segments = Frame.at.tasks(refs, Closed{}, 0, 1);
+                        // The feed runs on the `Io` of the first boundary.
+                        const segments = Frame.at.tasks(refs, Closed{});
                         const io = segments[0].io();
                         const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .on = io };
                         var scope: tasks.Scope = .{};
@@ -86,9 +85,6 @@ fn Feed(comptime S: type, comptime Env: type, comptime Frame: type) type {
         env: Env,
         refs: Frame.Refs,
         on: Io,
-
-        /// Everything the source pushes ends up in a queue.
-        pub const feeds_only_members = !Frame.sinks_directly;
 
         pub fn io(feed: @This()) Io {
             return feed.on;

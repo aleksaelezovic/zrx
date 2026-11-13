@@ -792,125 +792,13 @@ test "cancelling the caller of a queued program cancels every segment and skips 
     try after.events.expect("ipd");
 }
 
-// --- working for nothing ------------------------------------------------------
-
-test "a waiting source is cancelled once the pipe behind its queue is done" {
-    var seen: Numbers = .{};
-    var stalled: Stalled = .{};
-    const source = fromProducer(u32, PushThenStall(1).run);
-    try program(source, pipe(.{ queue(2), take(1), subscribe(record) })).run(.{ io, &seen, &stalled });
-    try seen.expect(&.{1});
-    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-}
-
-const Busy = struct {
-    woke_by_itself: std.atomic.Value(bool) = .init(false),
-};
-
-/// Passes the first item on and then waits over the second, far longer than
-/// a test should take.
-fn stallOnSecond(clock: std.Io, busy: *Busy, value: u32) !u32 {
-    if (value == 2) {
-        try clock.sleep(.fromSeconds(5), .awake);
-        busy.woke_by_itself.store(true, .seq_cst);
-    }
-    return value;
-}
-
-fn pushTwoThenStall(clock: std.Io, stalled: *Stalled, out: anytype) !void {
-    _ = try out.push(@as(u32, 1));
-    _ = try out.push(@as(u32, 2));
-    try clock.sleep(.fromSeconds(5), .awake);
-    stalled.woke_by_itself.store(true, .seq_cst);
-}
-
-test "a segment at work between two queues is cancelled once the last one is done" {
-    var seen: Numbers = .{};
-    var stalled: Stalled = .{};
-    var busy: Busy = .{};
-    const work = pipe(.{
-        queue(2),
-        map(stallOnSecond),
-        queue(2),
-        take(1),
-        subscribe(record),
-    });
-    try program(fromProducer(u32, pushTwoThenStall), work).run(.{ io, &seen, &stalled, &busy });
-    try seen.expect(&.{1});
-    try std.testing.expect(!busy.woke_by_itself.load(.seq_cst));
-    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-}
-
-test "queued sub-pipes that are all done end a waiting source, in a branch and in a route" {
-    var left: Numbers = .{};
-    var right: Numbers = .{};
-    var stalled: Stalled = .{};
-    const first = pipe(.{
-        queue(2),
-        take(1),
-        subscribe(toLeft),
-    });
-    const second = pipe(.{
-        queue(2),
-        take(1),
-        subscribe(toRight),
-    });
-    const deps = .{ io, &stalled, Left{ .seen = &left }, Right{ .seen = &right } };
-    try program(fromProducer(u32, pushTwoThenStall), pipe(.{branch(.{ first, second })})).run(deps);
-    try left.expect(&.{1});
-    try right.expect(&.{1});
-
-    const cases = route(.{ when(isEven, first), otherwise(second) });
-    try program(fromProducer(u32, pushTwoThenStall), pipe(.{cases})).run(deps);
-    try left.expect(&.{ 1, 2 });
-    try right.expect(&.{ 1, 1 });
-    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-}
-
-const Direct = struct {
-    queued_done: std.atomic.Value(bool) = .init(false),
-    interrupted: std.atomic.Value(bool) = .init(false),
-};
-fn noteQueuedDone(direct: *Direct, _: u32) void {
-    direct.queued_done.store(true, .seq_cst);
-}
-
-/// Pushes one item, waits until the queued sub-pipe has had it, gives the
-/// run every chance to interrupt this task, and pushes the rest.
-fn pushAcrossInterruption(clock: std.Io, direct: *Direct, out: anytype) !void {
-    _ = try out.push(@as(u32, 0));
-    while (!direct.queued_done.load(.seq_cst)) std.Thread.yield() catch {};
-    for (0..2000) |_| {
-        clock.checkCancel() catch direct.interrupted.store(true, .seq_cst);
-        std.Thread.yield() catch {};
-    }
-    for (1..5) |value| _ = try out.push(@as(u32, @intCast(value)));
-}
-
-test "a segment with a direct sub-pipe keeps running after its queued one is done" {
-    var seen: Numbers = .{};
-    var direct: Direct = .{};
-    const queued = pipe(.{
-        queue(2),
-        take(1),
-        subscribe(noteQueuedDone),
-    });
-    const work = pipe(.{branch(.{ queued, pipe(.{subscribe(record)}) })});
-    try program(fromProducer(u32, pushAcrossInterruption), work).run(.{ io, &seen, &direct });
-    try seen.expect(&.{ 0, 1, 2, 3, 4 });
-    try std.testing.expect(!direct.interrupted.load(.seq_cst));
-}
-
 // --- invariants over shapes ---------------------------------------------------
 //
 // Not cases but rules, checked for every shape below and every way its
 // "ended" side can end: the items run out, that side is done after one item,
 // or it fails on the first. The source never waits for input and pushes far
 // more than the queues hold, so a producer left waiting on a queue hangs the
-// run. When the ended side is done, the source holds back after the first
-// item until that side has had it and the run has had every chance to cancel
-// the segments that now work for nothing: both ways of learning "done" (by
-// the answer to a push, by being cancelled) have to give the same result.
+// run.
 //
 // 1. The run returns.
 // 2. A sub-pipe beside the ended side gets every item meant for it.
@@ -946,26 +834,6 @@ fn ender(comptime ending: Way) Ender(ending) {
 
 const item_count = 24;
 
-const Pace = struct {
-    hold_back: bool,
-    reached: std.atomic.Value(bool) = .init(false),
-};
-
-fn endedSink(sink: Left, pace: *Pace, value: u32) void {
-    sink.seen.add(value);
-    pace.reached.store(true, .seq_cst);
-}
-
-fn paced(pace: *Pace, out: anytype) !void {
-    for (0..item_count) |i| {
-        if (try out.push(@as(u32, @intCast(i))) == .done) return;
-        if (i == 0 and pace.hold_back) {
-            while (!pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
-            for (0..2000) |_| std.Thread.yield() catch {};
-        }
-    }
-}
-
 /// Everything one run of a shape is watched with.
 const Probe = struct {
     ticks: Ticks = .{},
@@ -978,9 +846,8 @@ const Probe = struct {
     beside: Numbers = .{},
 
     fn run(probe: *Probe, comptime shape: anytype, comptime ending: Way) !void {
-        var pace: Pace = .{ .hold_back = ending == .done };
-        const deps = .{ io, &pace, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside } };
-        const result = program(fromProducer(u32, paced), shape.build(ending)).run(deps);
+        const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside } };
+        const result = program(range(u32, 0, item_count), shape.build(ending)).run(deps);
         if (ending == .fails) {
             try std.testing.expectError(error.Ended, result);
         } else {
@@ -1013,8 +880,8 @@ fn checkShape(comptime shape: type) !void {
 
 /// Three segments in a row.
 const InARow = struct {
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) })) {
-        return pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
     }
     fn ended() usize {
         return item_count;
@@ -1027,10 +894,10 @@ const InARow = struct {
 /// The ended side is two segments deep; the source also feeds a sub-pipe directly.
 const BesideTheSource = struct {
     fn Deep(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) }));
     }
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(Deep(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
-        const deep: Deep(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
         return pipe(.{ mark(0), branch(.{ deep, pipe(.{subscribe(toRight)}) }) });
     }
     fn ended() usize {
@@ -1044,10 +911,10 @@ const BesideTheSource = struct {
 /// A segment behind a queue feeds the ended side through another queue and a sub-pipe directly.
 const BesideASegment = struct {
     fn Last(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+        return @TypeOf(pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }));
     }
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Last(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
-        const last: Last(ending) = pipe(.{ queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        const last: Last(ending) = pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) });
         return pipe(.{ mark(0), queue(1), mark(1), branch(.{ last, pipe(.{subscribe(toRight)}) }) });
     }
     fn ended() usize {
@@ -1061,11 +928,11 @@ const BesideASegment = struct {
 /// Two queued sub-pipes of one branch: one ends, the other takes everything.
 const TwoQueued = struct {
     fn First(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), ender(ending), subscribe(endedSink) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), ender(ending), subscribe(toLeft) }));
     }
     const Second = @TypeOf(pipe(.{ queue(1), mark(2), subscribe(toRight) }));
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(First(ending), undefined), @as(Second, undefined) }) })) {
-        const first: First(ending) = pipe(.{ queue(1), mark(1), ender(ending), subscribe(endedSink) });
+        const first: First(ending) = pipe(.{ queue(1), mark(1), ender(ending), subscribe(toLeft) });
         const second: Second = pipe(.{ queue(1), mark(2), subscribe(toRight) });
         return pipe(.{ mark(0), branch(.{ first, second }) });
     }
@@ -1080,11 +947,11 @@ const TwoQueued = struct {
 /// Behind a queue, a branch of a sub-pipe two segments deep and a queued one.
 const Nested = struct {
     fn Deep(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(endedSink) }));
+        return @TypeOf(pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(toLeft) }));
     }
     const Other = @TypeOf(pipe(.{ queue(1), mark(4), subscribe(toRight) }));
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Deep(ending), undefined), @as(Other, undefined) }) })) {
-        const deep: Deep(ending) = pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(endedSink) });
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(toLeft) });
         const other: Other = pipe(.{ queue(1), mark(4), subscribe(toRight) });
         return pipe(.{ mark(0), queue(1), mark(1), branch(.{ deep, other }) });
     }
@@ -1099,14 +966,14 @@ const Nested = struct {
 /// A route whose cases are both queued: the even items go to the ended side.
 const Routed = struct {
     fn Even(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) }));
     }
     const Odd = @TypeOf(pipe(.{ queue(1), mark(3), subscribe(toRight) }));
     fn Cases(comptime ending: Way) type {
         return @TypeOf(route(.{ when(isEven, @as(Even(ending), undefined)), otherwise(@as(Odd, undefined)) }));
     }
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), @as(Cases(ending), undefined) })) {
-        const even: Even(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        const even: Even(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
         const odd: Odd = pipe(.{ queue(1), mark(3), subscribe(toRight) });
         return pipe(.{ mark(0), route(.{ when(isEven, even), otherwise(odd) }) });
     }
@@ -1146,82 +1013,6 @@ test "each queue's task runs on the Io in force where the queue stands" {
     try seen.expect(&.{});
 }
 
-/// A stage whose `finish` takes its time and passes cancelation points: it
-/// waits until the sink has had an item, then gives the run every chance to
-/// interrupt it.
-const LingerAtEnd = struct {
-    pub const zrx_operator = {};
-    pub const name = "lingerAtEnd";
-
-    pub fn Out(comptime _: type, comptime In: type) type {
-        return In;
-    }
-
-    pub fn Stage(comptime Env: type, comptime In: type) type {
-        return struct {
-            clock: std.Io,
-            pace: *Pace,
-
-            pub fn init(self: *@This(), _: *const LingerAtEnd, env: Env) !void {
-                self.* = .{ .clock = zrx.di.get(env, std.Io), .pace = zrx.di.get(env, *Pace) };
-            }
-
-            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
-                return down.push(item);
-            }
-
-            pub fn finish(self: *@This(), _: anytype) !void {
-                while (!self.pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
-                for (0..2000) |_| {
-                    try self.clock.checkCancel();
-                    std.Thread.yield() catch {};
-                }
-            }
-        };
-    }
-};
-
-/// Pushes two items and returns: its segment is ending while the one behind
-/// the queue becomes done.
-fn pushTwo(out: anytype) !void {
-    _ = try out.push(@as(u32, 0));
-    _ = try out.push(@as(u32, 1));
-}
-
-test "a segment that is already ending is left to end when what it feeds is done" {
-    var ended: Numbers = .{};
-    var pace: Pace = .{ .hold_back = false };
-    const work = pipe(.{
-        LingerAtEnd{},
-        queue(4),
-        take(1),
-        subscribe(endedSink),
-    });
-    try program(fromProducer(u32, pushTwo), work).run(.{ io, &pace, Left{ .seen = &ended } });
-    try ended.expect(&.{0});
-}
-
-/// Pushes one item, waits until the sink has had it and the run has had
-/// every chance to cancel this task, and returns without having noticed.
-fn pushThenReturnUnaware(pace: *Pace, out: anytype) !void {
-    _ = try out.push(@as(u32, 0));
-    while (!pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
-    for (0..2000) |_| std.Thread.yield() catch {};
-}
-
-test "a segment cancelled for working for nothing ends its stream even if the request finds it there" {
-    var ended: Numbers = .{};
-    var pace: Pace = .{ .hold_back = false };
-    const work = pipe(.{
-        LingerAtEnd{},
-        queue(4),
-        take(1),
-        subscribe(endedSink),
-    });
-    try program(fromProducer(u32, pushThenReturnUnaware), work).run(.{ io, &pace, Left{ .seen = &ended } });
-    try ended.expect(&.{0});
-}
-
 // --- decisions ------------------------------------------------------------------
 //
 // A decision is taken right before what it allows, after every step that can
@@ -1258,72 +1049,64 @@ test "a segment decides to end its stream after it has retired, not before" {
     try beyond.events.expect("ipppd");
 }
 
-const Held = struct {
-    holding: std.atomic.Value(bool) = .init(false),
-    go: std.atomic.Value(bool) = .init(false),
-};
+test "a program can run its segments on two Io instances" {
+    for (0..20) |_| {
+        var other: std.Io.Threaded = .init(std.testing.allocator, .{});
+        defer other.deinit();
+        var seen: Numbers = .{};
+        const work = pipe(.{ queue(2), provide(other.io()), queue(2), subscribe(record) });
+        try program(range(u32, 0, 50), work).run(.{ io, &seen });
+        try std.testing.expectEqual(@as(usize, 50), seen.len);
 
-/// A stage whose `finish` holds until the test lets it go, and then a while
-/// longer.
-const HoldAtEnd = struct {
-    pub const zrx_operator = {};
-    pub const name = "holdAtEnd";
-
-    pub fn Out(comptime _: type, comptime In: type) type {
-        return In;
+        var stalled: Stalled = .{};
+        const failing = pipe(.{ queue(2), provide(other.io()), queue(2), map(failAtFive), subscribe(record) });
+        const result = program(fromProducer(u32, PushThenStall(5).run), failing).run(.{ io, &seen, &stalled });
+        try std.testing.expectError(error.Five, result);
+        try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
     }
+}
 
-    pub fn Stage(comptime Env: type, comptime In: type) type {
-        return struct {
-            held: *Held,
-
-            pub fn init(self: *@This(), _: *const HoldAtEnd, env: Env) !void {
-                self.held = zrx.di.get(env, *Held);
-            }
-
-            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
-                return down.push(item);
-            }
-
-            pub fn finish(self: *@This(), _: anytype) !void {
-                self.held.holding.store(true, .seq_cst);
-                while (!self.held.go.load(.seq_cst)) std.Thread.yield() catch {};
-                for (0..2000) |_| std.Thread.yield() catch {};
-            }
-        };
-    }
-};
-
-test "a cancel request that arrives while the run joins a retired segment wins over success" {
-    var stalled: Stalled = .{};
-    var held: Held = .{};
-    var ticks: Ticks = .{};
-    var before: Trace(0) = .{};
-    var ended: Numbers = .{};
-    var pace: Pace = .{ .hold_back = false };
-    // The far side is done after one item, so the run retires the source's
-    // segment, which then ends its stream; that is where it is held.
-    const work = pipe(.{
-        mark(0),
-        HoldAtEnd{},
-        queue(4),
-        take(1),
-        subscribe(endedSink),
-    });
-    const waiting = program(fromProducer(u32, PushThenStall(1).run), work);
-    const Waiting = @TypeOf(waiting);
-    const Deps = struct { std.Io, *Stalled, *Held, *Ticks, *Trace(0), *Pace, Left };
-    const Caller = struct {
-        fn run(queued: *const Waiting, deps: Deps) ?anyerror {
-            queued.run(deps) catch |err| return err;
+/// Runs a program on a task of its own, so that a test can cancel its caller.
+fn Called(comptime Program: type, comptime Deps: type) type {
+    return struct {
+        fn run(called: *const Program, deps: Deps) ?anyerror {
+            called.run(deps) catch |err| return err;
             return null;
         }
     };
-    var caller = try io.concurrent(Caller.run, .{ &waiting, Deps{ io, &stalled, &held, &ticks, &before, &pace, Left{ .seen = &ended } } });
-    while (!held.holding.load(.seq_cst)) std.Thread.yield() catch {};
-    held.go.store(true, .seq_cst);
+}
+
+test "a cancel request that reaches the caller while the run joins its tasks is not lost" {
+    var seen: Numbers = .{};
+    var ticks: Ticks = .{};
+    var before: Trace(0) = .{};
+    var after: Trace(1) = .{};
+    const work = pipe(.{
+        mark(0),
+        queue(2),
+        mark(1),
+        subscribe(record),
+    });
+    const finite = program(range(u32, 0, 3), work);
+    const Deps = struct { std.Io, *Numbers, *Ticks, *Trace(0), *Trace(1) };
+    // The run is held at its first join until its caller has been asked to
+    // cancel: by then every segment has ended its stream by itself.
+    const held = support.JoinHeld.over(io);
+    var caller = try io.concurrent(Called(@TypeOf(finite), Deps).run, .{ &finite, Deps{ held, &seen, &ticks, &before, &after } });
+    while (!support.JoinHeld.joining.load(.seq_cst)) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
-    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-    // The segment had finished; nothing was flushed.
-    try before.events.expect("ipfd");
+    try seen.expect(&.{ 0, 1, 2 });
+    // Both segments had finished; nothing was flushed.
+    try before.events.expect("ipppfd");
+    try after.events.expect("ipppfd");
+}
+
+test "the caller's cancellation also comes before a failure the run already has" {
+    var seen: Numbers = .{};
+    const failing = program(range(u32, 5, 8), pipe(.{ queue(2), map(failAtFive), subscribe(record) }));
+    const Deps = struct { std.Io, *Numbers };
+    const held = support.JoinHeld.over(io);
+    var caller = try io.concurrent(Called(@TypeOf(failing), Deps).run, .{ &failing, Deps{ held, &seen } });
+    while (!support.JoinHeld.joining.load(.seq_cst)) std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
 }
