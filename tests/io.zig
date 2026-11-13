@@ -245,3 +245,74 @@ test "a request to cancel that reaches the caller while a file is flushed is a c
     while (!support.WriteHeld.writing.load(.seq_cst)) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
 }
+
+const Stalled = struct {
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+};
+
+fn ignore(_: u32) void {}
+
+/// Fails once a segment is inside its write.
+fn failOnceWriting(_: u32) error{Late}!u32 {
+    while (!support.WriteHeld.writing.load(.seq_cst)) std.Thread.yield() catch {};
+    return error.Late;
+}
+
+/// Pushes one item and then waits for input that never comes.
+fn pushThenStall(clock: std.Io, stalled: *Stalled, out: anytype) !void {
+    _ = try out.push(@as(u32, 1));
+    try clock.sleep(.fromSeconds(5), .awake);
+    stalled.woke_by_itself.store(true, .seq_cst);
+}
+
+test "a request to cancel that interrupts a write to the library's own writer is not used up" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/out.txt", .{tmp.sub_path});
+
+    var skipped: Skipped = .{};
+    var stalled: Stalled = .{};
+    // The source's own segment prints, under a recover, and is inside its
+    // write when the queued sub-pipe fails. The recover takes the failed
+    // write for an item error; the source then goes on to wait for input,
+    // where the request, put back by the writer, reaches it.
+    const failing = pipe(.{
+        queue(2),
+        map(failOnceWriting),
+        zrx.subscribe(ignore),
+    });
+    const printing = pipe(.{
+        recover(skip),
+        print(Report, "{d}\n"),
+    });
+    const work = pipe(.{
+        createFile(Report, path, 1, .{}),
+        branch(.{ failing, printing }),
+    });
+    const result = program(fromProducer(u32, pushThenStall), work).run(.{ support.WriteHeld.over(io), &skipped, &stalled });
+    try std.testing.expectError(error.Late, result);
+    try std.testing.expectEqual(@as(usize, 1), skipped.count.load(.seq_cst));
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+test "with a writer of your own, a segment whose request was used up in a write still ends at its queue" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const held = support.WriteHeld.over(io);
+    const file = try tmp.dir.createFile(io, "own.txt", .{});
+    defer file.close(io);
+    // The caller's own file writer, one byte of buffer: `std` reports the
+    // request as a failed write and it is gone. Nothing waits on a queue
+    // once the run is over, so the segment still comes to an end.
+    var one: [1]u8 = undefined;
+    var writer = file.writer(held, &one);
+    var skipped: Skipped = .{};
+    const work = pipe(.{
+        queue(2),
+        recover(skip),
+        print(Report, "{d}\n"),
+    });
+    const result = program(fromProducer(u32, pushThenFailOnceWriting), work).run(.{ held, &skipped, Report{ .writer = &writer.interface } });
+    try std.testing.expectError(error.SourceFailed, result);
+}

@@ -56,29 +56,28 @@ moment inside the run.
    instead, if the task that called `run` has been asked to cancel before
    those tasks have all been joined. Once they are joined, only the `Io`
    calls of what still runs on the caller (flushes; after a `merge` without
-   a queue, the end of the stream) can see such a request; a flush of a
-   writer the library owns that is cancelled that way fails with
-   `error.Canceled`, not with a write error.
-   *Tests: "cancelling the caller of a queued program", "a cancel request
-   that reaches the caller while the run joins its tasks is not lost", "the
-   caller's cancellation also comes before a failure" (`tests/flow.zig`),
-   "cancelling the caller cancels every member" (`tests/programs.zig`), "a
-   request to cancel that reaches the caller while a file is flushed is a
-   cancellation" (`tests/io.zig`).*
+   a queue, the end of the stream) can see such a request.
+   *Tests: "cancelling the caller of a queued program", "the caller is asked
+   to cancel while the run starts its tasks", "a cancel request that reaches
+   the caller while the run joins its tasks is not lost", "the caller's
+   cancellation also comes before a failure" (`tests/flow.zig`), "cancelling
+   the caller cancels every member" (`tests/programs.zig`).*
 4. **Always**, every task of the program has returned before any of its
    stages is torn down, and stages are torn down in reverse order.
    *Test: "nothing is released while a handler behind a queue is still using
    it" (`tests/flow.zig`).*
 5. **A failure does not wait.** `run` returns without waiting for a source or
    a handler that is waiting in an `Io` call: it is cancelled there, also
-   when another task does not notice that it was asked to cancel, and also
-   when a task's own request was lost on the way (see "Not promised" on
-   writes).
+   when another task does not notice that it was asked to cancel. A request
+   that interrupts a write to a writer the library owns (`stdout`,
+   `createFile`) is not used up by that: the write fails, and the task's
+   next `Io` call is still cancelled.
    *Tests: "a failure after a queue ends the run while the source is
    waiting", "a failure behind two queues, or in a queued sub-pipe", "every
    task is asked to cancel at once" (`tests/flow.zig`), "a failure ends the
-   run although the segment it interrupts is printing under a recover"
-   (`tests/io.zig`).*
+   run although the segment it interrupts is printing under a recover", "a
+   request to cancel that interrupts a write to the library's own writer is
+   not used up" (`tests/io.zig`).*
 6. **A queue whose task has ended takes no more.** However the task ended
    (its input ran out, it was done, it failed, it was cancelled), a push
    into that queue answers `.done`; no producer is left waiting on it.
@@ -106,7 +105,8 @@ moment inside the run.
     program that ended before that has flushed and been torn down.
     *Tests: "a system returns a failure while another program is waiting",
     "without concurrency, a system and a merge fail before anything runs",
-    "systems nest, and a system of one needs no Io" (`tests/programs.zig`).*
+    "systems nest, and a system of one needs no Io", "a merge of one source
+    runs it in place and needs no Io" (`tests/programs.zig`).*
 
 ## Not promised
 
@@ -137,9 +137,12 @@ A review finding against one of these is answered by pointing here.
   swallows `error.Canceled` and goes on.
 - That a request to cancel looks like one everywhere. `std.Io.Writer`
   reports every failure as `error.WriteFailed`, so a request that reaches a
-  segment inside a write (`print`) comes out as a failed write; a `recover`
-  may take it for an item error and carry on. The run still ends: its
-  queues are closed when it is over.
+  segment inside a write (`print`) comes out as a failed write, and a
+  `recover` may take it for an item error and carry on. With a writer the
+  library owns the request is put back (guarantee 5). With a writer of your
+  own it is used up: the segment still ends the next time it takes from or
+  pushes into a queue, because queues are closed when the run is over, but
+  it is not interrupted in an `Io` call of its own after that.
 - That members on different `Io` instances are asked to cancel together.
   Those on one `Io` are; the instances are told one after another.
 - Exact item counts before a queue: stages before it may have handled more
@@ -178,8 +181,12 @@ Mechanism, not promises. It may change as long as the guarantees hold.
   it returns the supervising task looks at its own cancellation once more:
   joining need not be a cancelation point.
 - **Each segment runs on the `Io` in force at its queue**; segment 0 on the
-  `Io` of the first queue. Tasks are started with `Io.concurrent` and never
-  run on the caller.
+  `Io` of the first queue. Tasks are started in an `Io.Group` and never run
+  on the caller.
+- **The writers the library owns** (`stdout`, `createFile`) sit behind a
+  writer of the library's that puts a request to cancel back when it has
+  interrupted a write, and turns a flush that failed for that reason into
+  `error.Canceled`.
 - **`merge`** tells its scope when a push is answered `.done`; the scope then
   cancels the other sources and ends as a success.
 
@@ -344,6 +351,11 @@ itself.
    closed when the run is over (a request to cancel that `print` reported
    as a failed write, swallowed by a `recover`, hung the run; a task that
    did not notice its request kept the request from the next one).
+9. After a third: the library's own writers put a request back that
+   interrupted a write (closing queues did not help a task that went on to
+   wait in an `Io` call of its own); the run joins its tasks one way only;
+   two tests that depended on which task reached a step first were made
+   deterministic.
 
 Not built, by explicit decision only: the stop trigger for sources; an
 owning chunk so that `batch` can cross a queue.

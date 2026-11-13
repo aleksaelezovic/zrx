@@ -757,14 +757,25 @@ test "a source that returns after a failure elsewhere does not end the stream" {
     try before.events.expect("ipd");
 }
 
+/// Set when a program run by `Called` has returned.
+var called_returned: std.atomic.Value(bool) = .init(false);
+
 /// Runs a program on a task of its own, so that a test can cancel its caller.
 fn Called(comptime Program: type, comptime Deps: type) type {
     return struct {
         fn run(called: *const Program, deps: Deps) ?anyerror {
+            defer called_returned.store(true, .seq_cst);
             called.run(deps) catch |err| return err;
             return null;
         }
     };
+}
+
+/// Waits until the run is held where `support.JoinHeld` holds it. A run that
+/// returns without ever being held ends the wait too, so that a missing look
+/// at the caller's cancellation shows as a wrong result and not as a hang.
+fn untilHeldAtJoin() void {
+    while (!support.JoinHeld.joining.load(.seq_cst) and !called_returned.load(.seq_cst)) std.Thread.yield() catch {};
 }
 
 const Caught = struct {
@@ -1086,9 +1097,10 @@ test "a cancel request that reaches the caller while the run joins its tasks is 
     const Deps = struct { std.Io, *Numbers, *Ticks, *Trace(0), *Trace(1) };
     // The run is held at its first join until its caller has been asked to
     // cancel: by then every segment has ended its stream by itself.
+    called_returned.store(false, .seq_cst);
     const held = support.JoinHeld.over(io);
     var caller = try io.concurrent(Called(@TypeOf(finite), Deps).run, .{ &finite, Deps{ held, &seen, &ticks, &before, &after } });
-    while (!support.JoinHeld.joining.load(.seq_cst)) std.Thread.yield() catch {};
+    untilHeldAtJoin();
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
     try seen.expect(&.{ 0, 1, 2 });
     // Both segments had finished; nothing was flushed.
@@ -1100,9 +1112,10 @@ test "the caller's cancellation also comes before a failure the run already has"
     var seen: Numbers = .{};
     const failing = program(range(u32, 5, 8), pipe(.{ queue(2), map(failAtFive), subscribe(record) }));
     const Deps = struct { std.Io, *Numbers };
+    called_returned.store(false, .seq_cst);
     const held = support.JoinHeld.over(io);
     var caller = try io.concurrent(Called(@TypeOf(failing), Deps).run, .{ &failing, Deps{ held, &seen } });
-    while (!support.JoinHeld.joining.load(.seq_cst)) std.Thread.yield() catch {};
+    untilHeldAtJoin();
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
 }
 

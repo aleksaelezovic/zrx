@@ -68,6 +68,8 @@ fn Handoff(comptime capacity: usize) type {
                 buffer: [capacity]In,
                 channel: std.Io.Queue(In),
                 gate: if (gated) *RetireGate else void,
+                /// The thread that runs `work`.
+                worker: std.atomic.Value(std.Thread.Id),
 
                 pub const zrx_boundary = {};
 
@@ -75,6 +77,7 @@ fn Handoff(comptime capacity: usize) type {
                     self.io = zrx.di.get(env, std.Io);
                     self.channel = .init(&self.buffer);
                     self.gate = if (gated) zrx.di.get(env, *RetireGate) else {};
+                    self.worker = .init(0);
                 }
 
                 pub fn taskIo(self: *@This()) std.Io {
@@ -94,6 +97,7 @@ fn Handoff(comptime capacity: usize) type {
                 }
 
                 pub fn work(self: *@This(), down: anytype) !void {
+                    self.worker.store(std.Thread.getCurrentId(), .seq_cst);
                     while (true) {
                         const item = self.channel.getOne(self.io) catch |err| switch (err) {
                             error.Closed => return,
@@ -104,10 +108,12 @@ fn Handoff(comptime capacity: usize) type {
                 }
 
                 pub fn retire(self: *@This()) void {
-                    // Only the boundary's own task takes its time here; the
-                    // run, retiring everyone at its end, must not wait.
-                    if (gated and !self.gate.retiring.swap(true, .seq_cst)) {
+                    // Only the boundary's own task takes its time here. The
+                    // run retires everyone at its end, from its own task,
+                    // and must not wait.
+                    if (gated and std.Thread.getCurrentId() == self.worker.load(.seq_cst)) {
                         if (self.gate.close_first) self.channel.close(self.io);
+                        self.gate.retiring.store(true, .seq_cst);
                         while (!self.gate.interrupted.load(.seq_cst) and !self.gate.released.load(.seq_cst)) {
                             self.io.checkCancel() catch self.gate.interrupted.store(true, .seq_cst);
                             std.Thread.yield() catch {};
@@ -121,9 +127,9 @@ fn Handoff(comptime capacity: usize) type {
 }
 
 /// An `Io` that holds the task which supervises a run where that run has
-/// finished waiting (at the first join of a group, or at the first look at
-/// its own cancellation, whichever it reaches first) until that task has
-/// itself been asked to cancel, and leaves the request in place. For showing
+/// finished waiting (at its first join of a group, or at its look at its own
+/// cancellation if no task is left to join) until that task has itself been
+/// asked to cancel, and leaves the request in place. For showing
 /// what a run does about a request that reaches its caller that late,
 /// without leaving it to the scheduler. One at a time: its state is global.
 pub const JoinHeld = struct {
@@ -137,7 +143,6 @@ pub const JoinHeld = struct {
     pub fn over(io: std.Io) std.Io {
         inner = io;
         vtable = io.vtable.*;
-        vtable.groupAwait = heldAwait;
         vtable.groupCancel = heldCancel;
         vtable.checkCancel = heldCheck;
         joining.store(false, .seq_cst);
@@ -155,11 +160,6 @@ pub const JoinHeld = struct {
             };
             std.Thread.yield() catch {};
         }
-    }
-
-    fn heldAwait(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) std.Io.Cancelable!void {
-        hold();
-        return inner.vtable.groupAwait(userdata, group, token);
     }
 
     fn heldCancel(userdata: ?*anyopaque, group: *std.Io.Group, token: *anyopaque) void {

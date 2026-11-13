@@ -90,15 +90,17 @@ to this file; edit `AGENTS.md`, not copies.
   caller, the last two after every task has returned.
 - **One scope supervises every group of tasks** (`tasks.Scope`): the segments
   of a program, the sources of `merge`, the programs of `system`. Members are
-  started with `Io.concurrent`, each on its own `Io`, and never run on the
-  supervising task. That task waits in one place, which can be cancelled.
+  started as tasks of an `Io.Group`, each on its own `Io`, and never run on
+  the supervising task. That task waits in one place, which can be cancelled.
   When the run is over without success it tells everyone at once: every
   member is retired (queues close, so nobody waits on one whatever became
   of its request to cancel) and all members on one `Io` are asked to cancel
   together (one `Io.Group`). Then it joins them and looks at its own
   cancellation once more before it returns. Do not go back to asking tasks
   one after another, nor rely on a request to cancel arriving as
-  `error.Canceled`: `std.Io.Writer` reports it as a failed write. A failure is a task's return value: nothing is
+  `error.Canceled`: `std.Io.Writer` reports it as a failed write, and the
+  request is used up. A writer the library owns puts it back (`Owned` in
+  `src/io.zig`); a `recover` over a writer of the user's can still take it. A failure is a task's return value: nothing is
   reported on the side, and nothing is cast from `anyerror`. There is no
   sequential fallback; a `merge` or `system` of one runs that one in place.
 - **Every task ends its work in one place** (`Scope.Runner`), in a fixed

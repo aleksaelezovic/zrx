@@ -160,6 +160,12 @@ test "a system runs every program with the same dependencies" {
     try right.expect(&.{ 7, 8, 9 });
 }
 
+test "a merge of one source runs it in place and needs no Io" {
+    var seen: Numbers = .{};
+    try program(merge(.{range(u32, 0, 3)}), pipe(.{subscribe(record)})).run(.{&seen});
+    try seen.expect(&.{ 0, 1, 2 });
+}
+
 test "systems nest, and a system of one needs no Io" {
     // Programs of a system run at the same time: each writes to its own log.
     var left: Numbers = .{};

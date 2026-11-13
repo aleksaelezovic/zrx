@@ -139,8 +139,8 @@ pub const Scope = struct {
     /// Runs every member of the tuple `members`, each as a task of its own,
     /// and returns once all of them have.
     ///
-    /// Members are started with `Io.concurrent` and never run on the calling
-    /// task, which only waits: it has to stay free to see a failure and
+    /// Members are started as tasks of an `Io.Group` and never run on the
+    /// calling task, which only waits: it has to stay free to see a failure and
     /// cancel the rest. A member is started, joined and cancelled on its own
     /// `Io` if it names one, and on `io` otherwise. A member that cannot be
     /// started is an outcome like any other: unless the run already has one
@@ -190,7 +190,7 @@ pub const Scope = struct {
             }
         }
 
-        // This task was asked to cancel while it waited, or while it joined.
+        // This task was asked to cancel while it waited.
         var interrupted = false;
         const outcome = waiting: {
             scope.mutex.lockUncancelable(io);
@@ -215,19 +215,17 @@ pub const Scope = struct {
                 if (@hasDecl(types[i], "retire")) members[i].retire();
             }
         }
+        // Join everyone. When every member has returned by itself there is
+        // nobody left to interrupt and this only gives the tasks back; it is
+        // still `cancel` and not `await`, because `await` would take a
+        // request meant for this task, and that is decided in one place.
         for (&groups, 0..) |*group, i| {
-            if (group_of[i] != i) continue;
-            if (outcome == .running) {
-                // Every member has returned; this only gives them back.
-                group.await(ios[i]) catch {
-                    interrupted = true;
-                };
-            } else group.cancel(ios[i]);
+            if (group_of[i] == i) group.cancel(ios[i]);
         }
 
         // This task's own cancellation comes before whatever the members
         // did: a request that ended the wait, or one that came while joining
-        // (which need not be a cancelation point).
+        // (which is not a cancelation point).
         if (interrupted) return error.Canceled;
         try io.checkCancel();
         switch (outcome) {
