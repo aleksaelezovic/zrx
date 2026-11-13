@@ -26,6 +26,7 @@ const Outcome = records.Outcome;
 const Summary = summaries.Summary;
 
 /// Where input lines come from.
+const Line = zrx.Line(records.max_line_bytes);
 pub const Input = struct { reader: *std.Io.Reader };
 /// Where accepted, normalized records go.
 pub const Accepted = struct { writer: *std.Io.Writer };
@@ -35,13 +36,17 @@ pub const Diagnostics = zrx.Stderr;
 pub const Console = zrx.Stdout;
 
 /// A line that breaks a rule is still a record: a rejected one.
-fn rejected(reason: records.ValidationError, _: []const u8) Outcome {
+fn rejected(reason: records.ValidationError, _: Line) Outcome {
     return .reject(reason);
+}
+
+fn parse(line: Line) records.ValidationError!records.Record {
+    return validation.parseFields(line.text());
 }
 
 /// The schema, stage by stage; the first rule a line breaks becomes its outcome.
 const validated = orElse(compose(.{
-    validation.parseFields,
+    parse,
     validation.validateIdentifier,
     validation.normalizeName,
     validation.validateAmount,
@@ -92,7 +97,7 @@ pub const records_pipe = pipe(.{
 });
 
 /// Processes the lines of `Input`.
-pub const processing = zrx.program(zrx.lines(Input), records_pipe);
+pub const processing = zrx.program(zrx.lines(Input, records.max_line_bytes), records_pipe);
 
 /// Writes one text to standard output.
 pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement)) {

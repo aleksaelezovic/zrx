@@ -34,6 +34,7 @@ pub const skip = transform.skip;
 pub const takeWhile = transform.takeWhile;
 pub const flatten = transform.flatten;
 pub const batch = transform.batch;
+pub const Batch = transform.Batch;
 pub const recover = transform.recover;
 
 // Terminal operators
@@ -79,6 +80,7 @@ pub const stderr = io.stderr;
 pub const createFile = io.createFile;
 pub const CreateFileOptions = io.CreateFileOptions;
 pub const print = io.print;
+pub const Line = io.Line;
 pub const lines = io.lines;
 pub const stdinLines = io.stdinLines;
 pub const fileLines = io.fileLines;

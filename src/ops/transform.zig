@@ -267,7 +267,7 @@ fn TakeWhile(comptime predicate: anytype) type {
     };
 }
 
-/// Emits the elements of each array or slice item, in order.
+/// Emits the elements of each array, slice, or batch item, in order.
 pub fn flatten() Flatten {
     return .{};
 }
@@ -287,12 +287,13 @@ const Flatten = struct {
                 },
                 else => notASequence(In),
             },
+            .@"struct" => if (isBatch(In)) In.Item else notASequence(In),
             else => notASequence(In),
         };
     }
 
     fn notASequence(comptime In: type) noreturn {
-        @compileError("flatten: items must be arrays or slices, got `" ++ @typeName(In) ++ "`");
+        @compileError("flatten: items must be arrays, slices, or batches, got `" ++ @typeName(In) ++ "`");
     }
 
     pub fn Stage(comptime Env: type, comptime In: type) type {
@@ -300,7 +301,7 @@ const Flatten = struct {
             pub fn init(_: *@This(), _: *const Flatten, _: Env) !void {}
 
             pub fn push(_: *@This(), item: In, down: anytype) !Flow {
-                for (item) |element| {
+                for (if (comptime isBatch(In)) item.slice() else item) |element| {
                     if (try down.push(element) == .done) return .done;
                 }
                 return .more;
@@ -309,8 +310,27 @@ const Flatten = struct {
     }
 };
 
-/// Groups items into slices of `size` (the last one may be shorter). A slice
-/// is only valid during the push that delivers it.
+/// Up to `capacity` items stored inline. Only the first `len` are valid.
+pub fn Batch(comptime T: type, comptime capacity: usize) type {
+    return struct {
+        pub const Item = T;
+        pub const Capacity = capacity;
+
+        items: [capacity]T,
+        len: usize,
+
+        pub fn slice(self: *const @This()) []const T {
+            return self.items[0..self.len];
+        }
+    };
+}
+
+fn isBatch(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "Item") and @hasDecl(T, "Capacity") and
+        @TypeOf(T.Item) == type and @TypeOf(T.Capacity) == usize and T == Batch(T.Item, T.Capacity);
+}
+
+/// Groups items into inline batches of `size` (the last may be shorter).
 ///
 /// Built from two stages so that each lives in its own local: the counter
 /// stays in a register, and only the buffer (which is indexed, so the
@@ -373,7 +393,7 @@ fn BatchBuffer(comptime size: usize) type {
         }
 
         pub fn Out(comptime _: type, comptime Step: type) type {
-            return []const Item(Step);
+            return Batch(Item(Step), size);
         }
 
         pub fn Stage(comptime Env: type, comptime Step: type) type {
@@ -385,7 +405,7 @@ fn BatchBuffer(comptime size: usize) type {
                 pub fn push(self: *@This(), step: Step, down: anytype) !Flow {
                     if (step.item) |item| self.items[step.index] = item;
                     if (step.deliver == 0) return .more;
-                    return down.push(self.items[0..step.deliver]);
+                    return down.push(.{ .items = self.items, .len = step.deliver });
                 }
             };
         }

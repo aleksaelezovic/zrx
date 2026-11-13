@@ -23,9 +23,9 @@ fn slowWrite(io: std.Io, _: u32) !void {
 fn add(sum: u64, value: u32) u64 {
     return sum + value;
 }
-fn sumOf(values: []const u32) u64 {
+fn sumOf(values: zrx.Batch(u32, 10)) u64 {
     var total: u64 = 0;
-    for (values) |value| total += value;
+    for (values.slice()) |value| total += value;
     return total;
 }
 

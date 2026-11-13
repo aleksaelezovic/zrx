@@ -62,7 +62,7 @@ test "roles keep two writers apart" {
     try std.testing.expectEqualStrings("saw 1\nsaw 2\nsaw 3\n", log.buffered());
 }
 
-fn nonEmpty(line: []const u8) bool {
+fn nonEmpty(line: zrx.Line(8)) bool {
     return line.len != 0;
 }
 
@@ -70,8 +70,8 @@ test "lines splits a reader on newlines, with or without a final one" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     var reader: std.Io.Reader = .fixed("alpha\n\nbeta\ngamma");
-    const work = pipe(.{ filter(nonEmpty), print(Report, "[{s}]") });
-    try program(lines(Input), work).run(.{ Input{ .reader = &reader }, Report{ .writer = &writer } });
+    const work = pipe(.{ filter(nonEmpty), print(Report, "[{f}]") });
+    try program(lines(Input, 8), work).run(.{ Input{ .reader = &reader }, Report{ .writer = &writer } });
     try std.testing.expectEqualStrings("[alpha][beta][gamma]", writer.buffered());
 }
 
@@ -79,13 +79,15 @@ test "lines stops reading when the pipe is done" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     var reader: std.Io.Reader = .fixed("one\ntwo\nthree\n");
-    try program(lines(*std.Io.Reader), pipe(.{ take(1), print(*std.Io.Writer, "{s}") })).run(.{ &reader, &writer });
+    try program(lines(*std.Io.Reader, 8), pipe(.{ take(1), print(*std.Io.Writer, "{f}") })).run(.{ &reader, &writer });
     try std.testing.expectEqualStrings("one", writer.buffered());
     try std.testing.expectEqualStrings("two\nthree\n", reader.buffered());
 }
 
-fn shout(buffer: *[32]u8, line: []const u8) []const u8 {
-    return std.ascii.upperString(buffer, line);
+fn shout(line: zrx.Line(64)) zrx.Line(64) {
+    var upper = line;
+    for (upper.bytes[0..upper.len]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    return upper;
 }
 
 test "createFile and fileLines round-trip through the file system" {
@@ -99,8 +101,7 @@ test "createFile and fileLines round-trip through the file system" {
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    var scratch: [32]u8 = undefined;
-    try program(fileLines(path, 64), pipe(.{ map(shout), print(Log, "{s},") })).run(.{ io, &scratch, Log{ .writer = &writer } });
+    try program(fileLines(path, 64), pipe(.{ map(shout), print(Log, "{f},") })).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("RED,GREEN,BLUE,", writer.buffered());
 }
 
@@ -122,7 +123,7 @@ test "a writer writes out what it holds when the run fails" {
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try program(fileLines(path, 64), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
@@ -142,7 +143,7 @@ test "createFile replaces an existing file unless asked to be exclusive" {
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try program(fileLines(path, 64), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("new,", writer.buffered());
 }
 
@@ -156,21 +157,46 @@ test "the line limit counts the line, not its newline" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const fits = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/fits", .{tmp.sub_path});
-    try program(fileLines(fits, 4), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &writer } });
+    try program(fileLines(fits, 4), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("ABCD,EF,GHIJ,", writer.buffered());
 
     var second: [64]u8 = undefined;
     var rejected: std.Io.Writer = .fixed(&second);
     const too_long = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/too-long", .{tmp.sub_path});
-    const result = program(fileLines(too_long, 4), pipe(.{print(Log, "{s},")})).run(.{ io, Log{ .writer = &rejected } });
+    const result = program(fileLines(too_long, 4), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &rejected } });
     try std.testing.expectError(error.StreamTooLong, result);
     try std.testing.expectEqualStrings("AB,", rejected.buffered());
+}
+
+test "line limits apply to a caller-provided reader, also at EOF" {
+    var reader: std.Io.Reader = .fixed("AB\nABCDE");
+    const work = program(lines(*std.Io.Reader, 4), pipe(.{zrx.drain()}));
+    try std.testing.expectError(error.StreamTooLong, work.run(.{&reader}));
+}
+
+test "file lines survive batching and a queue, including the final partial batch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines", .data = "AAAA\nBBBB\nCCCC" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines", .{tmp.sub_path});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const work = pipe(.{
+        zrx.batch(2),
+        queue(1),
+        zrx.flatten(),
+        print(*std.Io.Writer, "[{f}]"),
+    });
+    try program(fileLines(path, 4), work).run(.{ io, &writer });
+    try std.testing.expectEqualStrings("[AAAA][BBBB][CCCC]", writer.buffered());
 }
 
 test "a missing file fails the run before any item" {
     var buffer: [8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    const result = program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{s}")})).run(.{ io, &writer });
+    const result = program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{f}")})).run(.{ io, &writer });
     try std.testing.expectError(error.FileNotFound, result);
 }
 
