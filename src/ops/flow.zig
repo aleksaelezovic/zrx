@@ -78,14 +78,15 @@ fn Queue(comptime capacity: usize) type {
                             error.Canceled => return error.Canceled,
                         };
                         for (ready[0..count]) |item| {
-                            if (try down.push(item) == .done) {
-                                // A producer waiting for space, or pushing
-                                // later, is answered `.done`.
-                                self.channel.close(self.io);
-                                return;
-                            }
+                            if (try down.push(item) == .done) return;
                         }
                     }
+                }
+
+                /// The task is gone, whatever ended it: a producer waiting
+                /// for space, or pushing later, is answered `.done`.
+                pub fn retire(self: *Self) void {
+                    self.channel.close(self.io);
                 }
             };
         }
@@ -154,8 +155,8 @@ fn Branch(comptime Ps: type) type {
                     return core.TasksOf(@Tuple(&chains), Closed);
                 }
 
-                pub fn tasks(self: *@This(), down: anytype, scope: *core.Scope, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
-                    return core.tasksOf(&self.chains, Closed{}, scope, feeder, first);
+                pub fn tasks(self: *@This(), down: anytype, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
+                    return core.tasksOf(&self.chains, Closed{}, feeder, first);
                 }
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) !void {
@@ -358,8 +359,8 @@ fn Route(comptime Cs: type) type {
                     return if (rejoins) @Tuple(&.{}) else core.TasksOf(@Tuple(&chains), Closed);
                 }
 
-                pub fn tasks(self: *Self, down: anytype, scope: *core.Scope, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
-                    return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{}, scope, feeder, first);
+                pub fn tasks(self: *Self, down: anytype, feeder: usize, first: usize) Tasks(@TypeOf(down)) {
+                    return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{}, feeder, first);
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) !void {

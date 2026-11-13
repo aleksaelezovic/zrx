@@ -61,11 +61,13 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         // and this task only waits. Each segment ends the
                         // stream for its own stages; all of them have
                         // returned before anything is flushed or torn down.
+                        // The feed is member 0; the segments follow it. It
+                        // runs on the `Io` of the first boundary it feeds.
+                        const segments = Frame.at.tasks(refs, Closed{}, 0, 1);
+                        const io = segments[0].io();
+                        const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .on = io };
                         var scope: tasks.Scope = .{};
-                        const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .scope = &scope };
-                        // The feed is member 0; the segments follow it.
-                        const segments = Frame.at.tasks(refs, Closed{}, &scope, 0, 1);
-                        try scope.run(segments[0].io(), .{feed} ++ segments);
+                        try scope.run(io, .{feed} ++ segments);
                     }
                     try Frame.at.flush(refs);
                 }
@@ -75,23 +77,29 @@ pub fn Program(comptime S: type, comptime P: type) type {
     };
 }
 
-/// Segment 0 of a program whose pipe has a task boundary: the source and the
-/// stages up to the first boundary.
+/// Segment 0 of a program whose pipe has a task boundary, as a member of a
+/// `tasks.Scope`: the source and the stages up to the first boundary. Its
+/// work is the source; its end is the end of the stream for those stages.
 fn Feed(comptime S: type, comptime Env: type, comptime Frame: type) type {
     return struct {
         source: *const S,
         env: Env,
         refs: Frame.Refs,
-        scope: *tasks.Scope,
+        on: Io,
 
-        /// Everything the source pushes ends up in a queue (see `tasks.Scope`).
+        /// Everything the source pushes ends up in a queue.
         pub const feeds_only_members = !Frame.sinks_directly;
 
+        pub fn io(feed: @This()) Io {
+            return feed.on;
+        }
+
         pub fn run(feed: @This()) !void {
-            try feed.source.run(feed.env, Entry(Frame, S.Item){ .refs = feed.refs });
-            // An effect of a normal end must not follow a failure elsewhere.
-            if (feed.scope.hasFailed()) return;
-            try Frame.at.finish(feed.refs, Closed{});
+            return feed.source.run(feed.env, Entry(Frame, S.Item){ .refs = feed.refs });
+        }
+
+        pub fn end(feed: @This()) !void {
+            return Frame.at.finish(feed.refs, Closed{});
         }
     };
 }

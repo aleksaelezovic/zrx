@@ -36,7 +36,8 @@
 //!
 //!     pub const zrx_boundary = {};
 //!     pub fn work(self: *Stage, down: anytype) !void  // the task: feeds `down` until its input ends or `down` is done
-//!     pub fn taskIo(self: *Stage) Io                  // the `Io` its task runs on
+//!     pub fn retire(self: *Stage) void                // the task is gone: `push` answers `.done` from now on
+//!     pub fn taskIo(self: *Stage) Io                  // the `Io` its task is started and joined on
 //!
 //! Its `push` hands an item over and its `finish` says that no more will come.
 //! The end of the stream then travels with the data: `finish` runs in order up
@@ -45,12 +46,18 @@
 //! one. No task finishes another's stages. A program runs every such task and
 //! the source under one `tasks.Scope`, then flushes and tears down by itself.
 //!
+//! A boundary whose task is gone never keeps a producer waiting: `retire` is
+//! called when `work` is over, however it ended (the input ran out, `down`
+//! was done, it failed, it was cancelled). `work` itself only returns. What a
+//! segment's end means, and in which order others get to see it, is decided
+//! in one place for every task: `tasks.Scope`.
+//!
 //! A stage that holds sub-pipes (`branch`, `route`) says which tasks they need:
 //!
 //!     pub const has_boundary: bool                     // whether a sub-pipe has a boundary
 //!     pub const sinks_directly: bool                   // whether a sub-pipe ends on the task that pushes into it
 //!     pub fn Tasks(comptime Down: type) type           // `TasksOf` its chains
-//!     pub fn tasks(self: *Stage, down: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(down))
+//!     pub fn tasks(self: *Stage, down: anytype, feeder: usize, first: usize) Tasks(@TypeOf(down))
 //!
 //! `feeder` is the index, among the scope's members, of the task that pushes
 //! into the stage, and `first` the index of the first task returned. With
@@ -68,7 +75,6 @@
 const std = @import("std");
 const Io = std.Io;
 const di = @import("di.zig");
-pub const Scope = @import("tasks.zig").Scope;
 
 /// What a push tells its caller: keep sending, or stop because nothing
 /// downstream wants more. A stage that returned `.done` may still be pushed
@@ -134,7 +140,6 @@ pub fn TasksOf(comptime Chains: type, comptime Tail: type) type {
 pub fn tasksOf(
     chains: anytype,
     tail: anytype,
-    scope: *Scope,
     feeder: usize,
     first: usize,
 ) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
@@ -142,7 +147,7 @@ pub fn tasksOf(
     var out: TasksOf(Chains, @TypeOf(tail)) = undefined;
     comptime var next = 0;
     inline for (0..comptime di.types(Chains).len) |i| {
-        const inner = chains[i].tasks(tail, scope, feeder, first + next);
+        const inner = chains[i].tasks(tail, feeder, first + next);
         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
             out[next] = inner[k];
             next += 1;
@@ -353,19 +358,19 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// order: members of a `Scope`, where the first of them has the
             /// index `first` and the task that pushes into this chain the
             /// index `feeder`.
-            pub fn tasks(refs: Refs, tail: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
+            pub fn tasks(refs: Refs, tail: anytype, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
                 var out: Tasks(@TypeOf(tail)) = undefined;
                 // The task that runs the stage being looked at.
                 var current = feeder;
                 comptime var next = 0;
                 inline for (0..n) |i| {
                     if (comptime @hasDecl(stages[i], "zrx_boundary")) {
-                        out[next] = .{ .refs = refs, .tail = tail, .scope = scope, .fed_by = current };
+                        out[next] = .{ .refs = refs, .tail = tail, .fed_by = current };
                         current = first + next;
                         next += 1;
                     } else if (comptime @hasDecl(stages[i], "Tasks")) {
                         const down: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        const inner = refs[i].tasks(down, scope, current, first + next);
+                        const inner = refs[i].tasks(down, current, first + next);
                         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
                             out[next] = inner[k];
                             next += 1;
@@ -438,17 +443,15 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return @Tuple(list);
         }
 
-        /// The task of the boundary stage `j`: everything from that stage to
-        /// the next boundary. It feeds the stages after `j` until the input
-        /// ends or they are done, then ends the stream for them. That last
-        /// part is skipped once the run has failed: an effect of a normal
-        /// end must not follow a failure elsewhere.
+        /// The task of the boundary stage `j`, as a member of a `Scope`:
+        /// everything from that stage to the next boundary. Its work is to
+        /// feed the stages after `j`; its end is the end of the stream for
+        /// them. The scope decides when each happens.
         fn Segment(comptime Tail: type, comptime j: usize) type {
             return struct {
                 refs: Refs,
                 tail: Tail,
-                scope: *Scope,
-                /// The member that pushes into stage `j` (see `Scope`).
+                /// The member that pushes into stage `j`.
                 fed_by: usize,
 
                 /// Everything this task puts out goes into another boundary.
@@ -460,9 +463,15 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
                 pub fn run(segment: @This()) !void {
                     const down: Down(Tail, j + 1) = .{ .refs = segment.refs, .tail = segment.tail };
-                    try segment.refs[j].work(down);
-                    if (segment.scope.hasFailed()) return;
-                    try finishFrom(j + 1, segment.refs, segment.tail);
+                    return segment.refs[j].work(down);
+                }
+
+                pub fn retire(segment: @This()) void {
+                    segment.refs[j].retire();
+                }
+
+                pub fn end(segment: @This()) !void {
+                    return finishFrom(j + 1, segment.refs, segment.tail);
                 }
             };
         }
@@ -509,8 +518,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.finish(self.refsOf(), tail);
         }
 
-        pub fn tasks(self: *Self, tail: anytype, scope: *Scope, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
-            return at.tasks(self.refsOf(), tail, scope, feeder, first);
+        pub fn tasks(self: *Self, tail: anytype, feeder: usize, first: usize) Tasks(@TypeOf(tail)) {
+            return at.tasks(self.refsOf(), tail, feeder, first);
         }
 
         pub fn flush(self: *Self) !void {

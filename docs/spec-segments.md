@@ -43,24 +43,60 @@ into a guarantee. This spec changes the structure instead.
    handled: each queue drains, each segment finishes in turn, then writers
    flush. Nothing is cancelled. Only a stage that is done, or a failure, cuts
    this short. *(accepted)*
-5. **Failure.** The first task that returns an error is the result of the run.
-   The scope marks the run as failed, cancels every other task and joins them.
-   A segment does not begin `finish` once the run is marked failed, and
-   `flush` is skipped. *(accepted)*
+5. **Failure.** The first task that fails is the result of the run. The
+   failure is on record before anybody can see that the task's work ended;
+   the scope then cancels every other task and joins them. A segment does
+   not begin `finish` once a failure is on record, and `flush` is skipped.
+   *(accepted)*
 6. **Working for nothing.** A segment whose every output is a queue is
-   cancelled once every segment fed by those queues has returned. What it
-   returns is discarded. This is decided from a static tree of segments, by
-   the scope, when a task returns. *(accepted)*
+   cancelled once every segment fed by those queues has returned, if it is
+   still at work. That is as good as its work having ended well: what the
+   work returned is dropped, and the segment ends its stream like any other.
+   A segment that is already ending its stream is left to end. This is
+   decided from a static tree of segments, by the scope, when a task
+   returns. *(accepted; "ends its stream like any other" added after the
+   first review of PR 5)*
 7. **After every task is joined**, on the caller: `flush` in reverse order (on
    success), then `deinit` in reverse order. *(accepted)*
-8. **Cancelling the run** (the caller's task is cancelled) cancels every
-   segment, skips `finish` and `flush`, and returns `error.Canceled`.
-   *(accepted)*
+8. **Cancelling the run** (the caller's task is cancelled) while it waits
+   for an outcome cancels every segment, skips `finish` and `flush`, and
+   returns `error.Canceled`. *(accepted)* A request that arrives once the
+   run has an outcome stays pending for the caller, and `run` returns that
+   outcome. *(proposed, after the first review of PR 5)*
 9. **`merge` and `system` use the same scope.** In `merge`, a member that is
    answered `.done` ends the group as a success and the others are cancelled.
    On an `Io` without concurrency both return
    `error.ConcurrencyUnavailable`; there is no sequential fallback.
    *(accepted)*
+
+10. **A segment runs on the `Io` in force at its queue.** Its task is
+    started, joined and cancelled on that `Io`; segment 0 runs on the `Io`
+    of the first queue. *(proposed, after the first review of PR 5; it is
+    what `main` did)*
+
+## Invariants
+
+The rules above are what happens. These are what must hold whatever
+happens, and what the tests check over shapes of pipes rather than case by
+case (`tests/flow.zig`, "invariants over shapes"). A defect found in review
+is first matched to the invariant it breaks; if it breaks none, either an
+invariant is missing here or the finding is against something not promised.
+
+1. **One exit, one place.** Every task ends its work through the same steps,
+   in `tasks.Scope`: decide what the end means and put a failure on record,
+   then let go of whoever waits on the task, then end the stream. No
+   operator and no segment decides any of this for itself.
+2. **A queue whose task is gone answers `.done`.** However that task ended:
+   the input ran out, it was done, it failed, it was cancelled. No producer
+   waits on a queue nobody takes from.
+3. **Being cancelled for working for nothing changes nothing but the time.**
+   A segment learns "done" from the answer to a push or from being
+   cancelled; the run's result, what every sub-pipe receives and which
+   hooks run are the same either way.
+4. **On success every stage finishes once and then flushes once.**
+5. **On failure nothing flushes, and no segment begins to finish after the
+   failure is on record.** It is on record before anybody is let go by it.
+6. **Every task has returned before anything is torn down.**
 
 ## Contract
 
@@ -70,8 +106,10 @@ into a guarantee. This spec changes the structure instead.
   still pushed and are refused by the stage that is done.
 - **Stage hooks** *(accepted)*: `init`, `push`, `finish`, `flush`, `deinit`,
   `provide`. `start` is removed: no stage emits before the first item. A stage
-  that is a task boundary declares `zrx_boundary` and one more hook, the body
-  its task runs. `src/pipe.zig` knows the marker and the hook, not `queue`.
+  that is a task boundary declares `zrx_boundary`, the body its task runs
+  (`work`), what lets go of whoever waits on that task (`retire`) and the
+  `Io` it runs on (`taskIo`). `src/pipe.zig` knows the marker and the hooks,
+  not `queue`.
 - **`branch` and `route`** keep plain per-sub-pipe flags, as on `main`
   *(accepted)*.
 - **The run's error set stays inferred** *(accepted)*: a segment's error is
@@ -103,8 +141,11 @@ into a guarantee. This spec changes the structure instead.
   between the one that emits it and the one that is done may run for it.
 - That a segment with a synchronous sink of its own (`branch` with one direct
   and one queued sub-pipe) is stopped before its next push.
-- Which wins when a failure and a "done" happen together: whichever task the
-  scope sees return first.
+- Which wins when a failure and a "done" happen together: whichever the
+  scope has on record first. The same goes for a failure in the work of a
+  segment that is being cancelled for working for nothing: it is dropped.
+- That a cancel request for the caller wins over an outcome the run already
+  has.
 - That items already in a queue are not handled after a failure elsewhere.
   Handlers may run for some of them until the cancel request arrives; no
   `finish` runs.
@@ -122,8 +163,13 @@ not by a change.
 - Tasks are cancelled one after another: `std.Io` sends a cancel request by
   joining the task. One that is slow to notice delays the request to the
   others; the run returns at the same moment either way.
-- A source or handler that swallows `error.Canceled` and goes on can hold a
-  run that has failed: a queue is not closed behind a failure.
+- While a segment that was cancelled for working for nothing ends its
+  stream, it cannot be interrupted again: that request was the only one its
+  task can be sent.
+- A handler behind a queue that swallows `error.Canceled` and goes on can
+  hold a run that has failed: the queue it takes from is not closed when
+  the segment before it fails. (The other direction is covered by
+  invariant 2.)
 
 ## Acceptance cases
 

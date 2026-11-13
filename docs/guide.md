@@ -295,10 +295,13 @@ branch(.{
   in a queue.
 - When the stages after a queue are done (`take`), the segment before it is
   answered `.done` at its next push. If everything that segment produces goes
-  into queues, it is not left waiting for that push: it is cancelled as soon
-  as the segments behind those queues have returned. A segment that also
-  feeds a sub-pipe directly (a `branch` with one direct and one queued
-  sub-pipe) stops at its next push.
+  into queues, it is not left waiting for that push: it is interrupted as
+  soon as the segments behind those queues have returned, and then finishes
+  its stages as it would have otherwise. A segment that also feeds a
+  sub-pipe directly (a `branch` with one direct and one queued sub-pipe)
+  goes on for that sub-pipe, and the queue that is done takes no more.
+- A queue's task runs on the `Io` in force where the queue stands, so
+  `provide(io)` before a queue decides where its far side runs.
 - Stages before a queue may have handled more items than the stages after it
   take: the queue holds some, and the source runs ahead.
 - Cancellation is cooperative: a handler or source that never calls into

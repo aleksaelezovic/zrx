@@ -900,3 +900,324 @@ test "a segment with a direct sub-pipe keeps running after its queued one is don
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
     try std.testing.expect(!direct.interrupted.load(.seq_cst));
 }
+
+// --- invariants over shapes ---------------------------------------------------
+//
+// Not cases but rules, checked for every shape below and every way its
+// "ended" side can end: the items run out, that side is done after one item,
+// or it fails on the first. The source never waits for input and pushes far
+// more than the queues hold, so a producer left waiting on a queue hangs the
+// run. When the ended side is done, the source holds back after the first
+// item until that side has had it and the run has had every chance to cancel
+// the segments that now work for nothing: both ways of learning "done" (by
+// the answer to a push, by being cancelled) have to give the same result.
+//
+// 1. The run returns.
+// 2. A sub-pipe beside the ended side gets every item meant for it.
+// 3. On success every stage finishes once and then flushes once.
+// 4. On failure nothing flushes, and nothing finishes either: the failure
+//    comes with the first item, long before the source could have run out,
+//    and it is on record before anybody is let go by it.
+
+const Way = enum { runs_out, done, fails };
+
+fn same(value: u32) u32 {
+    return value;
+}
+fn failAlways(_: u32) error{Ended}!u32 {
+    return error.Ended;
+}
+
+fn Ender(comptime ending: Way) type {
+    return switch (ending) {
+        .runs_out => @TypeOf(map(same)),
+        .done => @TypeOf(take(1)),
+        .fails => @TypeOf(map(failAlways)),
+    };
+}
+
+fn ender(comptime ending: Way) Ender(ending) {
+    return switch (ending) {
+        .runs_out => map(same),
+        .done => take(1),
+        .fails => map(failAlways),
+    };
+}
+
+const item_count = 24;
+
+const Pace = struct {
+    hold_back: bool,
+    reached: std.atomic.Value(bool) = .init(false),
+};
+
+fn endedSink(sink: Left, pace: *Pace, value: u32) void {
+    sink.seen.add(value);
+    pace.reached.store(true, .seq_cst);
+}
+
+fn paced(pace: *Pace, out: anytype) !void {
+    for (0..item_count) |i| {
+        if (try out.push(@as(u32, @intCast(i))) == .done) return;
+        if (i == 0 and pace.hold_back) {
+            while (!pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
+            for (0..2000) |_| std.Thread.yield() catch {};
+        }
+    }
+}
+
+/// Everything one run of a shape is watched with.
+const Probe = struct {
+    ticks: Ticks = .{},
+    t0: Trace(0) = .{},
+    t1: Trace(1) = .{},
+    t2: Trace(2) = .{},
+    t3: Trace(3) = .{},
+    t4: Trace(4) = .{},
+    ended: Numbers = .{},
+    beside: Numbers = .{},
+
+    fn run(probe: *Probe, comptime shape: anytype, comptime ending: Way) !void {
+        var pace: Pace = .{ .hold_back = ending == .done };
+        const deps = .{ io, &pace, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside } };
+        const result = program(fromProducer(u32, paced), shape.build(ending)).run(deps);
+        if (ending == .fails) {
+            try std.testing.expectError(error.Ended, result);
+        } else {
+            try result;
+            try std.testing.expectEqual(shape.beside(), probe.beside.len);
+            try std.testing.expectEqual(if (ending == .done) 1 else shape.ended(), probe.ended.len);
+        }
+        inline for (.{ &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4 }) |trace| {
+            if (trace.events.len > 0) {
+                try std.testing.expectEqual(@as(usize, 1), trace.count('d'));
+                if (ending == .fails) {
+                    try std.testing.expectEqual(@as(usize, 0), trace.count('F'));
+                    try std.testing.expectEqual(@as(usize, 0), trace.count('f'));
+                } else {
+                    try std.testing.expect(try trace.when('f') < try trace.when('F'));
+                }
+            }
+        }
+    }
+};
+
+fn checkShape(comptime shape: type) !void {
+    inline for (.{ Way.runs_out, Way.done, Way.fails }) |ending| {
+        for (0..20) |_| {
+            var probe: Probe = .{};
+            try probe.run(shape, ending);
+        }
+    }
+}
+
+/// Three segments in a row.
+const InARow = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) })) {
+        return pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+/// The ended side is two segments deep; the source also feeds a sub-pipe directly.
+const BesideTheSource = struct {
+    fn Deep(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(Deep(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        return pipe(.{ mark(0), branch(.{ deep, pipe(.{subscribe(toRight)}) }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// A segment behind a queue feeds the ended side through another queue and a sub-pipe directly.
+const BesideASegment = struct {
+    fn Last(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Last(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
+        const last: Last(ending) = pipe(.{ queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        return pipe(.{ mark(0), queue(1), mark(1), branch(.{ last, pipe(.{subscribe(toRight)}) }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// Two queued sub-pipes of one branch: one ends, the other takes everything.
+const TwoQueued = struct {
+    fn First(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ queue(1), mark(1), ender(ending), subscribe(endedSink) }));
+    }
+    const Second = @TypeOf(pipe(.{ queue(1), mark(2), subscribe(toRight) }));
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(First(ending), undefined), @as(Second, undefined) }) })) {
+        const first: First(ending) = pipe(.{ queue(1), mark(1), ender(ending), subscribe(endedSink) });
+        const second: Second = pipe(.{ queue(1), mark(2), subscribe(toRight) });
+        return pipe(.{ mark(0), branch(.{ first, second }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// Behind a queue, a branch of a sub-pipe two segments deep and a queued one.
+const Nested = struct {
+    fn Deep(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(endedSink) }));
+    }
+    const Other = @TypeOf(pipe(.{ queue(1), mark(4), subscribe(toRight) }));
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Deep(ending), undefined), @as(Other, undefined) }) })) {
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(endedSink) });
+        const other: Other = pipe(.{ queue(1), mark(4), subscribe(toRight) });
+        return pipe(.{ mark(0), queue(1), mark(1), branch(.{ deep, other }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// A route whose cases are both queued: the even items go to the ended side.
+const Routed = struct {
+    fn Even(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) }));
+    }
+    const Odd = @TypeOf(pipe(.{ queue(1), mark(3), subscribe(toRight) }));
+    fn Cases(comptime ending: Way) type {
+        return @TypeOf(route(.{ when(isEven, @as(Even(ending), undefined)), otherwise(@as(Odd, undefined)) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), @as(Cases(ending), undefined) })) {
+        const even: Even(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(endedSink) });
+        const odd: Odd = pipe(.{ queue(1), mark(3), subscribe(toRight) });
+        return pipe(.{ mark(0), route(.{ when(isEven, even), otherwise(odd) }) });
+    }
+    fn ended() usize {
+        return item_count / 2;
+    }
+    fn beside() usize {
+        return item_count / 2;
+    }
+};
+
+test "invariants: three segments in a row" {
+    try checkShape(InARow);
+}
+test "invariants: the ended side beside a direct sub-pipe of the source" {
+    try checkShape(BesideTheSource);
+}
+test "invariants: the ended side beside a direct sub-pipe of a segment" {
+    try checkShape(BesideASegment);
+}
+test "invariants: two queued sub-pipes" {
+    try checkShape(TwoQueued);
+}
+test "invariants: a branch behind a queue" {
+    try checkShape(Nested);
+}
+test "invariants: queued cases of a route" {
+    try checkShape(Routed);
+}
+
+test "each queue's task runs on the Io in force where the queue stands" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
+    defer backend.deinit();
+    var seen: Numbers = .{};
+    const work = pipe(.{ queue(2), provide(backend.io()), queue(2), subscribe(record) });
+    try std.testing.expectError(error.ConcurrencyUnavailable, program(range(u32, 0, 5), work).run(.{ io, &seen }));
+    try seen.expect(&.{});
+}
+
+/// A stage whose `finish` takes its time and passes cancelation points: it
+/// waits until the sink has had an item, then gives the run every chance to
+/// interrupt it.
+const LingerAtEnd = struct {
+    pub const zrx_operator = {};
+    pub const name = "lingerAtEnd";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            clock: std.Io,
+            pace: *Pace,
+
+            pub fn init(self: *@This(), _: *const LingerAtEnd, env: Env) !void {
+                self.* = .{ .clock = zrx.di.get(env, std.Io), .pace = zrx.di.get(env, *Pace) };
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), _: anytype) !void {
+                while (!self.pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
+                for (0..2000) |_| {
+                    try self.clock.checkCancel();
+                    std.Thread.yield() catch {};
+                }
+            }
+        };
+    }
+};
+
+/// Pushes two items and returns: its segment is ending while the one behind
+/// the queue becomes done.
+fn pushTwo(out: anytype) !void {
+    _ = try out.push(@as(u32, 0));
+    _ = try out.push(@as(u32, 1));
+}
+
+test "a segment that is already ending is left to end when what it feeds is done" {
+    var ended: Numbers = .{};
+    var pace: Pace = .{ .hold_back = false };
+    const work = pipe(.{
+        LingerAtEnd{},
+        queue(4),
+        take(1),
+        subscribe(endedSink),
+    });
+    try program(fromProducer(u32, pushTwo), work).run(.{ io, &pace, Left{ .seen = &ended } });
+    try ended.expect(&.{0});
+}
+
+/// Pushes one item, waits until the sink has had it and the run has had
+/// every chance to cancel this task, and returns without having noticed.
+fn pushThenReturnUnaware(pace: *Pace, out: anytype) !void {
+    _ = try out.push(@as(u32, 0));
+    while (!pace.reached.load(.seq_cst)) std.Thread.yield() catch {};
+    for (0..2000) |_| std.Thread.yield() catch {};
+}
+
+test "a segment cancelled for working for nothing ends its stream even if the request finds it there" {
+    var ended: Numbers = .{};
+    var pace: Pace = .{ .hold_back = false };
+    const work = pipe(.{
+        LingerAtEnd{},
+        queue(4),
+        take(1),
+        subscribe(endedSink),
+    });
+    try program(fromProducer(u32, pushThenReturnUnaware), work).run(.{ io, &pace, Left{ .seen = &ended } });
+    try ended.expect(&.{0});
+}

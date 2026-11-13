@@ -77,19 +77,36 @@ to this file; edit `AGENTS.md`, not copies.
   or a member saying the group is done (`merge`, when the pipe answers
   `.done`); the rest are cancelled and joined. There is no sequential
   fallback: an `Io` that cannot start a member is
-  `error.ConcurrencyUnavailable`. Being cancelled from outside always wins.
-  A failure is a task's return value: nothing is reported on the side, and
-  nothing is cast from `anyerror`.
-- **After a failure no segment ends its stream** (`Scope.hasFailed`, read
-  before `finish`), and nothing flushes. That is all a failure promises:
-  handlers may run for items already queued until the cancel request arrives.
+  `error.ConcurrencyUnavailable`. Being cancelled from outside wins while
+  the scope waits for an outcome; once it has one it only joins. A failure
+  is a task's return value: nothing is reported on the side, and nothing is
+  cast from `anyerror`. A member is started and joined on its own `Io`.
+- **Every task ends its work in one place** (`Scope.Runner`), in a fixed
+  order: `run`; under the mutex, decide what its end means and put a
+  failure on record; `retire` (nobody waits on it again: a queue closes);
+  `end` (finish the segment's stages) unless the run is over. A segment and
+  an operator only say what each step is. Do not decide any of it elsewhere:
+  the first review of PR 5 found three defects that were one, a segment's
+  end handled in three files (the queue closed itself only when done, the
+  segment looked at a flag set after it had returned, the program picked the
+  `Io`).
+- **After a failure no segment begins to end its stream**, and nothing
+  flushes. That is all a failure promises: handlers may run for items
+  already queued until the cancel request arrives.
 - **Working for nothing is decided from a static tree.** A member names who
   feeds it (`fed_by`) and whether everything it puts out goes to other
   members (`feeds_only_members`, from `sinks_directly`). Once all of those
-  have returned the scope cancels it and discards what it returns. Stages
-  are not asked anything from another task: no atomics in operators for this.
+  have returned the scope cancels it if it is still at work. That is only a
+  faster way of learning "done": the member then retires and ends its
+  stream as if a push had told it, and nothing may depend on which it was.
+  Stages are not asked anything from another task.
+- **Invariants before cases.** `docs/spec-segments.md` lists what must hold
+  whatever happens. A defect is first matched to the invariant it breaks,
+  and the fix restores that invariant where it is decided, for every shape,
+  not for the reported one. If it breaks none, an invariant is missing or
+  the finding is against something not promised.
 - **Do not add to the stage contract for concurrency.** A boundary stage has
-  `zrx_boundary`, `work` and `taskIo`; a stage with sub-pipes has
+  `zrx_boundary`, `work`, `retire` and `taskIo`; a stage with sub-pipes has
   `has_boundary`, `sinks_directly`, `Tasks` and `tasks`. A review finding
   against something the spec lists as not promised is answered by pointing
   there, not by a change.
@@ -167,3 +184,10 @@ to this file; edit `AGENTS.md`, not copies.
   in turn and seeing a test fail, and by repeating the `flow` and `programs`
   suites a few hundred times in Debug and ReleaseFast under a watchdog that
   also fails when the binary is missing. A hang is a failure.
+- Concurrency is tested as invariants over shapes (`tests/flow.zig`): every
+  shape of pipe is run with its ended side running out, being done and
+  failing. A new shape goes there, not into a one-off test. When "done" is
+  involved the source holds back, so that both ways of learning it (the
+  answer to a push, being cancelled) are taken: a fast source hides the
+  second, which is how the first review of PR 5 found a hang the tests had
+  not.
