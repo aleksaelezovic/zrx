@@ -54,7 +54,14 @@ to this file; edit `AGENTS.md`, not copies.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a queue in a sub-pipe. A rejoining route case must not contain a queue.
-  `system` and `merge` use `tasks.all`: `Io.async`, fail fast, cancel the rest.
+- **One scope supervises every group of tasks** (`tasks.Scope`): `system` and
+  `merge` now, the segments of a program next (`docs/spec-segments.md`).
+  Members are started with `Io.concurrent` and never run on the supervising
+  task, which only waits. The first outcome is the result: a member returning
+  an error, or a member saying the group is done (`merge`, when the pipe
+  answers `.done`); the rest are cancelled and joined. There is no sequential
+  fallback: an `Io` that cannot start a member is
+  `error.ConcurrencyUnavailable`. Being cancelled from outside always wins.
 - **Lifecycle.** `init` in order, `start` in reverse, pushes, then on a normal
   end `finish` in order and `flush` in reverse; always `deinit` in reverse.
   Whoever owns a writer flushes it. `release` cannot fail.

@@ -87,9 +87,9 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 
 `system` runs its programs together with the same dependencies and returns when
 all have finished. The first failure cancels the others and is returned. A
-system is itself runnable, so systems nest. Programs are started with
-`Io.async`: they run concurrently when the `Io` can do so and one after another
-when it cannot.
+system is itself runnable, so systems nest. Each program runs as a task of its
+own, so the `Io` must be able to run tasks concurrently; with one that cannot,
+`run` returns `error.ConcurrencyUnavailable`.
 
 ## Sources
 
@@ -100,7 +100,7 @@ when it cannot.
 | `range(T, first, end)` | Integers in `[first, end)`. |
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
-| `merge(.{ a, b })` | The items of several sources as they arrive; needs `std.Io`. |
+| `merge(.{ a, b })` | The items of several sources as they arrive. Each source runs as a task: needs `std.Io` with concurrency. Once the pipe is done, a source that is waiting is cancelled. |
 | `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:

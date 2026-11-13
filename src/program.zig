@@ -73,9 +73,11 @@ fn Entry(comptime Frame: type, comptime Item: type) type {
     };
 }
 
-/// Several programs (or systems) run together with the same dependencies.
-/// Returns when all have completed; the first failure cancels the rest.
-/// With more than one member, `std.Io` must be among the dependencies.
+/// Several programs (or systems) run together with the same dependencies,
+/// each as a task (see `tasks.Scope`). Returns when all have completed; the
+/// first failure cancels the rest. With more than one member, `std.Io` must
+/// be among the dependencies and able to run tasks concurrently
+/// (`error.ConcurrencyUnavailable` otherwise).
 pub fn system(programs: anytype) System(Programs(@TypeOf(programs))) {
     var out: Programs(@TypeOf(programs)) = undefined;
     inline for (0..programs.len) |i| out[i] = programs[i];
@@ -114,7 +116,8 @@ pub fn System(comptime Ps: type) type {
             };
             var group: @Tuple(&list) = undefined;
             inline for (0..members.len) |i| group[i] = .{ .program = &self.programs[i], .env = env };
-            return tasks.all(di.get(env, Io), group);
+            var scope: tasks.Scope = .{};
+            return scope.run(di.get(env, Io), group);
         }
     };
 }
