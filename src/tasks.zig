@@ -33,6 +33,8 @@ pub const Scope = struct {
     outcome: Outcome = .running,
     /// Members that have returned.
     returned: usize = 0,
+    /// The run is over and not a success. Read without the mutex.
+    failed: std.atomic.Value(bool) = .init(false),
 
     const Outcome = union(enum) {
         running,
@@ -52,11 +54,23 @@ pub const Scope = struct {
         scope.settle(io, .done);
     }
 
+    /// Whether the run has failed, been cancelled or could not start, as far
+    /// as the scope has seen. Cheap: a member reads it before an effect that
+    /// belongs to a normal end.
+    pub fn hasFailed(scope: *const Scope) bool {
+        return scope.failed.load(.acquire);
+    }
+
     fn settle(scope: *Scope, io: Io, outcome: Outcome) void {
         scope.mutex.lockUncancelable(io);
         defer scope.mutex.unlock(io);
-        if (scope.outcome == .running) scope.outcome = outcome;
+        if (scope.outcome == .running) scope.set(outcome);
         scope.changed.signal(io);
+    }
+
+    fn set(scope: *Scope, outcome: Outcome) void {
+        scope.outcome = outcome;
+        if (outcome != .done) scope.failed.store(true, .release);
     }
 
     fn memberReturned(scope: *Scope, io: Io, failed: ?usize) void {
@@ -64,7 +78,7 @@ pub const Scope = struct {
         defer scope.mutex.unlock(io);
         scope.returned += 1;
         if (failed) |index| {
-            if (scope.outcome == .running) scope.outcome = .{ .failed = index };
+            if (scope.outcome == .running) scope.set(.{ .failed = index });
         }
         scope.changed.signal(io);
     }
@@ -117,9 +131,7 @@ pub const Scope = struct {
             scope.mutex.lockUncancelable(io);
             defer scope.mutex.unlock(io);
             while (scope.outcome == .running and scope.returned < n) {
-                scope.changed.wait(io, &scope.mutex) catch {
-                    scope.outcome = .canceled;
-                };
+                scope.changed.wait(io, &scope.mutex) catch scope.set(.canceled);
             }
             break :waiting scope.outcome;
         };

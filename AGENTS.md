@@ -62,8 +62,9 @@ to this file; edit `AGENTS.md`, not copies.
   answers `.done`); the rest are cancelled and joined. There is no sequential
   fallback: an `Io` that cannot start a member is
   `error.ConcurrencyUnavailable`. Being cancelled from outside always wins.
-- **Lifecycle.** `init` in order, `start` in reverse, pushes, then on a normal
-  end `finish` in order and `flush` in reverse; always `deinit` in reverse.
+- **Lifecycle.** `init` in order, pushes, then on a normal end `finish` in
+  order and `flush` in reverse; always `deinit` in reverse. There is no
+  `start` hook: no stage emits before the first item.
   Whoever owns a writer flushes it. `release` cannot fail.
 - **Programs must terminate.** `program` takes a source and a `pipe(...)`;
   `branch`, `when` and `otherwise` take `pipe(...)` too, never a bare operator.

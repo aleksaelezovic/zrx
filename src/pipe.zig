@@ -14,7 +14,6 @@
 //!
 //!     pub fn init(self: *Stage, op: *const Op, env: Env) !void
 //!     pub fn push(self: *Stage, item: In, down: anytype) !Flow
-//!     pub fn start(self: *Stage, down: anytype) !void    // optional: after every stage is initialized
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
 //!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
 //!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
@@ -25,9 +24,32 @@
 //! every call is resolved at compile time. A pipe is itself an operator, which
 //! is all that nesting a pipe in a pipe means.
 //!
-//! A run goes: `init` every stage in order, `start` in reverse, `push` per
-//! item, then on a normal end `finish` in order and `flush` in reverse; and
-//! always, last, `deinit` in reverse. A failure skips `finish` and `flush`.
+//! A run goes: `init` every stage in order, `push` per item, then on a normal
+//! end `finish` in order and `flush` in reverse; and always, last, `deinit` in
+//! reverse. A failure skips `finish` and `flush`.
+//!
+//! ## Task boundaries
+//!
+//! A stage that hands its items to another task (`queue`) splits the pipe into
+//! *segments*: what comes before it runs on one task, what follows it on the
+//! stage's own. Such a stage also declares:
+//!
+//!     pub const zrx_boundary = {};
+//!     pub fn work(self: *Stage, down: anytype) !void  // the task: feeds `down` until its input ends or `down` is done
+//!     pub fn taskIo(self: *Stage) Io                  // the `Io` its task runs on
+//!
+//! Its `push` hands an item over and its `finish` says that no more will come.
+//! The end of the stream then travels with the data: `finish` runs in order up
+//! to and including a boundary, on the task that pushed into it; the boundary's
+//! task, once `work` has returned, finishes the stages after it up to the next
+//! one. No task finishes another's stages. A program runs every such task and
+//! the source under one `tasks.Scope`, then flushes and tears down by itself.
+//!
+//! A stage that holds sub-pipes (`branch`, `route`) says which tasks they need:
+//!
+//!     pub const has_boundary: bool                     // whether a sub-pipe has a boundary
+//!     pub fn Tasks(comptime Down: type) type           // `TasksOf` its chains
+//!     pub fn tasks(self: *Stage, down: anytype, scope: *Scope) Tasks(@TypeOf(down))
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -35,7 +57,9 @@
 //! through memory until inlining removes it, and that shape stops the
 //! optimizer from doing so. `zig build zero-overhead` guards the operators here.
 const std = @import("std");
+const Io = std.Io;
 const di = @import("di.zig");
+pub const Scope = @import("tasks.zig").Scope;
 
 /// What a push tells its caller: keep sending, or stop because nothing
 /// downstream wants more. A stage that returned `.done` may still be pushed
@@ -73,6 +97,36 @@ pub fn Spliced(comptime operator_name: []const u8, comptime Ops: type) type {
         pub const zrx_spliced = {};
         pub const name = operator_name;
     };
+}
+
+/// Whether any of the chains in the tuple type `Chains` has a task boundary.
+pub fn anyBoundary(comptime Chains: type) bool {
+    for (di.types(Chains)) |C| if (C.has_boundary) return true;
+    return false;
+}
+
+/// The tasks of the chains in the tuple type `Chains`, each of which pushes
+/// into a `Tail`: what a stage with sub-pipes declares as its `Tasks`.
+pub fn TasksOf(comptime Chains: type, comptime Tail: type) type {
+    var list: []const type = &.{};
+    for (di.types(Chains)) |C| list = list ++ di.types(C.Tasks(Tail));
+    return @Tuple(list);
+}
+
+/// The tasks of `chains`, a pointer to a tuple of chains: what a stage with
+/// sub-pipes returns from its `tasks`.
+pub fn tasksOf(chains: anytype, tail: anytype, scope: *Scope) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
+    const Chains = @typeInfo(@TypeOf(chains)).pointer.child;
+    var out: TasksOf(Chains, @TypeOf(tail)) = undefined;
+    comptime var next = 0;
+    inline for (0..comptime di.types(Chains).len) |i| {
+        const inner = chains[i].tasks(tail, scope);
+        inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
+            out[next] = inner[k];
+            next += 1;
+        }
+    }
+    return out;
 }
 
 /// For operators that take sub-pipelines.
@@ -211,7 +265,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
         /// A pointer to every stage, in order.
         pub const Refs = @Tuple(&pointers);
 
-        /// Whether part of this chain runs on another task (it contains a `queue`).
+        /// Whether part of this chain runs on another task (it contains a
+        /// `queue`, in itself or in a sub-pipe).
         pub const has_boundary = blk: {
             for (stages) |S| {
                 if (@hasDecl(S, "zrx_boundary")) break :blk true;
@@ -260,29 +315,37 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 return provideFrom(i + 1, refs, next);
             }
 
-            pub fn start(refs: Refs, tail: anytype) !void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "start")) {
-                        const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        try refs[i].start(next);
-                    }
-                }
-            }
-
             pub fn push(refs: Refs, item: In, tail: anytype) !Flow {
                 const first: Down(@TypeOf(tail), 0) = .{ .refs = refs, .tail = tail };
                 return first.push(item);
             }
 
+            /// The end of the stream, for the stages up to and including
+            /// the first task boundary. What follows a boundary is finished
+            /// by that boundary's task (`Segment`).
             pub fn finish(refs: Refs, tail: anytype) !void {
+                return finishFrom(0, refs, tail);
+            }
+
+            /// One task per boundary in this chain and its sub-pipes, in
+            /// order: members of a `Scope`.
+            pub fn tasks(refs: Refs, tail: anytype, scope: *Scope) Tasks(@TypeOf(tail)) {
+                var out: Tasks(@TypeOf(tail)) = undefined;
+                comptime var next = 0;
                 inline for (0..n) |i| {
-                    if (@hasDecl(stages[i], "finish")) {
-                        const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
-                        try refs[i].finish(next);
+                    if (comptime @hasDecl(stages[i], "zrx_boundary")) {
+                        out[next] = .{ .refs = refs, .tail = tail, .scope = scope };
+                        next += 1;
+                    } else if (comptime @hasDecl(stages[i], "Tasks")) {
+                        const down: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                        const inner = refs[i].tasks(down, scope);
+                        inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
+                            out[next] = inner[k];
+                            next += 1;
+                        }
                     }
                 }
+                return out;
             }
 
             /// After every `finish`: stages that own buffered output write it out, last stage first.
@@ -302,6 +365,59 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 }
             }
         };
+
+        /// Where the segment that begins at stage `from` ends: past the next
+        /// task boundary, or at the end of the chain.
+        fn segmentEnd(comptime from: usize) usize {
+            for (from..n) |i| if (@hasDecl(stages[i], "zrx_boundary")) return i + 1;
+            return n;
+        }
+
+        fn finishFrom(comptime from: usize, refs: Refs, tail: anytype) !void {
+            inline for (from..comptime segmentEnd(from)) |i| {
+                if (@hasDecl(stages[i], "finish")) {
+                    const next: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                    try refs[i].finish(next);
+                }
+            }
+        }
+
+        /// The member types of `at.tasks`.
+        pub fn Tasks(comptime Tail: type) type {
+            var list: []const type = &.{};
+            for (stages, 0..) |S, i| {
+                if (@hasDecl(S, "zrx_boundary")) {
+                    list = list ++ &[_]type{Segment(Tail, i)};
+                } else if (@hasDecl(S, "Tasks")) {
+                    list = list ++ di.types(S.Tasks(Down(Tail, i + 1)));
+                }
+            }
+            return @Tuple(list);
+        }
+
+        /// The task of the boundary stage `j`: everything from that stage to
+        /// the next boundary. It feeds the stages after `j` until the input
+        /// ends or they are done, then ends the stream for them. That last
+        /// part is skipped once the run has failed: an effect of a normal
+        /// end must not follow a failure elsewhere.
+        fn Segment(comptime Tail: type, comptime j: usize) type {
+            return struct {
+                refs: Refs,
+                tail: Tail,
+                scope: *Scope,
+
+                pub fn io(segment: @This()) Io {
+                    return segment.refs[j].taskIo();
+                }
+
+                pub fn run(segment: @This()) !void {
+                    const down: Down(Tail, j + 1) = .{ .refs = segment.refs, .tail = segment.tail };
+                    try segment.refs[j].work(down);
+                    if (segment.scope.hasFailed()) return;
+                    try finishFrom(j + 1, segment.refs, segment.tail);
+                }
+            };
+        }
 
         /// Calls `body.call(refs)` with every stage in a local variable of its own.
         pub fn withLocals(body: anytype) @typeInfo(@TypeOf(@TypeOf(body).call)).@"fn".return_type.? {
@@ -337,16 +453,16 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return at.provide(self.refsOf(), env);
         }
 
-        pub fn start(self: *Self, tail: anytype) !void {
-            return at.start(self.refsOf(), tail);
-        }
-
         pub fn push(self: *Self, item: In, tail: anytype) !Flow {
             return at.push(self.refsOf(), item, tail);
         }
 
         pub fn finish(self: *Self, tail: anytype) !void {
             return at.finish(self.refsOf(), tail);
+        }
+
+        pub fn tasks(self: *Self, tail: anytype, scope: *Scope) Tasks(@TypeOf(tail)) {
+            return at.tasks(self.refsOf(), tail, scope);
         }
 
         pub fn flush(self: *Self) !void {

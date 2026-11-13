@@ -1,7 +1,7 @@
 # Spec: segments and one scope
 
-Status: draft for review. Replaces the approach of the closed PR 3
-(`rewrite-hardening`). Nothing here is implemented yet.
+Status: being implemented step by step (see Steps). Replaces the approach of
+the closed PR 3 (`rewrite-hardening`).
 
 Each entry is marked **accepted** (agreed on 2026-11-13) or **proposed**.
 
@@ -154,7 +154,7 @@ Each step is one reviewable change, from `main`.
 1. The scope in `src/tasks.zig`; `system` and `merge` ported to it and the
    scope tested through them (cases 4, 5). *Done.*
 2. Segments: the boundary hook, `finish` stopping at a boundary, the source as
-   segment 0, `start` removed (cases 1 to 3, 6 to 8, 11 to 15).
+   segment 0, `start` removed (cases 1 to 3, 6 to 8, 11 to 15). *Done.*
 3. Rule 6 (cases 9, 10).
 4. The guide, and the design decisions in `AGENTS.md`.
 5. *(proposed)* The stop trigger for sources.

@@ -296,14 +296,15 @@ A line is valid until the next one is read.
 A run goes through these steps:
 
 1. every stage is initialized, in order (`resource` acquires here);
-2. tasks are started (`queue`);
-3. the source pushes items;
-4. on a normal end, stages finish in order (`fold` and `batch` emit, queues
+2. the source pushes items (with a `queue`, the source and each side of a
+   queue run as tasks, and `run` waits for them);
+3. on a normal end, stages finish in order (`fold` and `batch` emit, queues
    drain), then owned writers flush, last stage first;
-5. always: stages are torn down in reverse order (`resource` releases, files close).
+4. always: stages are torn down in reverse order (`resource` releases, files close).
 
-A failure at any step skips to 5. A resource is released after everything
-downstream of it is done, so a handler never sees a released value.
+A failure at any step skips to 4. Every task has returned before anything is
+torn down, and a resource is released after everything downstream of it is
+done, so a handler never sees a released value.
 
 ## Writing your own
 
@@ -345,7 +346,7 @@ const Counted = struct {
 };
 ```
 
-A stage may also declare `start`, `finish`, `flush`, `deinit` and, with
+A stage may also declare `finish`, `flush`, `deinit` and, with
 `Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
 [`src/ops`](../src/ops) has an example of each. To call a handler with
 injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
