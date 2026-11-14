@@ -31,7 +31,7 @@ fn scale(factor: Scale, value: u32) u32 { ... }
 Dependencies come from two places:
 
 - the tuple passed to `run`: `app.run(.{ io, Scale{ .by = 2 } })`;
-- operators earlier in the pipe: `provide(value)` and `resource(acquire, release)`.
+- the tuple on `program(...).provide(.{ ... })`, available to the source and every stage.
 
 Rules:
 
@@ -63,8 +63,7 @@ const total = pipe(.{
 ```
 
 Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
-`pipe(.{ a, b, c, d })`, including for `provide`, whose value reaches everything
-after it.
+`pipe(.{ a, b, c, d })`.
 
 A pipe that ends with a terminal operator (`subscribe`, `drain`, `print`,
 `branch`, a `route` whose cases all terminate) is *terminated*; nothing may
@@ -77,9 +76,31 @@ const app = program(source, terminated_pipe);
 try app.run(.{ io, logger });
 ```
 
-`program` only describes. `run` checks the whole pipeline against the
-dependencies it is given, then runs the source to completion. A program can be
-run again; every run starts from fresh state.
+`program` describes the work. `run` constructs fresh stage state each time
+and uses the source and dependencies supplied by the caller.
+
+```zig
+const report = program(source, pipe(.{
+    queue(32),
+    fold(0, add),
+    print(Report, "{d}\n"),
+})).provide(.{
+    fileWriter(Report, path, 4096, .{ .mode = .create_new }),
+});
+
+try report.run(.{io});
+```
+
+`provide` adds bindings to the program description. Each run applies them
+left to right, starting with the values passed to `run`. A binding shadows
+an earlier binding of the same type. The final environment is shared by the
+source and all stages, including branch and route cases.
+
+`resource(acquire, release)` is a binding that calls `acquire(deps...)` once
+per run. Later bindings can use its result as a dependency. On exit, acquired
+resources are released in reverse order after the program's tasks have
+joined. `release(deps..., value)` uses the dependencies in scope at acquisition
+and returns `void`. Use `null` for a computed binding that needs no release.
 
 ```zig
 try system(.{ ingest, report }).run(.{ io, &mailbox });
@@ -87,7 +108,7 @@ try system(.{ ingest, report }).run(.{ io, &mailbox });
 
 `system` runs its programs together with the same dependencies and returns when
 all have finished. The first failure cancels the others and is returned; a
-program that had ended before that has flushed. A system is itself runnable,
+program that had ended before that has released its resources. A system is itself runnable,
 so systems nest. With more than one program, each runs as a task of its own,
 so the `Io` must be able to run tasks concurrently; with one that cannot,
 `run` returns `error.ConcurrencyUnavailable`.
@@ -130,13 +151,6 @@ Per item:
 | `batch(n)` | | Inline `Batch(T, n)` values (the last may contain fewer items). |
 | `recover(h)` | `fn (deps..., E, T) void` | Handles errors of the operators after it. |
 
-Dependencies:
-
-| Operator | Effect |
-|---|---|
-| `provide(value)` | Adds `value`, keyed by its type, for everything after it. Shadows an earlier value of that type. |
-| `resource(acquire, release)` | `acquire(deps...)` once at start, result provided downstream; `release(deps..., value)` once at the end, success or not. `release` may be `null`. |
-
 Flow:
 
 | Operator | Effect |
@@ -169,8 +183,7 @@ route(.{
 fold(0, add),
 ```
 
-An item no case takes is dropped. Each case is a pipe with its own state and
-its own `provide` scope.
+An item no case takes is dropped. Each case has its own stage state.
 
 ## Handler combinators
 
@@ -228,7 +241,7 @@ pipe(.{
   the far side of a queue happen in another task and fail the run.
 - A value that a stage *before* the `recover` emits at the end of the stream
   (a final `fold` value) is an item like any other. Errors of a later
-  stage's own end of stream, and of a flush, do not belong to an item and
+  stage's own end of stream do not belong to an item and
   fail the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
@@ -247,9 +260,10 @@ is done; a handler between the two may run for it. (A `route` whose cases
 rejoin drops such a value itself once the pipe after it is done.)
 
 To stop a run from outside, cancel the task that called `run`. With a queue,
-`run` then returns `error.Canceled` without flushing (see
-[what a run guarantees](#what-a-run-guarantees)); without one, the handlers
-and the source see `error.Canceled` from their own `Io` calls. To stop
+`run` returns `error.Canceled` under the rules in
+[what a run guarantees](#what-a-run-guarantees). Without a queue or a
+multi-source `merge`, cancellation is handled by the source and handlers
+through their own `Io` calls. To stop
 *gracefully*, end the source: when a source returns, everything it pushed is
 still handled (unless a stage is done, or something fails), queues drain,
 and the stream finishes and flushes as usual.
@@ -299,8 +313,7 @@ branch(.{
   This includes operators that retain items, such as `batch` and `fold`.
   zrx copies the reference and leaves cleanup to its owner, even if an
   item is dropped or a run stops early.
-- A queue's task runs on the `Io` in force where the queue stands, so
-  `provide(io)` before a queue decides where its far side runs.
+- Built-in queues use the program's resolved `std.Io` dependency.
 - Stages before a queue may have handled more items than the stages after it
   take: the queue holds some, and the source runs ahead.
 - Cancellation is cooperative: a handler or source that never calls into
@@ -315,20 +328,15 @@ branch(.{
 
 For one program with a queue in its pipe:
 
-- **On success**, every stage has finished once and then flushed once. The
-  end of the stream travels with the items: a segment that runs out of input
-  finishes its own stages and closes its queue, the next one drains the
-  queue and finishes, and so on. Flushing starts after the last segment has
-  finished.
-- **On an error**, `run` returns it and the flush step is skipped (if a
-  flush is what failed, the stages not yet flushed stay unflushed). Do not
-  rely on whether a stage finished: a segment may have ended its stream
-  before the failure, or be cancelled part-way. Writers the library owns
-  still write out what they hold when they are torn down.
+- **On success**, each stage's `finish` runs once. The end of the stream
+  travels with the items: a segment finishes its stages and closes its
+  output queue, and the next segment drains the queue and finishes.
+- **On an error**, `run` returns the error. A segment may already have
+  finished or may be cancelled part-way through finishing.
 - **Which error**: the first failure of any segment, or `error.Canceled` if
   the task that called `run` was asked to cancel before the run had joined
   its tasks.
-- **Always**, every task has returned before anything is torn down.
+- **Always**, every task has returned before the program releases its resources.
 - **A failure does not wait** for a source or a handler that is waiting in
   an `Io` call: it is cancelled there. Handlers may still run for a few
   items that were already in a queue.
@@ -346,15 +354,17 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 
 | | |
 |---|---|
-| `print(Role, "fmt")` | Terminal. Formats every item; a tuple item supplies several arguments. |
+| `print(Role, "fmt")` | Terminal. Formats and flushes every item. A tuple supplies several format arguments. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
-| `createFile(Role, path, n, .{})` | Creates the file and provides a writer to it as `Role`; `.{ .exclusive = true }` refuses to replace an existing one. |
+| `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The default mode is `.replace`. Use `.create_new` to require a new path. |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
-Whoever owns a writer flushes it. The operators above flush the writers they
-create when the stream ends (a failed flush fails the run) and once more, best
-effort, at teardown. A writer you pass to `run` is yours to flush.
+Pass `stdout`, `stderr`, and `fileWriter` to `Program.provide`. The file
+closes when the program releases its resources. `print` flushes after each
+item and again at normal stream end. Handlers that write directly to a
+writer control their own flushing. If multiple tasks use one writer, the
+caller must serialize those writes.
 
 Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is
@@ -370,17 +380,13 @@ they are called on. Keep the whole value when storing or queueing it.
 
 A run goes through these steps:
 
-1. every stage is initialized, in order (`resource` acquires here);
-2. the source pushes items (with a `queue`, the source and each side of a
-   queue run as tasks, and `run` waits for them);
-3. on a normal end, stages finish in order (`fold` and `batch` emit, queues
-   drain), then owned writers flush, last stage first;
-4. always: stages are torn down in reverse order (`resource` releases, files close).
-
-An error ends the run at step 4, skipping the flush step. Every task has
-returned before anything is torn down, and a resource is released after
-everything downstream of it is done, so a handler never sees a released
-value.
+1. Apply bindings and acquire program resources in declaration order.
+2. Construct stages and run the source. With queues, each segment runs on
+   its own task.
+3. On normal input end, finish each segment in stream order. Final values
+   from `fold` and `batch` are pushed downstream here.
+4. After the tasks have joined, release acquired resources in reverse
+   order, including after a failed run or a partial acquisition.
 
 ## Writing your own
 
@@ -409,7 +415,7 @@ const Counted = struct {
         return struct {
             count: *usize,
 
-            pub fn init(self: *@This(), _: *const Counted, env: Env) !void {
+            pub fn init(self: *@This(), _: *const Counted, env: Env) void {
                 self.count = zrx.di.get(env, *usize);
             }
 
@@ -422,10 +428,10 @@ const Counted = struct {
 };
 ```
 
-A stage may also declare `finish`, `flush`, `deinit` and, with
-`Provides`, `provide`; [`src/pipe.zig`](../src/pipe.zig) states the contract and
-[`src/ops`](../src/ops) has an example of each. To call a handler with
-injection, use `zrx.di.Bound(name, handler, Env, &.{In})`.
+A stage implements `push` and can implement `finish` for normal input end.
+Use `init` for infallible in-place construction. If omitted, the stage is
+constructed with `.{}`. To call a handler with injection, use
+`zrx.di.Bound(name, handler, Env, &.{In})`.
 
 An operator that hands items to a task of its own, as `queue` does, declares
 a task boundary; one that holds sub-pipes, as `branch` does, passes their

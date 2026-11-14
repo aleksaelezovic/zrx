@@ -47,12 +47,10 @@ const report = pipe(.{
 
 pub fn main(init: std.process.Init) !void {
     const app = program(range(u32, 1, 31), pipe(.{
-        stdout(64),
-        stderr(128),
         branch(.{
             archive,
             report,
         }),
-    }));
+    })).provide(.{ stdout(64), stderr(128) });
     try app.run(.{init.io});
 }

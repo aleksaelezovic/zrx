@@ -42,7 +42,7 @@ fn Queue(comptime capacity: usize) type {
                 const Self = @This();
                 pub const zrx_boundary = {};
 
-                pub fn init(self: *Self, _: *const Op, env: Env) !void {
+                pub fn init(self: *Self, _: *const Op, env: Env) void {
                     self.io = di.get(env, Io);
                     self.channel = .init(&self.buffer);
                 }
@@ -160,13 +160,10 @@ fn Branch(comptime Ps: type) type {
                     return core.tasksOf(&self.chains, Closed{});
                 }
 
-                pub fn init(self: *@This(), op: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), op: *const Op, env: Env) void {
                     self.live = @splat(true);
                     inline for (0..n) |i| {
-                        self.chains[i].init(&op.pipes[i], env) catch |err| {
-                            inline for (0..i) |j| self.chains[i - 1 - j].deinit();
-                            return err;
-                        };
+                        self.chains[i].init(&op.pipes[i], env);
                     }
                 }
 
@@ -186,14 +183,6 @@ fn Branch(comptime Ps: type) type {
 
                 pub fn finish(self: *@This(), _: anytype) !void {
                     inline for (0..n) |i| try self.chains[i].finish(Closed{});
-                }
-
-                pub fn flush(self: *@This()) !void {
-                    inline for (0..n) |i| try self.chains[n - 1 - i].flush();
-                }
-
-                pub fn deinit(self: *@This()) void {
-                    inline for (0..n) |i| self.chains[n - 1 - i].deinit();
                 }
             };
         }
@@ -363,16 +352,13 @@ fn Route(comptime Cs: type) type {
                     return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{});
                 }
 
-                pub fn init(self: *Self, op: *const Op, env: Env) !void {
+                pub fn init(self: *Self, op: *const Op, env: Env) void {
                     self.live = @splat(true);
                     self.done = false;
                     self.downstream_done = false;
                     inline for (0..n) |i| {
                         self.tests[i] = if (cases[i].is_otherwise) {} else .init(env);
-                        self.chains[i].init(&op.cases[i].pipe, env) catch |err| {
-                            inline for (0..i) |j| self.chains[i - 1 - j].deinit();
-                            return err;
-                        };
+                        self.chains[i].init(&op.cases[i].pipe, env);
                     }
                 }
 
@@ -405,14 +391,6 @@ fn Route(comptime Cs: type) type {
 
                 pub fn finish(self: *Self, down: anytype) !void {
                     inline for (0..n) |i| try self.chains[i].finish(self.tail(down, true));
-                }
-
-                pub fn flush(self: *Self) !void {
-                    inline for (0..n) |i| try self.chains[n - 1 - i].flush();
-                }
-
-                pub fn deinit(self: *Self) void {
-                    inline for (0..n) |i| self.chains[n - 1 - i].deinit();
                 }
             };
         }

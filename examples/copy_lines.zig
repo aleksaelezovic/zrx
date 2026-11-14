@@ -8,7 +8,7 @@ const fileLines = zrx.fileLines;
 const filter = zrx.filter;
 const fold = zrx.fold;
 const branch = zrx.branch;
-const createFile = zrx.createFile;
+const fileWriter = zrx.fileWriter;
 const stdout = zrx.stdout;
 const print = zrx.print;
 
@@ -32,12 +32,10 @@ pub fn main(init: std.process.Init) !void {
     const output = args[2];
 
     const write = pipe(.{
-        createFile(Copy, output, 4096, .{}),
         print(Copy, "{f}\n"),
     });
     const report = pipe(.{
         fold(0, count),
-        stdout(64),
         print(zrx.Stdout, "copied {d} lines\n"),
     });
     const copy = program(fileLines(input, 4096), pipe(.{
@@ -46,6 +44,6 @@ pub fn main(init: std.process.Init) !void {
             write,
             report,
         }),
-    }));
+    })).provide(.{ fileWriter(Copy, output, 4096, .{}), stdout(64) });
     try copy.run(.{init.io});
 }

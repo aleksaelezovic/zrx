@@ -19,7 +19,6 @@ const fold = zrx.fold;
 const take = zrx.take;
 const flatten = zrx.flatten;
 const recover = zrx.recover;
-const provide = zrx.provide;
 const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
@@ -82,10 +81,10 @@ export fn same_sum_scaled(ptr: [*]const u32, len: usize, by: u32, out: *u64) voi
 
 pub fn nestedProvide(comptime with_zrx: bool, items: []const u32, by: u32, out: *u64) void {
     if (with_zrx) {
-        const scaled = pipe(.{ provide(Scale{ .by = by }), map(scale) });
+        const scaled = pipe(.{map(scale)});
         const even = pipe(.{ scaled, pipe(.{filter(isEven)}) });
-        const total = pipe(.{ even, pipe(.{ fold(@as(u64, 0), add), provide(Result{ .out = out }), subscribe(store) }) });
-        run(program(fromSlice(items), total), .{});
+        const total = pipe(.{ even, pipe(.{ fold(@as(u64, 0), add), subscribe(store) }) });
+        run(program(fromSlice(items), total).provide(.{ Scale{ .by = by }, Result{ .out = out } }), .{});
     } else {
         var sum: u64 = 0;
         for (items) |value| {
@@ -398,8 +397,8 @@ fn biased(session: Session, value: u32) u32 {
 pub fn withResource(comptime with_zrx: bool, items: []const u32, opened: *u32, closed: *u32, out: *u64) void {
     const ledger: Ledger = .{ .opened = opened, .closed = closed };
     if (with_zrx) {
-        const total = pipe(.{ zrx.resource(open, close), map(biased), fold(@as(u64, 0), add), subscribe(store) });
-        run(program(fromSlice(items), total), .{ ledger, Result{ .out = out } });
+        const total = pipe(.{ map(biased), fold(@as(u64, 0), add), subscribe(store) });
+        run(program(fromSlice(items), total).provide(.{zrx.resource(open, close)}), .{ ledger, Result{ .out = out } });
     } else {
         const session = open(ledger);
         defer close(ledger, session);
@@ -425,7 +424,9 @@ pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writ
         for (items) |value| {
             if (value % 2 != 0) continue;
             writer.print("{d}\n", .{value}) catch return false;
+            writer.flush() catch return false;
         }
+        writer.flush() catch return false;
     }
     return true;
 }

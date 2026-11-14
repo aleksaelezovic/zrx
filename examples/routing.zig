@@ -62,11 +62,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .id = 3, .kind = .refund, .cents = 4_000 },
     };
     const app = program(fromSlice(&orders), pipe(.{
-        stdout(256),
         branch(.{
             journal,
             revenue,
         }),
-    }));
+    })).provide(.{stdout(256)});
     try app.run(.{init.io});
 }

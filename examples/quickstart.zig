@@ -28,8 +28,7 @@ pub fn main(init: std.process.Init) !void {
         map(scale),
         filter(isLarge),
         fold(0, add),
-        stdout(64),
         print(zrx.Stdout, "total: {d}\n"),
     });
-    try program(fromSlice(&values), total).run(.{ init.io, Scale{ .by = 2 } });
+    try program(fromSlice(&values), total).provide(.{stdout(64)}).run(.{ init.io, Scale{ .by = 2 } });
 }

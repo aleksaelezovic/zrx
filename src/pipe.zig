@@ -8,26 +8,20 @@
 //!     pub const name = "map";                                   // for diagnostics
 //!     pub fn Out(comptime Env: type, comptime In: type) type    // item type sent on, or `End`
 //!     pub fn Stage(comptime Env: type, comptime In: type) type  // its runtime state
-//!     pub fn Provides(comptime Env: type) type                  // optional: Env seen downstream
 //!
 //! and whose `Stage` declares:
 //!
-//!     pub fn init(self: *Stage, op: *const Op, env: Env) !void
+//!     pub fn init(self: *Stage, op: *const Op, env: Env) void   // optional in-place construction
 //!     pub fn push(self: *Stage, item: In, down: anytype) !Flow
 //!     pub fn finish(self: *Stage, down: anytype) !void   // optional: the stream ended; last chance to push
-//!     pub fn flush(self: *Stage) !void                   // optional: everything downstream has finished
-//!     pub fn deinit(self: *Stage) void                   // optional: always runs, in reverse order
-//!     pub fn provide(self: *Stage, env: Env) Provides(Env) // with `Provides`
 //!
 //! `down.push(value)` hands a value to the rest of the pipe and returns `Flow`.
 //! `Env` and `In` are known when the stage type is built, so every check and
 //! every call is resolved at compile time. A pipe is itself an operator, which
 //! is all that nesting a pipe in a pipe means.
 //!
-//! A run goes: `init` every stage in order, `push` per item, then on a normal
-//! end `finish` in order and `flush` in reverse; and always, last, `deinit` in
-//! reverse. After a failure `flush` is skipped; whether a stage finished
-//! depends on where the failure struck (`docs/spec-segments.md`).
+//! The chain constructs each stage in place with `init`. At a normal end,
+//! `finish` runs in stream order. The program owns acquired dependencies.
 //!
 //! ## Task boundaries
 //!
@@ -199,16 +193,7 @@ pub fn Pipe(comptime Ops: type) type {
 
         pub fn Out(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
-            return plan(Ops, Env, In).items[di.types(Ops).len];
-        }
-
-        pub fn Provides(comptime Env: type) type {
-            @setEvalBranchQuota(di.quota);
-            var Current = Env;
-            for (di.types(Ops)) |Op| {
-                if (@hasDecl(Op, "Provides")) Current = Op.Provides(Current);
-            }
-            return Current;
+            return plan(Ops, Env, In)[di.types(Ops).len];
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {
@@ -218,26 +203,20 @@ pub fn Pipe(comptime Ops: type) type {
     };
 }
 
-fn Plan(comptime n: usize) type {
-    return struct { items: [n + 1]type, envs: [n + 1]type };
-}
-
-/// The forward pass: the item type and environment each operator sees.
-fn plan(comptime Ops: type, comptime Env: type, comptime In: type) Plan(di.types(Ops).len) {
+/// The forward pass: the item type each operator sees.
+fn plan(comptime Ops: type, comptime Env: type, comptime In: type) [di.types(Ops).len + 1]type {
     @setEvalBranchQuota(di.quota);
     const ops = di.types(Ops);
-    var result: Plan(ops.len) = undefined;
-    result.items[0] = In;
-    result.envs[0] = Env;
+    var items: [ops.len + 1]type = undefined;
+    items[0] = In;
     for (ops, 0..) |Op, i| {
-        if (result.items[i] == End) @compileError(std.fmt.comptimePrint(
+        if (items[i] == End) @compileError(std.fmt.comptimePrint(
             "pipe: `{s}` at position {d} comes after the terminal operator `{s}`; nothing flows past a terminal operator",
             .{ Op.name, i, if (i == 0) "upstream" else ops[i - 1].name },
         ));
-        result.items[i + 1] = Op.Out(result.envs[i], result.items[i]);
-        result.envs[i + 1] = if (@hasDecl(Op, "Provides")) Op.Provides(result.envs[i]) else result.envs[i];
+        items[i + 1] = Op.Out(Env, items[i]);
     }
-    return result;
+    return items;
 }
 
 /// The runtime state of a pipe: one stage per operator.
@@ -255,10 +234,17 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
     @setEvalBranchQuota(di.quota);
     const ops = di.types(Ops);
     const n = ops.len;
-    const types = plan(Ops, Env, In);
+    const items = plan(Ops, Env, In);
     const stages = blk: {
         var list: [n]type = undefined;
-        for (ops, 0..) |Op, i| list[i] = Op.Stage(types.envs[i], types.items[i]);
+        for (ops, 0..) |Op, i| {
+            const Stage = Op.Stage(Env, items[i]);
+            if (@hasDecl(Op, "Provides") or @hasDecl(Stage, "provide") or @hasDecl(Stage, "deinit"))
+                @compileError(Op.name ++ ": bind and release resources with `Program.provide`");
+            if (@hasDecl(Stage, "flush"))
+                @compileError(Op.name ++ ": flush output inside `push` or `finish`");
+            list[i] = Stage;
+        }
         break :blk list;
     };
     const pointers = blk: {
@@ -290,7 +276,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                 refs: Refs,
                 tail: Tail,
 
-                pub fn push(down: @This(), item: types.items[i]) !Flow {
+                pub fn push(down: @This(), item: items[i]) !Flow {
                     if (i == n) {
                         return down.tail.push(item);
                     } else {
@@ -303,26 +289,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         /// The chain's operations, on stages wherever they live.
         pub const at = struct {
-            pub fn init(refs: Refs, operators: *const Ops, env: Env) !void {
-                return initFrom(0, refs, operators, env);
-            }
-
-            fn initFrom(comptime i: usize, refs: Refs, operators: *const Ops, env: types.envs[i]) !void {
-                if (i == n) return;
-                try refs[i].init(&operators[i], env);
-                errdefer if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
-                const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
-                try initFrom(i + 1, refs, operators, next);
-            }
-
-            pub fn provide(refs: Refs, env: Env) types.envs[n] {
-                return provideFrom(0, refs, env);
-            }
-
-            fn provideFrom(comptime i: usize, refs: Refs, env: types.envs[i]) types.envs[n] {
-                if (i == n) return env;
-                const next = if (@hasDecl(stages[i], "provide")) refs[i].provide(env) else env;
-                return provideFrom(i + 1, refs, next);
+            pub fn init(refs: Refs, operators: *const Ops, env: Env) void {
+                inline for (0..n) |i| {
+                    if (@hasDecl(stages[i], "init")) refs[i].init(&operators[i], env) else refs[i].* = .{};
+                }
             }
 
             pub fn push(refs: Refs, item: In, tail: anytype) !Flow {
@@ -356,23 +326,6 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                     }
                 }
                 return out;
-            }
-
-            /// After every `finish`: stages that own buffered output write it out, last stage first.
-            pub fn flush(refs: Refs) !void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "flush")) try refs[i].flush();
-                }
-            }
-
-            pub fn deinit(refs: Refs) void {
-                comptime var i = n;
-                inline while (i > 0) {
-                    i -= 1;
-                    if (@hasDecl(stages[i], "deinit")) refs[i].deinit();
-                }
             }
         };
 
@@ -459,12 +412,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return refs;
         }
 
-        pub fn init(self: *Self, op: *const Pipe(Ops), env: Env) !void {
-            return at.init(self.refsOf(), &op.ops, env);
-        }
-
-        pub fn provide(self: *Self, env: Env) types.envs[n] {
-            return at.provide(self.refsOf(), env);
+        pub fn init(self: *Self, op: *const Pipe(Ops), env: Env) void {
+            at.init(self.refsOf(), &op.ops, env);
         }
 
         pub fn push(self: *Self, item: In, tail: anytype) !Flow {
@@ -477,14 +426,6 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         pub fn tasks(self: *Self, tail: anytype) Tasks(@TypeOf(tail)) {
             return at.tasks(self.refsOf(), tail);
-        }
-
-        pub fn flush(self: *Self) !void {
-            return at.flush(self.refsOf());
-        }
-
-        pub fn deinit(self: *Self) void {
-            at.deinit(self.refsOf());
         }
     };
 }

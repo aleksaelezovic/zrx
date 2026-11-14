@@ -70,15 +70,13 @@ pub fn main(init: std.process.Init) !void {
     var mailbox: Mailbox = .{ .io = init.io, .queue = .init(&slots) };
 
     const monitor = program(fromSlice(&readings), pipe(.{
-        resource(dial, hangUp),
         filter(isHot),
         map(toAlert),
         subscribe(post),
-    }));
+    })).provide(.{resource(dial, hangUp)});
     const notifier = program(fromProducer(Alert, receive), pipe(.{
         map(describe),
-        stdout(128),
         print(zrx.Stdout, "sensor {d} is at {d} C\n"),
-    }));
+    })).provide(.{stdout(128)});
     try system(.{ monitor, notifier }).run(.{ init.io, &mailbox });
 }

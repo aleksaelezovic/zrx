@@ -27,7 +27,7 @@ fn Subscribe(comptime handler: anytype) type {
             return struct {
                 call: Call,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.call = .init(env);
                 }
 
@@ -53,10 +53,8 @@ const Drain = struct {
         return End;
     }
 
-    pub fn Stage(comptime Env: type, comptime In: type) type {
+    pub fn Stage(comptime _: type, comptime In: type) type {
         return struct {
-            pub fn init(_: *@This(), _: *const Drain, _: Env) !void {}
-
             pub fn push(_: *@This(), _: In, _: anytype) !Flow {
                 return .more;
             }

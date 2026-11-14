@@ -19,7 +19,6 @@ const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
 const otherwise = zrx.otherwise;
-const provide = zrx.provide;
 const subscribe = zrx.subscribe;
 const drain = zrx.drain;
 
@@ -294,7 +293,7 @@ const Trailer = struct {
         return struct {
             value: u32,
 
-            pub fn init(self: *@This(), op: *const Trailer, _: Env) !void {
+            pub fn init(self: *@This(), op: *const Trailer, _: Env) void {
                 self.value = op.value;
             }
 
@@ -340,15 +339,15 @@ fn above(threshold: Threshold, value: u32) bool {
     return value > threshold.value;
 }
 
-test "case predicates use dependencies, and cases can provide their own" {
+test "case predicates use program dependencies" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{route(.{
-        when(above, pipe(.{ provide(Threshold{ .value = 5 }), filter(above), subscribe(toLeft) })),
+        when(above, pipe(.{subscribe(toLeft)})),
         otherwise(pipe(.{subscribe(toRight)})),
     })});
     try program(range(u32, 0, 8), work).run(.{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
-    try left.expect(&.{ 6, 7 });
+    try left.expect(&.{ 3, 4, 5, 6, 7 });
     try right.expect(&.{ 0, 1, 2 });
 }
 
@@ -405,7 +404,7 @@ fn Trace(comptime id: u8) type {
 }
 
 /// Passes every item on and records each hook in `*Trace(id)`:
-/// `i`nit, `p`ush, `f`inish, `F`lush, `d`einit.
+/// construction, `p`ush and `f`inish.
 fn mark(comptime id: u8) Mark(id) {
     return .{};
 }
@@ -424,7 +423,7 @@ fn Mark(comptime id: u8) type {
                 trace: *Trace(id),
                 ticks: *Ticks,
 
-                pub fn init(self: *@This(), _: *const Mark(id), env: Env) !void {
+                pub fn init(self: *@This(), _: *const Mark(id), env: Env) void {
                     self.* = .{ .trace = zrx.di.get(env, *Trace(id)), .ticks = zrx.di.get(env, *Ticks) };
                     self.trace.add(self.ticks, 'i');
                 }
@@ -437,20 +436,12 @@ fn Mark(comptime id: u8) type {
                 pub fn finish(self: *@This(), _: anytype) !void {
                     self.trace.add(self.ticks, 'f');
                 }
-
-                pub fn flush(self: *@This()) !void {
-                    self.trace.add(self.ticks, 'F');
-                }
-
-                pub fn deinit(self: *@This()) void {
-                    self.trace.add(self.ticks, 'd');
-                }
             };
         }
     };
 }
 
-test "the end of the stream travels with the data: each segment finishes once, then everything flushes" {
+test "the end of the stream travels with the data: each segment finishes once" {
     var seen: Numbers = .{};
     var ticks: Ticks = .{};
     var first: Trace(0) = .{};
@@ -470,18 +461,12 @@ test "the end of the stream travels with the data: each segment finishes once, t
     });
     try program(range(u32, 1, 11), work).run(.{ io, &seen, &ticks, &first, &second, &third });
     try seen.expect(&.{55});
-    try first.events.expect("ippppppppppfFd");
-    try second.events.expect("ippppppppppfFd");
-    try third.events.expect("ipfFd");
-    // Segments finish in order; nothing is flushed before the last one has
-    // finished, and then the last stage flushes first.
+    try first.events.expect("ippppppppppf");
+    try second.events.expect("ippppppppppf");
+    try third.events.expect("ipf");
+    // Segments finish in stream order.
     try std.testing.expect(try first.when('f') < try second.when('f'));
     try std.testing.expect(try second.when('f') < try third.when('f'));
-    try std.testing.expect(try third.when('f') < try third.when('F'));
-    try std.testing.expect(try third.when('F') < try second.when('F'));
-    try std.testing.expect(try second.when('F') < try first.when('F'));
-    try std.testing.expect(try first.when('F') < try third.when('d'));
-    try std.testing.expect(try third.when('d') < try first.when('d'));
 }
 
 test "queued sub-pipes of a branch each finish once when the stream ends" {
@@ -510,11 +495,9 @@ test "queued sub-pipes of a branch each finish once when the stream ends" {
     try program(range(u32, 1, 6), work).run(.{ io, &ticks, &trunk, &summed, &echoed, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{15});
     try right.expect(&.{ 1, 2, 3, 4, 5 });
-    try trunk.events.expect("ipppppfFd");
-    try summed.events.expect("ipppppfFd");
-    try echoed.events.expect("ipppppfFd");
-    try std.testing.expect(try trunk.when('F') > try summed.when('f'));
-    try std.testing.expect(try trunk.when('F') > try echoed.when('f'));
+    try trunk.events.expect("ipppppf");
+    try summed.events.expect("ipppppf");
+    try echoed.events.expect("ipppppf");
 }
 
 fn failAnyhow(value: u32) anyerror!u32 {
@@ -531,7 +514,7 @@ test "a queue works in a pipe whose handlers return anyerror" {
 
 test "Io may be provided where the queue needs it" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 5), pipe(.{ provide(io), queue(2), subscribe(record) })).run(.{&seen});
+    try program(range(u32, 0, 5), pipe(.{ queue(2), subscribe(record) })).provide(.{io}).run(.{&seen});
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
@@ -632,12 +615,10 @@ fn pushThenFail(hold: *Hold, out: anytype) !void {
 test "nothing is released while a handler behind a queue is still using it" {
     var hold: Hold = .{};
     const work = pipe(.{
-        resource(acquireOuter, releaseOuter),
         queue(2),
-        resource(acquireInner, releaseInner),
         subscribe(holdBoth),
     });
-    const result = program(fromProducer(u32, pushThenFail), work).run(.{ io, &hold });
+    const result = program(fromProducer(u32, pushThenFail), work).provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) }).run(.{ io, &hold });
     try std.testing.expectError(error.SourceFailed, result);
     try std.testing.expect(!hold.woke_by_itself.load(.seq_cst));
     try std.testing.expect(!hold.released_while_held.load(.seq_cst));
@@ -664,7 +645,7 @@ const RaiseAtEnd = struct {
         return struct {
             ending: *Ending,
 
-            pub fn init(self: *@This(), _: *const RaiseAtEnd, env: Env) !void {
+            pub fn init(self: *@This(), _: *const RaiseAtEnd, env: Env) void {
                 self.ending = zrx.di.get(env, *Ending);
             }
 
@@ -726,9 +707,9 @@ test "once a segment has failed, no other segment ends its stream normally" {
     const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &trunk, &summed, &ending, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Late, result);
     try left.expect(&.{});
-    // The first segment had ended before the failure; nothing flushes.
-    try trunk.events.expect("ipppfd");
-    try summed.events.expect("id");
+    // The first segment had ended before the failure.
+    try trunk.events.expect("ipppf");
+    try summed.events.expect("i");
 }
 
 /// A source that pushes one item, waits until the run interrupts it, and
@@ -754,7 +735,7 @@ test "a source that returns after a failure elsewhere does not end the stream" {
     });
     const result = program(fromProducer(u32, pushThenEndWhenInterrupted), work).run(.{ io, &seen, &ticks, &before });
     try std.testing.expectError(error.Five, result);
-    try before.events.expect("ipd");
+    try before.events.expect("ip");
 }
 
 /// Set when a program run by `Called` has returned.
@@ -804,8 +785,8 @@ test "cancelling the caller of a queued program cancels every segment and skips 
     while (!caught.handled.load(.seq_cst)) std.Thread.yield() catch {};
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-    try before.events.expect("ipd");
-    try after.events.expect("ipd");
+    try before.events.expect("ip");
+    try after.events.expect("ip");
 }
 
 // --- invariants over shapes ---------------------------------------------------
@@ -818,8 +799,8 @@ test "cancelling the caller of a queued program cancels every segment and skips 
 //
 // 1. The run returns.
 // 2. A sub-pipe beside the ended side gets every item meant for it.
-// 3. On success every stage finishes once and then flushes once.
-// 4. On failure nothing flushes, and nothing finishes either: the failure
+// 3. On success every stage finishes once.
+// 4. On the failing input in this test nothing finishes: the failure
 //    comes with the first item, long before the source could have run out,
 //    and it is on record before anybody is let go by it.
 
@@ -873,12 +854,10 @@ const Probe = struct {
         }
         inline for (.{ &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4 }) |trace| {
             if (trace.events.len > 0) {
-                try std.testing.expectEqual(@as(usize, 1), trace.count('d'));
                 if (ending == .fails) {
-                    try std.testing.expectEqual(@as(usize, 0), trace.count('F'));
                     try std.testing.expectEqual(@as(usize, 0), trace.count('f'));
                 } else {
-                    try std.testing.expect(try trace.when('f') < try trace.when('F'));
+                    try std.testing.expectEqual(@as(usize, 1), trace.count('f'));
                 }
             }
         }
@@ -1020,15 +999,6 @@ test "invariants: queued cases of a route" {
     try checkShape(Routed);
 }
 
-test "each queue's task runs on the Io in force where the queue stands" {
-    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
-    defer backend.deinit();
-    var seen: Numbers = .{};
-    const work = pipe(.{ queue(2), provide(backend.io()), queue(2), subscribe(record) });
-    try std.testing.expectError(error.ConcurrencyUnavailable, program(range(u32, 0, 5), work).run(.{ io, &seen }));
-    try seen.expect(&.{});
-}
-
 // --- decisions ------------------------------------------------------------------
 //
 // A decision is taken right before what it allows, after every step that can
@@ -1062,24 +1032,7 @@ test "a segment decides to end its stream after it has retired, not before" {
     const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &beyond, &gate, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Late, result);
     try left.expect(&.{ 1, 2, 3 });
-    try beyond.events.expect("ipppd");
-}
-
-test "a program can run its segments on two Io instances" {
-    for (0..20) |_| {
-        var other: std.Io.Threaded = .init(std.testing.allocator, .{});
-        defer other.deinit();
-        var seen: Numbers = .{};
-        const work = pipe(.{ queue(2), provide(other.io()), queue(2), subscribe(record) });
-        try program(range(u32, 0, 50), work).run(.{ io, &seen });
-        try std.testing.expectEqual(@as(usize, 50), seen.len);
-
-        var stalled: Stalled = .{};
-        const failing = pipe(.{ queue(2), provide(other.io()), queue(2), map(failAtFive), subscribe(record) });
-        const result = program(fromProducer(u32, PushThenStall(5).run), failing).run(.{ io, &seen, &stalled });
-        try std.testing.expectError(error.Five, result);
-        try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
-    }
+    try beyond.events.expect("ippp");
 }
 
 test "a cancel request that reaches the caller while the run joins its tasks is not lost" {
@@ -1103,9 +1056,9 @@ test "a cancel request that reaches the caller while the run joins its tasks is 
     untilHeldAtJoin();
     try std.testing.expectEqual(@as(?anyerror, error.Canceled), caller.cancel(io));
     try seen.expect(&.{ 0, 1, 2 });
-    // Both segments had finished; nothing was flushed.
-    try before.events.expect("ipppfd");
-    try after.events.expect("ipppfd");
+    // Both segments had finished before cancellation.
+    try before.events.expect("ipppf");
+    try after.events.expect("ipppf");
 }
 
 test "the caller's cancellation also comes before a failure the run already has" {
@@ -1132,7 +1085,7 @@ const ReleaseGateAtEnd = struct {
         return struct {
             gate: *support.RetireGate,
 
-            pub fn init(self: *@This(), _: *const ReleaseGateAtEnd, env: Env) !void {
+            pub fn init(self: *@This(), _: *const ReleaseGateAtEnd, env: Env) void {
                 self.gate = zrx.di.get(env, *support.RetireGate);
             }
 
@@ -1182,50 +1135,6 @@ test "a failure while a segment ends its stream fails the run" {
     const before = pipe(.{ fold(@as(u32, 0), add), map(failAlways), queue(2), subscribe(record) });
     try std.testing.expectError(error.Ended, program(range(u32, 1, 4), before).run(.{ io, &seen }));
     try seen.expect(&.{});
-}
-
-/// A stage whose `flush` fails.
-const FailingFlush = struct {
-    pub const zrx_operator = {};
-    pub const name = "failingFlush";
-
-    pub fn Out(comptime _: type, comptime In: type) type {
-        return In;
-    }
-
-    pub fn Stage(comptime Env: type, comptime In: type) type {
-        return struct {
-            pub fn init(_: *@This(), _: *const FailingFlush, _: Env) !void {}
-
-            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
-                return down.push(item);
-            }
-
-            pub fn flush(_: *@This()) error{FlushFailed}!void {
-                return error.FlushFailed;
-            }
-        };
-    }
-};
-
-test "a flush that fails stops the flushing" {
-    var seen: Numbers = .{};
-    var ticks: Ticks = .{};
-    var earlier: Trace(0) = .{};
-    var later: Trace(1) = .{};
-    const work = pipe(.{
-        mark(0),
-        queue(2),
-        FailingFlush{},
-        mark(1),
-        subscribe(record),
-    });
-    const result = program(range(u32, 0, 3), work).run(.{ io, &seen, &ticks, &earlier, &later });
-    try std.testing.expectError(error.FlushFailed, result);
-    // Flushing goes last stage first: the stage after the failing one was
-    // flushed, the one before it was not.
-    try later.events.expect("ipppfFd");
-    try earlier.events.expect("ipppfd");
 }
 
 const Acked = struct {

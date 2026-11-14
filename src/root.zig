@@ -42,10 +42,8 @@ const sink = @import("ops/sink.zig");
 pub const subscribe = sink.subscribe;
 pub const drain = sink.drain;
 
-// Dependency operators
-const env = @import("ops/env.zig");
-pub const provide = env.provide;
-pub const resource = env.resource;
+// Program resources
+pub const resource = @import("resources.zig").resource;
 
 // Flow operators
 const flow = @import("ops/flow.zig");
@@ -77,8 +75,9 @@ pub const Stdout = io.Stdout;
 pub const Stderr = io.Stderr;
 pub const stdout = io.stdout;
 pub const stderr = io.stderr;
-pub const createFile = io.createFile;
-pub const CreateFileOptions = io.CreateFileOptions;
+pub const fileWriter = io.fileWriter;
+pub const FileMode = io.FileMode;
+pub const FileWriterOptions = io.FileWriterOptions;
 pub const print = io.print;
 pub const Line = io.Line;
 pub const lines = io.lines;

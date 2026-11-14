@@ -3,7 +3,7 @@
 //!     line -> validated outcome -> numbered -> within the record limit
 //!       |- accepted records    -> the output file
 //!       |- rejected records    -> diagnostics
-//!       '- every record        -> totals -> flush -> summary
+//!       '- every record        -> totals -> summary
 const std = @import("std");
 const zrx = @import("zrx");
 const records = @import("domain/records.zig");
@@ -53,12 +53,6 @@ const validated = orElse(compose(.{
     Outcome.accept,
 }), rejected);
 
-/// Record output reaches its destinations before a summary claims success.
-fn flushRecords(accepted: Accepted, diagnostics: Diagnostics, _: Summary) !void {
-    try accepted.writer.flush();
-    try diagnostics.writer.flush();
-}
-
 /// The caller decides the exit status from the totals.
 fn remember(result: *Summary, summary: Summary) void {
     result.* = summary;
@@ -79,7 +73,6 @@ const rejections = pipe(.{
 const totals = pipe(.{
     map(Summary.of),
     fold(Summary{}, Summary.add),
-    tap(flushRecords),
     tap(remember),
     print(Console, "{f}\n"),
 });
@@ -100,11 +93,8 @@ pub const records_pipe = pipe(.{
 pub const processing = zrx.program(zrx.lines(Input, records.max_line_bytes), records_pipe);
 
 /// Writes one text to standard output.
-pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement)) {
-    return zrx.program(zrx.fromValue(text), announcement);
+pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement).provide(.{zrx.stdout(1024)})) {
+    return zrx.program(zrx.fromValue(text), announcement).provide(.{zrx.stdout(1024)});
 }
 
-const announcement = pipe(.{
-    zrx.stdout(1024),
-    print(Console, "{s}"),
-});
+const announcement = pipe(.{print(Console, "{s}")});
