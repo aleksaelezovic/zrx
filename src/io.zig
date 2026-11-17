@@ -183,6 +183,7 @@ pub fn Line(comptime max_line_bytes: usize) type {
 
 /// The lines of the reader keyed by `Role`. The reader buffer must have
 /// room for `max_line_bytes + 1` bytes to accept a maximum-length line and its newline.
+/// On `error.StreamTooLong`, the reader stays at the start of the rejected line.
 pub fn lines(comptime Role: type, comptime max_line_bytes: usize) Lines(Role, max_line_bytes) {
     return .{};
 }
@@ -201,10 +202,20 @@ fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
 }
 
 fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) !void {
-    while (try reader.takeDelimiter('\n')) |text| {
+    while (true) {
+        const buffered_line = reader.peekDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => reader.buffered(),
+            else => |e| return e,
+        };
+        if (buffered_line.len == 0) return;
+        const text = if (buffered_line[buffered_line.len - 1] == '\n')
+            buffered_line[0 .. buffered_line.len - 1]
+        else
+            buffered_line;
         if (text.len > max_line_bytes) return error.StreamTooLong;
         var line: Line(max_line_bytes) = .{ .bytes = undefined, .len = text.len };
         @memcpy(line.bytes[0..line.len], text);
+        reader.toss(buffered_line.len);
         if (try down.push(line) == .done) return;
     }
 }
