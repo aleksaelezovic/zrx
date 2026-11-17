@@ -53,6 +53,10 @@ pub const route = flow.route;
 pub const when = flow.when;
 pub const otherwise = flow.otherwise;
 
+const timing = @import("ops/timing.zig");
+pub const batchWithin = timing.batchWithin;
+pub const debounce = timing.debounce;
+
 // Handler combinators
 const handlers = @import("handlers.zig");
 pub const not = handlers.not;

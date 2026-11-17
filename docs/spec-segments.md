@@ -21,11 +21,12 @@ defects followed (first review of PR 1):
 
 ## Terms
 
-- **Segment.** A `queue` splits a pipe into segments. A segment is one task
+- **Segment.** A task boundary (`queue`, `batchWithin` or `debounce`) splits
+  a pipe into segments. A segment is one task
   running a synchronous chain: segment 0 is the source and the stages up to the
-  first queue; every other segment takes items from one queue and runs the
-  stages up to the next. A sub-pipe of `branch` or `route` that starts with a
-  queue is a segment of its own.
+  first boundary. Every other segment runs a boundary's worker and the
+  stages up to the next boundary. A boundary inside a sub-pipe of `branch`
+  or a terminal `route` also starts a segment.
 - **Scope.** The one supervisor, in `src/tasks.zig`, used by `program`
   (segments), `merge` (sources) and `system` (programs).
 
@@ -47,11 +48,11 @@ moment inside the run.
    "print reports flush errors during a push and at stream end" and
    "printed items stay written when a later item fails" (`tests/io.zig`).*
 3. **Which error.** The first failure of any task. Where tasks are started
-   (a queue; a `merge` or `system` of more than one), `error.Canceled`
+   (a boundary; a `merge` or `system` of more than one), `error.Canceled`
    instead, if the task that called `run` has been asked to cancel before
    those tasks have all been joined. Once they are joined, only the `Io`
    calls of what still runs on the caller (resource releases or, after a
-   `merge` without a queue, the end of the stream) can see such a request.
+   `merge` without a boundary, the end of the stream) can see such a request.
    *Tests: "cancelling the caller of a queued program", "the caller is asked
    to cancel while the run starts its tasks", "a cancel request that reaches
    the caller while the run joins its tasks is not lost", "the caller's
@@ -76,12 +77,15 @@ moment inside the run.
    *Tests: the "invariants" (a producer left waiting hangs them), "a
    boundary written against the contract splits the pipe like a queue"
    (`tests/extending.zig`).*
-7. **Graceful end.** When the source returns, everything it pushed is still
-   handled: each queue drains and each segment finishes in turn. Only a
-   stage that is done, or an error, cuts this short.
+7. **Graceful end.** When the source returns, each queue drains, timed
+   operators emit pending values without waiting out their timers, and each
+   segment finishes in turn. Debounce emits its latest pending item. Only a stage that is done,
+   or an error, cuts this short.
    *Tests: "the stream end waits for the queue to drain", "the end of the
-   stream travels with the data" (`tests/flow.zig`).*
-8. **A program with neither a queue nor a `merge` is one loop on the caller's
+   stream travels with the data" (`tests/flow.zig`), "batchWithin keeps the
+   first deadline and starts a new one after emission" and "debounce restarts
+   its deadline and emits the latest item during source silence" (`tests/timing.zig`).*
+8. **A program with neither a boundary nor a `merge` is one loop on the caller's
    task**, and its code is what the zero-overhead fixtures compare.
    *Test: `zig build zero-overhead`.*
 9. **`run`'s error set is inferred**: the handlers' and operators' errors,
@@ -99,6 +103,17 @@ moment inside the run.
     "without concurrency, a system and a merge fail before anything runs",
     "systems nest, and a system of one needs no Io", "a merge of one source
     runs it in place and needs no Io" (`tests/programs.zig`).*
+11. **Timed output.** On success, `batchWithin` emits ordered nonempty batches
+    of at most its size, using the first item's age for timed emission.
+    `debounce` retains the latest pending item and restarts its deadline on
+    every push. Both can emit while the source waits for input. Empty input
+    emits nothing.
+    *Tests: "batchWithin emits 900 of 1000 while the source is idle",
+    "batchWithin keeps the first deadline and starts a new one after emission",
+    "batchWithin preserves every item and a program can run again",
+    "debounce restarts its deadline and emits the latest item during source
+    silence", "debounce coalesces input while downstream is busy", and
+    "timed operators emit nothing for empty input" (`tests/timing.zig`).*
 
 ## Not promised
 
@@ -139,7 +154,12 @@ A review finding against one of these is answered by pointing here.
   Those on one `Io` are; the instances are told one after another.
 - Exact item counts before a queue: stages before it may have handled more
   items than the stages after it take.
-- Anything about cancelling a program that starts no task (no queue, no
+- Exact wall-clock delivery at a timed deadline. A worker can be delayed by
+  scheduling or downstream backpressure. Timed batching can fill its next
+  pending batch while its worker delivers a previous one. Debounce can
+  replace a pending value until its worker takes it, including when that
+  worker is delayed past a quiet-period deadline.
+- Anything about cancelling a program that starts no task (no boundary, no
   `merge`), beyond what its own handlers and source do with
   `error.Canceled`: the run itself has no `Io` to ask.
 
@@ -172,7 +192,7 @@ Mechanism, not promises. It may change as long as the guarantees hold.
   together (they are one `Io.Group`). Then the tasks are joined, and before
   it returns the supervising task looks at its own cancellation once more:
   joining need not be a cancelation point.
-- **Built-in queues use the program's resolved `Io`.** Segment 0 uses the
+- **Built-in boundaries use the program's resolved `Io`.** Segment 0 uses the
   `Io` of the first boundary. Tasks are started in an `Io.Group`.
 - **`merge`** tells its scope when a push is answered `.done`; the scope then
   cancels the other sources and ends as a success.

@@ -25,7 +25,7 @@
 //!
 //! ## Task boundaries
 //!
-//! A stage that hands its items to another task (`queue`) splits the pipe into
+//! A stage that hands its items to another task (e.g. `queue`) splits the pipe into
 //! *segments*: what comes before it runs on one task, what follows it on the
 //! stage's own. Such a stage also declares:
 //!
@@ -262,7 +262,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
         pub const Refs = @Tuple(&pointers);
 
         /// Whether part of this chain runs on another task (it contains a
-        /// `queue`, in itself or in a sub-pipe).
+        /// boundary, in itself or in a sub-pipe).
         pub const has_boundary = blk: {
             for (stages) |S| {
                 if (@hasDecl(S, "zrx_boundary")) break :blk true;

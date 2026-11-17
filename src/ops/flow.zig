@@ -290,7 +290,7 @@ fn Route(comptime Cs: type) type {
                     .{ ending(First), i, ending(T) },
                 ));
                 if (T != End and C.Sub.Stage(Env, In).has_boundary) @compileError(std.fmt.comptimePrint(
-                    "route: case {d} rejoins the pipe, so it cannot contain a queue; put the queue after the route",
+                    "route: case {d} rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route",
                     .{i},
                 ));
             }

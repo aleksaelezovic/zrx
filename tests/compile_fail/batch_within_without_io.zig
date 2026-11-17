@@ -1,0 +1,5 @@
+const zrx = @import("zrx");
+
+test {
+    try zrx.program(zrx.range(u32, 0, 3), zrx.pipe(.{ zrx.batchWithin(3, .fromSeconds(1)), zrx.drain() })).run(.{});
+}

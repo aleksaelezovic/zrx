@@ -60,13 +60,15 @@ to this file; edit `AGENTS.md`, not copies.
   errors of a later stage's own finish, or beyond a `queue`, are
   not item errors. No error lane,
   no rollback.
-- **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
+- **Task boundaries are `queue`, `batchWithin` and `debounce`.**
+  Timed operators buffer input and wait for deadlines within that contract.
+  `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
-  a queue in a sub-pipe. A rejoining route case must not contain a queue.
-- **A queue splits a pipe into segments; each segment is a task.**
+  a boundary in a sub-pipe. A rejoining route case cannot contain a boundary.
+- **A boundary splits a pipe into segments; each segment is a task.**
   [docs/spec-segments.md](docs/spec-segments.md) is the design record.
-  Segment 0 is the source and the stages up to the first queue. A program
-  with neither a queue nor a `merge` is a plain loop on the caller's task.
+  Segment 0 is the source and the stages up to the first boundary. A program
+  with neither a boundary nor a `merge` is a plain loop on the caller's task.
 - **What a run guarantees is written in one place**: the "Guarantees" list
   of the spec, where every line names the tests that pin it. A sentence
   nobody has a test for is not a guarantee: the first version of that list
