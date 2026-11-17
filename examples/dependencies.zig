@@ -1,4 +1,4 @@
-//! Dependencies at three levels: given to `run`, provided inside a pipe, and
+//! Dependencies can be passed to `run`, bound to a program, or
 //! acquired as a resource with a lifetime. Handlers only name what they need.
 const std = @import("std");
 const zrx = @import("zrx");
@@ -7,7 +7,6 @@ const program = zrx.program;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const tap = zrx.tap;
-const provide = zrx.provide;
 const resource = zrx.resource;
 const subscribe = zrx.subscribe;
 const stdout = zrx.stdout;
@@ -18,10 +17,11 @@ const Logger = struct {
 
     fn info(logger: Logger, comptime format: []const u8, args: anytype) !void {
         try logger.out.writer.print("[log] " ++ format ++ "\n", args);
+        try logger.out.writer.flush();
     }
 };
 
-/// Provided inside the pipe: only the storage stage knows about it.
+/// Bound to the program and used by the storage handler.
 const Table = struct { name: []const u8 };
 
 /// Acquired when the program starts and released when it ends.
@@ -51,19 +51,14 @@ pub fn main(init: std.process.Init) !void {
     var saved: u32 = 0;
     const values = [_]i32{ 5, 12, 19 };
 
-    const logging = pipe(.{
+    const app = program(fromSlice(&values), pipe(.{
+        map(timesTen),
+        subscribe(save),
+    })).provide(.{
         stdout(256),
         resource(openLogger, null),
-    });
-    const storage = pipe(.{
         resource(connect, disconnect),
-        provide(Table{ .name = "measurements" }),
-        subscribe(save),
+        Table{ .name = "measurements" },
     });
-    const app = program(fromSlice(&values), pipe(.{
-        logging,
-        map(timesTen),
-        storage,
-    }));
     try app.run(.{ init.io, &saved });
 }

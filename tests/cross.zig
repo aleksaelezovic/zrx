@@ -22,19 +22,18 @@ export fn zrx_cross_tasks(io: *const std.Io, first: u32, end: u32) bool {
         zrx.queue(8),
         zrx.map(double),
         zrx.branch(.{
-            pipe(.{ zrx.queue(2), zrx.fold(0, add), zrx.stdout(64), zrx.print(zrx.Stdout, "{d}\n") }),
-            pipe(.{ zrx.take(1), zrx.stderr(64), zrx.print(zrx.Stderr, "{d}\n") }),
+            pipe(.{ zrx.queue(2), zrx.fold(0, add), zrx.print(zrx.Stdout, "{d}\n") }),
+            pipe(.{ zrx.take(1), zrx.print(zrx.Stderr, "{d}\n") }),
         }),
-    }));
+    })).provide(.{ zrx.stdout(64), zrx.stderr(64) });
     zrx.system(.{ totals, totals }).run(.{io.*}) catch return false;
     return true;
 }
 
 export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const u8) bool {
     const copy = program(zrx.fileLines(std.mem.span(from), 256), pipe(.{
-        zrx.createFile(Copy, std.mem.span(to), 256, .{}),
         zrx.print(Copy, "{f}\n"),
-    }));
+    })).provide(.{zrx.fileWriter(Copy, std.mem.span(to), 256, .{})});
     const measure = program(zrx.stdinLines(256), pipe(.{ zrx.map(length), zrx.drain() }));
     copy.run(.{io.*}) catch return false;
     measure.run(.{io.*}) catch return false;

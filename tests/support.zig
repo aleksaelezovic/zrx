@@ -73,7 +73,7 @@ fn Handoff(comptime capacity: usize) type {
 
                 pub const zrx_boundary = {};
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.io = zrx.di.get(env, std.Io);
                     self.channel = .init(&self.buffer);
                     self.gate = if (gated) zrx.di.get(env, *RetireGate) else {};

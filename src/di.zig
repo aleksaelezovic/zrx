@@ -202,7 +202,7 @@ pub fn check(comptime who: []const u8, comptime handler: anytype, comptime Env: 
     for (requires(who, handler, Args.len)) |T| if (!has(Env, T)) @compileError(
         who ++ ": handler `" ++ describe(handler) ++ "` asks for dependency `" ++ @typeName(T) ++
             "`, which is not provided here; provided: " ++ listTypes(types(Env)) ++
-            ". Pass it to `run(.{ ... })` or add `provide(...)` upstream.",
+            ". Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`.",
     );
     for (Args, 0..) |Arg, i| {
         const Want = Param(handler, Args.len, i) orelse continue;

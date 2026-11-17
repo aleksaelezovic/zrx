@@ -34,7 +34,7 @@ const Counted = struct {
         return struct {
             count: *usize,
 
-            pub fn init(self: *@This(), _: *const Counted, env: Env) !void {
+            pub fn init(self: *@This(), _: *const Counted, env: Env) void {
                 self.count = zrx.di.get(env, *usize);
             }
 
@@ -54,7 +54,7 @@ test "a custom operator composes with the built-in ones" {
     try std.testing.expectEqual(@as(usize, 3), count);
 }
 
-// --- an operator with every optional hook --------------------------------------
+// --- an operator with an end-of-stream hook --------------------------------------
 
 const Journal = support.Recorder(u8);
 
@@ -79,7 +79,7 @@ const Echoed = struct {
             journal: *Journal,
             tail: u32,
 
-            pub fn init(self: *@This(), op: *const Echoed, env: Env) !void {
+            pub fn init(self: *@This(), op: *const Echoed, env: Env) void {
                 self.* = .{ .journal = zrx.di.get(env, *Journal), .tail = op.tail };
                 self.journal.add('i');
             }
@@ -94,14 +94,6 @@ const Echoed = struct {
                 self.journal.add('f');
                 _ = try down.push(self.tail);
             }
-
-            pub fn flush(self: *@This()) !void {
-                self.journal.add('F');
-            }
-
-            pub fn deinit(self: *@This()) void {
-                self.journal.add('d');
-            }
         };
     }
 };
@@ -111,7 +103,7 @@ test "stage hooks run in the documented order" {
     var journal: Journal = .{};
     try program(range(u32, 1, 3), pipe(.{ echoed(9), subscribe(record) })).run(.{ &seen, &journal });
     try seen.expect(&.{ 1, 1, 2, 2, 9 });
-    try journal.expect("ippfFd");
+    try journal.expect("ippf");
 }
 
 fn failAtTwo(value: u32) error{Two}!u32 {
@@ -119,12 +111,12 @@ fn failAtTwo(value: u32) error{Two}!u32 {
     return value;
 }
 
-test "a failed run skips finish and flush but not deinit" {
+test "a failed synchronous run skips finish" {
     var seen: Numbers = .{};
     var journal: Journal = .{};
     const result = program(range(u32, 1, 3), pipe(.{ echoed(9), map(failAtTwo), subscribe(record) })).run(.{ &seen, &journal });
     try std.testing.expectError(error.Two, result);
-    try journal.expect("ippd");
+    try journal.expect("ipp");
 }
 
 // --- a source -----------------------------------------------------------------

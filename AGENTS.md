@@ -41,15 +41,14 @@ to this file; edit `AGENTS.md`, not copies.
   handler runs for a value nobody takes. PR 3 tried to make that a guarantee and
   needed machinery in the chain, across tasks, that kept regressing.
 - **Operators are values; state is separate.** An operator declares
-  `Out(Env, In)`, `Stage(Env, In)` and optionally `Provides(Env)`. All checks
-  happen in `Out`, which runs for the whole pipeline before any stage type is
-  built. A pipe is an operator; nesting is associative, including for `provide`.
+  `Out(Env, In)` and `Stage(Env, In)`. Pipeline type checks happen in `Out`.
+  A pipe is an operator and nesting is associative.
 - **Dependencies are resolved once.** The environment is a tuple keyed by exact
   type. A stage copies what its handler asked for at `init`; nothing is looked
   up per item. `std.Io` and the allocator are ordinary dependencies.
-  `provide` and `resource` extend the environment for what follows; a value of
-  an already-present type shadows it. Sub-pipes of `branch` and `route` scope
-  their own provisions.
+  `Program.provide` applies bindings in order before constructing the stages.
+  A binding shadows an earlier value of the same type. The source and all
+  stages use the resulting environment.
 - **Handlers** are comptime-known functions: leading parameters are
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
@@ -58,7 +57,7 @@ to this file; edit `AGENTS.md`, not copies.
   `recover(handler)` guards the operators after it per item; its error
   parameter type selects what it handles; `error.Canceled` is never handled.
   A final value from a stage before the `recover` is an item like any other;
-  errors of a later stage's own finish or flush, or beyond a `queue`, are
+  errors of a later stage's own finish, or beyond a `queue`, are
   not item errors. No error lane,
   no rollback.
 - **`queue` is the only task boundary.** `branch` is terminal direct fan-out and
@@ -86,8 +85,8 @@ to this file; edit `AGENTS.md`, not copies.
 - **The end of the stream travels with the data.** `finish` runs in order up
   to and including a boundary, on the task of the segment before it; the
   boundary's task finishes what follows. No task finishes, joins or waits
-  for another segment's stages. `init`, `flush` and `deinit` run on the
-  caller, the last two after every task has returned.
+  for another segment's stages. The caller constructs stages and owns program
+  resources. Resource release wraps the run that joins the tasks.
 - **One scope supervises every group of tasks** (`tasks.Scope`): the segments
   of a program, the sources of `merge`, the programs of `system`. Members are
   started as tasks of an `Io.Group`, each on its own `Io`, and never run on
@@ -122,10 +121,9 @@ to this file; edit `AGENTS.md`, not copies.
   `has_boundary`, `Tasks` and `tasks`. A review finding against something
   the spec lists as not promised is answered by pointing there, not by a
   change.
-- **Lifecycle.** `init` in order, pushes, then on a normal end `finish` in
-  order and `flush` in reverse; always `deinit` in reverse. There is no
-  `start` hook: no stage emits before the first item.
-  Whoever owns a writer flushes it. `release` cannot fail.
+- **Lifecycle.** Stages are constructed in place, process items with `push`,
+  and handle normal input end with optional `finish`. `print` handles its
+  writer's flush in those hooks. Program resource `release` cannot fail.
 - **Programs must terminate.** `program` takes a source and a `pipe(...)`;
   `branch`, `when` and `otherwise` take `pipe(...)` too, never a bare operator.
 

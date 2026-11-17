@@ -3,9 +3,7 @@
 //! Writers and readers are ordinary dependencies. A *role* is the type they
 //! are keyed by: `*std.Io.Writer` itself, or a struct with a single
 //! `writer: *std.Io.Writer` field (`reader: *std.Io.Reader` for input) when a
-//! program has more than one. Whoever owns a writer flushes it: the operators
-//! below do so for the writers they create, and `main` does for the ones it
-//! passes to `run`.
+//! program has more than one. Print flushes the writer it uses.
 const std = @import("std");
 const Io = std.Io;
 const di = @import("di.zig");
@@ -75,27 +73,29 @@ fn Print(comptime Role: type, comptime format: []const u8) type {
             return struct {
                 writer: *Io.Writer,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.writer = writerOf(di.get(env, Role));
                 }
 
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
                     try self.writer.print(format, if (comptime di.isTuple(In)) item else .{item});
+                    try self.writer.flush();
                     return .more;
+                }
+                pub fn finish(self: *@This(), _: anytype) Io.Writer.Error!void {
+                    try self.writer.flush();
                 }
             };
         }
     };
 }
 
-/// Provides `Stdout`, a writer to standard output buffered by `buffer_size`
-/// bytes. It is flushed when the stream ends (a failed flush fails the run)
-/// and once more, best effort, when the program is torn down. Needs `std.Io`.
+/// Binds a standard-output writer for the duration of a program.
 pub fn stdout(comptime buffer_size: usize) Standard(.stdout, buffer_size) {
     return .{};
 }
 
-/// Provides `Stderr`, a writer to standard error; see `stdout`.
+/// Binds a standard-error writer for the duration of a program.
 pub fn stderr(comptime buffer_size: usize) Standard(.stderr, buffer_size) {
     return .{};
 }
@@ -106,123 +106,57 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
         .stderr => Stderr,
     };
     return struct {
-        const Op = @This();
-        pub const zrx_operator = {};
-        pub const name = @tagName(which);
+        pub const zrx_resource = {};
 
-        pub fn Out(comptime Env: type, comptime In: type) type {
-            expectProvided(name, Env, Io);
-            return In;
-        }
-
-        pub fn Provides(comptime Env: type) type {
-            return di.Extend(Env, Role);
-        }
-
-        pub fn Stage(comptime Env: type, comptime In: type) type {
-            return struct {
-                buffer: [buffer_size]u8,
-                file: Io.File.Writer,
-
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
-                    const file: Io.File = switch (which) {
-                        .stdout => .stdout(),
-                        .stderr => .stderr(),
-                    };
-                    self.file = file.writerStreaming(di.get(env, Io), &self.buffer);
-                }
-
-                pub fn provide(self: *@This(), env: Env) Provides(Env) {
-                    return di.extend(env, Role{ .writer = &self.file.interface });
-                }
-
-                pub fn push(_: *@This(), item: In, down: anytype) !Flow {
-                    return down.push(item);
-                }
-
-                pub fn flush(self: *@This()) !void {
-                    try self.file.interface.flush();
-                }
-
-                /// Whatever is written after `flush` (by a `release`, or before a
-                /// failure) still goes out, on a best-effort basis.
-                pub fn deinit(self: *@This()) void {
-                    self.file.interface.flush() catch {};
-                }
+        pub fn bind(_: @This(), env: anytype, next: anytype) !void {
+            comptime expectProvided(@tagName(which), @TypeOf(env), Io);
+            var buffer: [buffer_size]u8 = undefined;
+            const file: Io.File = switch (which) {
+                .stdout => .stdout(),
+                .stderr => .stderr(),
             };
+            var writer = file.writerStreaming(di.get(env, Io), &buffer);
+            return next.call(di.extend(env, Role{ .writer = &writer.interface }));
         }
     };
 }
 
-pub const CreateFileOptions = struct {
-    /// Fail with `error.PathAlreadyExists` instead of replacing an existing file.
-    exclusive: bool = false,
+pub const FileMode = enum { replace, create_new };
+
+pub const FileWriterOptions = struct {
+    mode: FileMode = .replace,
 };
 
-/// Creates the file at `path` (replacing an existing one unless
-/// `options.exclusive`) and provides a writer to it as `Role`, a struct with a
-/// single `writer: *std.Io.Writer` field. The file is flushed when the stream
-/// ends and closed afterwards. Needs `std.Io`.
-pub fn createFile(
+/// Creates a file and binds its writer for the duration of a program.
+pub fn fileWriter(
     comptime Role: type,
     path: []const u8,
     comptime buffer_size: usize,
-    options: CreateFileOptions,
-) CreateFile(Role, buffer_size) {
+    options: FileWriterOptions,
+) FileWriter(Role, buffer_size) {
     return .{ .path = path, .options = options };
 }
 
-fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
-    if (Role == *Io.Writer or !isRole(Role, "writer", Io.Writer) or @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
-        "createFile: `" ++ @typeName(Role) ++ "` must be a struct with a single `writer: *std.Io.Writer` field",
+fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
+    expectWriter("fileWriter", Role);
+    if (Role != *Io.Writer and @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
+        "fileWriter: use `*std.Io.Writer` or a role with a single `writer: *std.Io.Writer` field",
     );
     return struct {
         path: []const u8,
-        options: CreateFileOptions,
+        options: FileWriterOptions,
 
-        const Op = @This();
-        pub const zrx_operator = {};
-        pub const name = "createFile";
+        pub const zrx_resource = {};
 
-        pub fn Out(comptime Env: type, comptime In: type) type {
-            expectProvided(name, Env, Io);
-            return In;
-        }
-
-        pub fn Provides(comptime Env: type) type {
-            return di.Extend(Env, Role);
-        }
-
-        pub fn Stage(comptime Env: type, comptime In: type) type {
-            return struct {
-                io: Io,
-                buffer: [buffer_size]u8,
-                file: Io.File,
-                writer: Io.File.Writer,
-
-                pub fn init(self: *@This(), op: *const Op, env: Env) !void {
-                    self.io = di.get(env, Io);
-                    self.file = try Io.Dir.cwd().createFile(self.io, op.path, .{ .exclusive = op.options.exclusive });
-                    self.writer = self.file.writer(self.io, &self.buffer);
-                }
-
-                pub fn provide(self: *@This(), env: Env) Provides(Env) {
-                    return di.extend(env, Role{ .writer = &self.writer.interface });
-                }
-
-                pub fn push(_: *@This(), item: In, down: anytype) !Flow {
-                    return down.push(item);
-                }
-
-                pub fn flush(self: *@This()) !void {
-                    try self.writer.interface.flush();
-                }
-
-                pub fn deinit(self: *@This()) void {
-                    self.writer.interface.flush() catch {};
-                    self.file.close(self.io);
-                }
-            };
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            comptime expectProvided("fileWriter", @TypeOf(env), Io);
+            const io = di.get(env, Io);
+            const file = try Io.Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
+            defer file.close(io);
+            var buffer: [buffer_size]u8 = undefined;
+            var writer = file.writer(io, &buffer);
+            const role: Role = if (Role == *Io.Writer) &writer.interface else .{ .writer = &writer.interface };
+            return next.call(di.extend(env, role));
         }
     };
 }

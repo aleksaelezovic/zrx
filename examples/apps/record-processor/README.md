@@ -43,8 +43,7 @@ flowchart TD
     B --> A["filter accepted, map record, print to Accepted"]
     B --> R["filter rejected, map rejection, print to Diagnostics"]
     B --> T["map contribution, fold totals"]
-    T --> F["tap: flush record output"]
-    F --> S["tap: remember totals, print summary to Console"]
+    T --> S["tap: remember totals, print summary to Console"]
 ```
 
 - The schema is four named handlers composed left to right; the first rule a
@@ -52,8 +51,8 @@ flowchart TD
 - `Rules` (amount ceiling, record cap) is an injected dependency.
 - The four destinations are roles: `Input`, `Accepted`, `Diagnostics`
   (`zrx.Stderr`) and `Console` (`zrx.Stdout`). Production provides the outputs
-  with `stdout`, `stderr` and an exclusive `createFile` in front of this pipe;
-  tests provide fixed readers and writers to the same pipe.
+  with `Program.provide` using `stdout`, `stderr`, and a `fileWriter` in
+  `.create_new` mode. Tests pass fixed readers and writers to the program.
 - The summary is written only after record output has been flushed successfully.
 
 `app.zig` is the boundary around it: it parses the command, opens the input,
@@ -121,7 +120,7 @@ This app existed for the previous zrx and was rebuilt on the rewritten API
 without changing the library, to find out what is missing. Two things it
 needed were general and have since been added to zrx: `orElse`, which turns a
 handler's error into a value (a rejected record has to continue downstream,
-and `recover` can only skip), and the `exclusive` option of `createFile`.
+and `recover` can only skip), and the `.create_new` mode of `fileWriter`.
 
 What is still worked around here, ordered by how much it shapes the code:
 
@@ -131,8 +130,8 @@ What is still worked around here, ordered by how much it shapes the code:
    passes its reader as a dependency. (That also lets it fail on a missing
    input before any output file is created; a source opens later than that.)
 3. **`print` only ends a pipe.** Writing records and then aggregating became a
-   `branch` with a `filter` per destination, which reads well; flushing before
-   the summary needed a handler.
+   `branch` with a `filter` per destination. `print` flushes output in its own
+   hooks.
 4. **Choosing a program is plain Zig.** Help, invalid usage and processing are
    a `switch` in `app.zig`; a pipe cannot switch to another source.
 5. **Owned bounded text.** The old `zrx.Line(n)` is gone; `records.zig`

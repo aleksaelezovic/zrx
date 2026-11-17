@@ -15,7 +15,7 @@ const branch = zrx.branch;
 const print = zrx.print;
 const lines = zrx.lines;
 const fileLines = zrx.fileLines;
-const createFile = zrx.createFile;
+const fileWriter = zrx.fileWriter;
 const fromProducer = zrx.fromProducer;
 const queue = zrx.queue;
 const recover = zrx.recover;
@@ -34,6 +34,22 @@ test "print formats every item to the writer it is given" {
 const Entry = struct { name: []const u8, score: u32 };
 fn fields(entry: Entry) struct { []const u8, u32 } {
     return .{ entry.name, entry.score };
+}
+
+fn failFlush(_: *std.Io.Writer) std.Io.Writer.Error!void {
+    return error.WriteFailed;
+}
+
+test "print reports flush errors during a push and at stream end" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var vtable = writer.vtable.*;
+    vtable.flush = failFlush;
+    writer.vtable = &vtable;
+    const output = pipe(.{print(*std.Io.Writer, "{d}")});
+    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 1), output).run(.{&writer}));
+    try std.testing.expectEqualStrings("0", writer.buffered());
+    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 0), output).run(.{&writer}));
 }
 
 test "a tuple item supplies several format arguments" {
@@ -90,14 +106,14 @@ fn shout(line: zrx.Line(64)) zrx.Line(64) {
     return upper;
 }
 
-test "createFile and fileLines round-trip through the file system" {
+test "fileWriter and fileLines round-trip through the file system" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_bytes: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines.txt", .{tmp.sub_path});
 
     const words = [_][]const u8{ "red", "green", "blue" };
-    try program(fromSlice(&words), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
+    try program(fromSlice(&words), pipe(.{ queue(1), print(Report, "{s}\n") })).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
@@ -110,15 +126,14 @@ fn failAtThree(value: u32) error{Three}!u32 {
     return value;
 }
 
-test "a writer writes out what it holds when the run fails" {
+test "printed items stay written when a later item fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_bytes: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/partial.txt", .{tmp.sub_path});
 
-    // The flush step is skipped after a failure; the file's own writer still
-    // writes out, at teardown, what was handed to it before.
-    const failing = program(range(u32, 0, 10), pipe(.{ createFile(Report, path, 64, .{}), map(failAtThree), print(Report, "{d}\n") }));
+    // Each successful print flushes its output before the later failure.
+    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtThree), print(Report, "{d}\n") })).provide(.{fileWriter(Report, path, 64, .{})});
     try std.testing.expectError(error.Three, failing.run(.{io}));
 
     var buffer: [64]u8 = undefined;
@@ -127,7 +142,7 @@ test "a writer writes out what it holds when the run fails" {
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
-test "createFile replaces an existing file unless asked to be exclusive" {
+test "fileWriter replaces an existing file unless asked to create a new file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_bytes: [128]u8 = undefined;
@@ -136,9 +151,9 @@ test "createFile replaces an existing file unless asked to be exclusive" {
     const second = [_][]const u8{"new"};
     const third = [_][]const u8{"never written"};
 
-    try program(fromSlice(&first), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
-    try program(fromSlice(&second), pipe(.{ createFile(Report, path, 16, .{}), print(Report, "{s}\n") })).run(.{io});
-    const exclusive = program(fromSlice(&third), pipe(.{ createFile(Report, path, 16, .{ .exclusive = true }), print(Report, "{s}\n") }));
+    try program(fromSlice(&first), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
+    try program(fromSlice(&second), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
+    const exclusive = program(fromSlice(&third), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{ .mode = .create_new })});
     try std.testing.expectError(error.PathAlreadyExists, exclusive.run(.{io}));
 
     var buffer: [64]u8 = undefined;
@@ -246,11 +261,10 @@ test "a failure ends the run although the segment it interrupts is printing unde
     // as a failed write, which the recover takes for an item error. The
     // segment has no request left, and still comes to an end.
     const work = pipe(.{
-        createFile(Report, path, 1, .{}),
         queue(2),
         recover(skip),
         print(Report, "{d}\n"),
     });
-    const result = program(fromProducer(u32, pushThenFailOnceWriting), work).run(.{ support.WriteHeld.over(io), &skipped });
+    const result = program(fromProducer(u32, pushThenFailOnceWriting), work).provide(.{fileWriter(Report, path, 1, .{})}).run(.{ support.WriteHeld.over(io), &skipped });
     try std.testing.expectError(error.SourceFailed, result);
 }

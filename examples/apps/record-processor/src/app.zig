@@ -7,8 +7,6 @@ pub const records = @import("domain/records.zig");
 pub const summaries = @import("domain/summary.zig");
 pub const composition = @import("composition.zig");
 
-const pipe = zrx.pipe;
-
 /// Runs the command `args` describes (without argv[0]). `error.RejectedRecords`
 /// and `error.InvalidArguments` are expected outcomes whose output has already
 /// been written; `main` owns the exit status for every error.
@@ -43,12 +41,11 @@ pub fn process(io: Io, config: commands.Config, rules: records.Rules) !summaries
     var input = input_file.readerStreaming(io, &input_buffer);
 
     var summary: summaries.Summary = .{};
-    const production = zrx.program(zrx.lines(composition.Input, records.max_line_bytes), pipe(.{
+    const production = zrx.program(zrx.lines(composition.Input, records.max_line_bytes), composition.records_pipe).provide(.{
         zrx.stdout(256),
         zrx.stderr(1024),
-        zrx.createFile(composition.Accepted, config.output, 4096, .{ .exclusive = true }),
-        composition.records_pipe,
-    }));
+        zrx.fileWriter(composition.Accepted, config.output, 4096, .{ .mode = .create_new }),
+    });
     try production.run(.{
         io,
         rules,

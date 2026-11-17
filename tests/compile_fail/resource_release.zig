@@ -20,5 +20,5 @@ fn open() Handle {
 }
 fn close(_: Handle) error{Busy}!void {}
 test {
-    try program(range(u32, 0, 3), pipe(.{ zrx.resource(open, close), subscribe(ignore) })).run(.{});
+    try program(range(u32, 0, 3), pipe(.{subscribe(ignore)})).provide(.{zrx.resource(open, close)}).run(.{});
 }

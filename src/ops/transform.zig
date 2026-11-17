@@ -28,7 +28,7 @@ fn Map(comptime handler: anytype) type {
             return struct {
                 call: Call,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.call = .init(env);
                 }
 
@@ -61,7 +61,7 @@ fn Filter(comptime predicate: anytype) type {
             return struct {
                 call: Call,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.call = .init(env);
                 }
 
@@ -95,7 +95,7 @@ fn Tap(comptime handler: anytype) type {
             return struct {
                 call: Call,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.call = .init(env);
                 }
 
@@ -144,7 +144,7 @@ fn Accumulate(comptime kind: enum { scan, fold }, comptime A: type, comptime red
                 call: Call,
                 state: A,
 
-                pub fn init(self: *@This(), op: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), op: *const Op, env: Env) void {
                     self.* = .{ .call = .init(env), .state = op.seed };
                 }
 
@@ -180,7 +180,7 @@ const Take = struct {
         return struct {
             remaining: usize,
 
-            pub fn init(self: *@This(), op: *const Take, _: Env) !void {
+            pub fn init(self: *@This(), op: *const Take, _: Env) void {
                 self.remaining = op.count;
             }
 
@@ -213,7 +213,7 @@ const Skip = struct {
         return struct {
             remaining: usize,
 
-            pub fn init(self: *@This(), op: *const Skip, _: Env) !void {
+            pub fn init(self: *@This(), op: *const Skip, _: Env) void {
                 self.remaining = op.count;
             }
 
@@ -250,7 +250,7 @@ fn TakeWhile(comptime predicate: anytype) type {
                 call: Call,
                 open: bool,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.* = .{ .call = .init(env), .open = true };
                 }
 
@@ -296,10 +296,8 @@ const Flatten = struct {
         @compileError("flatten: items must be arrays, slices, or batches, got `" ++ @typeName(In) ++ "`");
     }
 
-    pub fn Stage(comptime Env: type, comptime In: type) type {
+    pub fn Stage(comptime _: type, comptime In: type) type {
         return struct {
-            pub fn init(_: *@This(), _: *const Flatten, _: Env) !void {}
-
             pub fn push(_: *@This(), item: In, down: anytype) !Flow {
                 for (if (comptime isBatch(In)) item.slice() else item) |element| {
                     if (try down.push(element) == .done) return .done;
@@ -360,7 +358,7 @@ fn BatchSlots(comptime size: usize) type {
             return struct {
                 len: usize,
 
-                pub fn init(self: *@This(), _: *const Op, _: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, _: Env) void {
                     self.len = 0;
                 }
 
@@ -396,11 +394,9 @@ fn BatchBuffer(comptime size: usize) type {
             return Batch(Item(Step), size);
         }
 
-        pub fn Stage(comptime Env: type, comptime Step: type) type {
+        pub fn Stage(comptime _: type, comptime Step: type) type {
             return struct {
-                items: [size]Item(Step),
-
-                pub fn init(_: *@This(), _: *const Op, _: Env) !void {}
+                items: [size]Item(Step) = undefined,
 
                 pub fn push(self: *@This(), step: Step, down: anytype) !Flow {
                     if (step.item) |item| self.items[step.index] = item;
@@ -420,7 +416,7 @@ fn BatchBuffer(comptime size: usize) type {
 /// everything, or an error set such as `ParseError` to let other errors pass.
 /// `error.Canceled` is never handed to the handler. A value that a stage
 /// *before* the `recover` emits at the end of the stream is an item like any
-/// other. Errors of a later stage's own `finish` or `flush`, or beyond a
+/// other. Errors of a later stage's own `finish`, or beyond a
 /// `queue`, are not per-item and fail the run.
 pub fn recover(comptime handler: anytype) Recover(handler) {
     return .{};
@@ -450,7 +446,7 @@ fn Recover(comptime handler: anytype) type {
             return struct {
                 call: Call,
 
-                pub fn init(self: *@This(), _: *const Op, env: Env) !void {
+                pub fn init(self: *@This(), _: *const Op, env: Env) void {
                     self.call = .init(env);
                 }
 

@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const di = @import("di.zig");
 const core = @import("pipe.zig");
+const resources = @import("resources.zig");
 const tasks = @import("tasks.zig");
 const Flow = core.Flow;
 const End = core.End;
@@ -18,24 +19,41 @@ pub fn isProgram(comptime T: type) bool {
 
 /// One source feeding one pipe. The pipe must terminate.
 /// Nothing happens until `run`.
-pub fn program(source: anytype, pipeline: anytype) Program(@TypeOf(source), @TypeOf(pipeline)) {
-    return .{ .source = source, .pipe = pipeline };
+pub fn program(source: anytype, pipeline: anytype) Program(@TypeOf(source), @TypeOf(pipeline), @Tuple(&.{})) {
+    return .{ .source = source, .pipe = pipeline, .bindings = .{} };
 }
 
-pub fn Program(comptime S: type, comptime P: type) type {
+pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type {
     @setEvalBranchQuota(di.quota);
     if (!isSource(S)) @compileError("program: the first argument must be a source such as fromSlice(...), got `" ++ @typeName(S) ++ "`");
     core.expectPipe("program", P);
     return struct {
         source: S,
         pipe: P,
+        bindings: Bindings,
 
         pub const zrx_program = {};
 
-        /// Runs the program to completion with `deps`, a tuple of dependency
-        /// values keyed by their types, e.g. `.{ io, logger }`.
-        pub fn run(self: *const @This(), deps: anytype) !void {
-            const env = di.normalize(deps);
+        const Self = @This();
+
+        /// Binds values and resources for the source and every stage of this program.
+        pub fn provide(self: *const Self, bindings: anytype) Program(S, P, Joined(Bindings, @TypeOf(bindings))) {
+            return .{ .source = self.source, .pipe = self.pipe, .bindings = self.bindings ++ bindings };
+        }
+
+        /// Runs with additional caller-supplied dependencies.
+        pub fn run(self: *const Self, deps: anytype) !void {
+            const Run = struct {
+                program: *const Self,
+
+                pub fn call(body: @This(), env: anytype) !void {
+                    return body.program.runBound(env);
+                }
+            };
+            return resources.run(self.bindings, di.normalize(deps), Run{ .program = self });
+        }
+
+        fn runBound(self: *const Self, env: anytype) !void {
             const Env = @TypeOf(env);
             const Out = P.Out(Env, S.Item);
             if (Out != End) @compileError(
@@ -45,12 +63,11 @@ pub fn Program(comptime S: type, comptime P: type) type {
 
             const Frame = P.Stage(Env, S.Item);
             const Body = struct {
-                program: *const Program(S, P),
+                program: *const Self,
                 env: Env,
 
                 pub fn call(body: @This(), refs: Frame.Refs) !void {
-                    try Frame.at.init(refs, &body.program.pipe.ops, body.env);
-                    defer Frame.at.deinit(refs);
+                    Frame.at.init(refs, &body.program.pipe.ops, body.env);
                     if (comptime !Frame.has_boundary) {
                         // The whole program is one loop on this task.
                         try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
@@ -60,7 +77,7 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         // every boundary's task run as members of one scope,
                         // and this task only waits. Each segment ends the
                         // stream for its own stages; all of them have
-                        // returned before anything is flushed or torn down.
+                        // returned before program resources are released.
                         // The feed runs on the `Io` of the first boundary.
                         const segments = Frame.at.tasks(refs, Closed{});
                         const io = segments[0].io();
@@ -68,12 +85,16 @@ pub fn Program(comptime S: type, comptime P: type) type {
                         var scope: tasks.Scope = .{};
                         try scope.run(io, .{feed} ++ segments);
                     }
-                    try Frame.at.flush(refs);
                 }
             };
             return Frame.withLocals(Body{ .program = self, .env = env });
         }
     };
+}
+
+fn Joined(comptime A: type, comptime B: type) type {
+    if (!di.isTuple(B)) @compileError("program.provide: expected a tuple of bindings such as `.{ logger }`");
+    return @Tuple(di.types(A) ++ di.types(B));
 }
 
 /// Segment 0 of a program whose pipe has a task boundary, as a member of a

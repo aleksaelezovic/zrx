@@ -24,6 +24,7 @@ fn double(value: u32) u32 {
 /// Handles exactly `ParseError`; any other error would still fail the run.
 fn reject(err_out: zrx.Stderr, err: ParseError, text: []const u8) !void {
     try err_out.writer.print("rejected \"{s}\": {s}\n", .{ text, @errorName(err) });
+    try err_out.writer.flush();
 }
 
 pub const records = pipe(.{
@@ -35,10 +36,6 @@ pub const records = pipe(.{
 
 pub fn main(init: std.process.Init) !void {
     const input = [_][]const u8{ "21", "", "4", "four" };
-    const app = program(fromSlice(&input), pipe(.{
-        stdout(256),
-        stderr(256),
-        records,
-    }));
+    const app = program(fromSlice(&input), records).provide(.{ stdout(256), stderr(256) });
     try app.run(.{init.io});
 }
