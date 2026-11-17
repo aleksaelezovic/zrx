@@ -156,6 +156,8 @@ Flow:
 | Operator | Effect |
 |---|---|
 | `queue(n)`, `queue(&slots)` | Bounded buffer between two tasks. Pass a comptime capacity or a mutable array pointer. Needs `std.Io`. |
+| `batchWithin(n, duration)` | Emits `Batch(T, n)` when full or after the first item's maximum age. Needs `std.Io`. |
+| `debounce(duration)` | Emits the latest pending item after a quiet period. Needs `std.Io`. |
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
 | `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
 
@@ -237,8 +239,9 @@ pipe(.{
 - `error.Canceled` is never given to a handler. A write that was interrupted
   because the run is being cancelled is: `std.Io.Writer` reports it as
   `error.WriteFailed` like any failed write.
-- A `recover` guards what comes *after* it, up to the next `queue`. Errors on
-  the far side of a queue happen in another task and fail the run.
+- A `recover` guards what comes *after* it, up to the next task boundary
+  (`queue`, `batchWithin` or `debounce`). Errors on the far side happen in
+  another task and fail the run.
 - A value that a stage *before* the `recover` emits at the end of the stream
   (a final `fold` value) is an item like any other. Errors of a later
   stage's own end of stream do not belong to an item and
@@ -259,19 +262,20 @@ the stream (`fold`, `batch`) is still pushed and is refused by the stage that
 is done; a handler between the two may run for it. (A `route` whose cases
 rejoin drops such a value itself once the pipe after it is done.)
 
-To stop a run from outside, cancel the task that called `run`. With a queue,
+To stop a run from outside, cancel the task that called `run`. With a task boundary,
 `run` returns `error.Canceled` under the rules in
-[what a run guarantees](#what-a-run-guarantees). Without a queue or a
+[what a run guarantees](#what-a-run-guarantees). Without a boundary or a
 multi-source `merge`, cancellation is handled by the source and handlers
 through their own `Io` calls. To stop
-*gracefully*, end the source: when a source returns, everything it pushed is
-still handled (unless a stage is done, or something fails), queues drain,
-and the stream finishes and flushes as usual.
+*gracefully*, end the source. Queues drain, timed operators emit their pending
+values, and the stream finishes as described in the spec's
+[graceful-end guarantee](spec-segments.md#guarantees).
 
 ## Concurrency and backpressure
 
-Without `queue` (and without `merge`, whose sources are tasks), a program is
-one loop on the caller's task. A `queue` is the task boundary. The stages
+Without a task boundary (and without `merge`, whose sources are tasks), a
+program is one loop on the caller's task. The built-in boundaries are
+`queue`, `batchWithin` and `debounce`. With `queue`, the stages
 before it push into a fixed-capacity buffer and wait while it is full. Another
 task feeds the stages after it. That wait gives the pipeline backpressure.
 
@@ -295,8 +299,8 @@ queue exclusive use of its array. Sequential runs can reuse it. The worker
 takes one item at a time and pushes it downstream before taking the next.
 Queue storage requires no allocator dependency.
 
-A queue splits the pipe into *segments*. The source with the stages up to the
-first queue is one segment, and each queue starts the next. With a queue in
+A boundary splits the pipe into *segments*. The source with the stages up to the
+first boundary is one segment, and each boundary starts the next. With a boundary in
 the pipe every segment runs as a task of its own, the source included, and
 `run` only waits for them: no item handler runs on the task that called `run`
 (a `resource` is still acquired and released there). The
@@ -337,19 +341,20 @@ branch(.{
   take: the queue holds some, and the source runs ahead.
 - Cancellation is cooperative: a handler or source that never calls into
   `std.Io` cannot be interrupted.
-- A `route` case that rejoins the pipe cannot contain a queue (the pipe after
-  the route would be pushed to from two tasks); put the queue after the route.
+- A `route` case that rejoins the pipe cannot contain a task boundary (the
+  pipe after the route would be pushed to from two tasks). Put the boundary
+  after the route.
 - When the stages after a queue are done (`take`), the segment before it
   finds out at its next push. A source that is waiting for input at that
   moment keeps waiting until its next item or its end.
 
 ### What a run guarantees
 
-For one program with a queue in its pipe:
+For one program with a task boundary in its pipe:
 
 - **On success**, each stage's `finish` runs once. The end of the stream
-  travels with the items: a segment finishes its stages and closes its
-  output queue, and the next segment drains the queue and finishes.
+  travels with the items: a segment finishes its stages and ends input to
+  its boundary, and the next segment handles its pending values and finishes.
 - **On an error**, `run` returns the error. A segment may already have
   finished or may be cancelled part-way through finishing.
 - **Which error**: the first failure of any segment, or `error.Canceled` if
@@ -364,6 +369,45 @@ For one program with a queue in its pipe:
 
 That list is short on purpose. [The segments spec](spec-segments.md) is the
 full statement, with what is *not* promised.
+
+### Timed batching and debounce
+
+```zig
+const writes = pipe(.{
+    batchWithin(1000, .fromSeconds(60)),
+    subscribe(saveBatch),
+});
+
+const searches = pipe(.{
+    debounce(.fromMilliseconds(250)),
+    subscribe(search),
+});
+```
+
+`batchWithin` starts its deadline when the first item enters an empty batch.
+Later items keep that deadline. At 1000 items or 60 seconds the batch is
+ready for its worker to push downstream. A producer that sends 900 items
+and waits can therefore get a partial batch processed during that wait.
+An empty batch has no timer. Output uses the same inline `Batch(T, n)` as
+`batch(n)`.
+
+`debounce` retains one pending item. Each push replaces it and restarts the
+quiet-period deadline. Its worker takes the latest pending value when it
+observes that the quiet period has elapsed. Input can keep replacing that
+pending value while a downstream handler is busy.
+
+Both sizes and durations are comptime arguments. Durations are positive
+`std.Io.Duration` values, measured using `.awake` (excluding system suspend).
+Both operators start a task, use the program's resolved `std.Io`, and require
+concurrency. Their workers use a mutex and condition to wait for input or a
+deadline and call downstream outside the mutex. Their normal-end behavior
+and timing limits are in the [segments spec](spec-segments.md#guarantees).
+
+Timed batching holds one pending batch in the program's stage storage and
+one batch being delivered by its worker. A full pending batch backpressures
+the producer. Debounce holds one pending item plus any item already being
+delivered. Retained slices and pointers need backing storage that lives
+through their use, as with `batch` and `queue`.
 
 ## Input and output
 

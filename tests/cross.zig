@@ -39,3 +39,17 @@ export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const
     measure.run(.{io.*}) catch return false;
     return true;
 }
+
+export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
+    const batches = program(zrx.range(u32, first, end), pipe(.{
+        zrx.batchWithin(1000, .fromSeconds(60)),
+        zrx.flatten(),
+        zrx.drain(),
+    }));
+    const latest = program(zrx.range(u32, first, end), pipe(.{
+        zrx.debounce(.fromMilliseconds(250)),
+        zrx.drain(),
+    }));
+    zrx.system(.{ batches, latest }).run(.{io.*}) catch return false;
+    return true;
+}

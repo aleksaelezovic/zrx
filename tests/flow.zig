@@ -1012,6 +1012,52 @@ test "invariants: queued cases of a route" {
     try checkShape(Routed);
 }
 
+/// Timed batching between queues, with a direct sibling after it.
+const TimedBatches = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), zrx.batchWithin(3, .fromSeconds(3600)), zrx.flatten(), mark(1), branch(.{
+        pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }),
+        pipe(.{subscribe(toRight)}),
+    }) })) {
+        return pipe(.{ mark(0), queue(1), zrx.batchWithin(3, .fromSeconds(3600)), zrx.flatten(), mark(1), branch(.{
+            pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }),
+            pipe(.{subscribe(toRight)}),
+        }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// A debounced branch beside a queued one. Input end releases its last item.
+const Debounced = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{
+        pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), subscribe(toLeft) }),
+        pipe(.{ queue(1), mark(2), subscribe(toRight) }),
+    }) })) {
+        return pipe(.{ mark(0), branch(.{
+            pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), subscribe(toLeft) }),
+            pipe(.{ queue(1), mark(2), subscribe(toRight) }),
+        }) });
+    }
+    fn ended() usize {
+        return 1;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+test "invariants: timed batching between queues" {
+    try checkShape(TimedBatches);
+}
+
+test "invariants: a debounced sub-pipe beside a queue" {
+    try checkShape(Debounced);
+}
+
 // --- decisions ------------------------------------------------------------------
 //
 // A decision is taken right before what it allows, after every step that can

@@ -2,6 +2,15 @@
 //! what to do instead. Each entry names a file in `compile_fail/` and the
 //! compile error it must produce (the build matches it as the end of a line).
 pub const cases = .{
+    .{ "batch_within_size", "batchWithin: size must be at least 1; pass a positive comptime size" },
+    .{ "batch_within_duration", "batchWithin: duration must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "batch_within_negative", "batchWithin: duration must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "debounce_duration", "debounce: duration must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "debounce_negative", "debounce: duration must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "batch_within_without_io", "batchWithin: needs `std.Io` to run its timer task; pass `io` to `run(.{ io, ... })`" },
+    .{ "debounce_without_io", "debounce: needs `std.Io` to run its timer task; pass `io` to `run(.{ io, ... })`" },
+    .{ "route_batch_within_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route" },
+    .{ "route_debounce_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route" },
     .{ "after_terminal", "pipe: `map` at position 1 comes after the terminal operator `subscribe`; nothing flows past a terminal operator" },
     .{ "branch_not_pipe", "branch: expected `pipe(.{ ... })`, got `ops.sink.Subscribe((function 'ignore'))`" },
     .{ "branch_open", "branch: sub-pipe 1 still emits `u32`; every branch must end with a terminal operator such as subscribe(...) or drain()" },
@@ -41,7 +50,7 @@ pub const cases = .{
     .{ "route_not_case", "route: element 0 is not a case (got `pipe.Pipe(struct { ops.sink.Subscribe((function 'ignore')) })`); use when(predicate, pipe(...)) or otherwise(pipe(...))" },
     .{ "route_otherwise_order", "route: otherwise(...) must be the last case" },
     .{ "route_predicate", "when: predicate must return `bool` or `E!bool`, got `u32`" },
-    .{ "route_queue_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a queue; put the queue after the route" },
+    .{ "route_queue_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route" },
     .{ "scan_reducer", "scan: reducer must return `u64` or `E!u64`, got `u32`" },
     .{ "system_not_program", "system: element 0 is not a program (got `pipe.Pipe(struct { ops.sink.Subscribe((function 'ignore')) })`); build one with program(source, pipe(...))" },
     .{ "system_without_io", "system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`" },
