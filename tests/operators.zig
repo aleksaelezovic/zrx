@@ -147,12 +147,12 @@ test "flatten accepts slices" {
     try seen.expect(&.{ 1, 2, 3 });
 }
 
-fn sumOf(values: []const u32) u32 {
+fn sumOf(values: zrx.Batch(u32, 3)) u32 {
     var total: u32 = 0;
-    for (values) |value| total += value;
+    for (values.slice()) |value| total += value;
     return total;
 }
-fn count(values: []const u32) u32 {
+fn count(values: zrx.Batch(u32, 3)) u32 {
     return @intCast(values.len);
 }
 

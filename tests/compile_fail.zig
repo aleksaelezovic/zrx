@@ -10,7 +10,7 @@ pub const cases = .{
     .{ "duplicate_dependency", "zrx: dependency type `duplicate_dependency.Scale` is provided twice; wrap one in a distinct struct type to tell them apart" },
     .{ "empty_pipe", "pipe: a pipe needs at least one operator" },
     .{ "filter_result", "filter: predicate must return `bool` or `E!bool`, got `u32`" },
-    .{ "flatten_scalar", "flatten: items must be arrays or slices, got `u32`" },
+    .{ "flatten_scalar", "flatten: items must be arrays, slices, or batches, got `u32`" },
     .{ "handler_arity", "map: handler `fn () u32` must end with 1 data parameter(s); dependencies come before them" },
     .{ "item_type", "map: handler `fn (u64) u64` takes `u64` but receives `u32` here" },
     .{ "map_void", "map: handler returns no value; use tap(...) for an effect that keeps the item, or subscribe(...) to end the pipe" },

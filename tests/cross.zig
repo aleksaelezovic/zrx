@@ -13,7 +13,7 @@ fn double(value: u32) u32 {
 fn add(sum: u64, value: u32) u64 {
     return sum +% value;
 }
-fn length(line: []const u8) u32 {
+fn length(line: zrx.Line(256)) u32 {
     return @intCast(line.len);
 }
 
@@ -33,7 +33,7 @@ export fn zrx_cross_tasks(io: *const std.Io, first: u32, end: u32) bool {
 export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const u8) bool {
     const copy = program(zrx.fileLines(std.mem.span(from), 256), pipe(.{
         zrx.createFile(Copy, std.mem.span(to), 256, .{}),
-        zrx.print(Copy, "{s}\n"),
+        zrx.print(Copy, "{f}\n"),
     }));
     const measure = program(zrx.stdinLines(256), pipe(.{ zrx.map(length), zrx.drain() }));
     copy.run(.{io.*}) catch return false;

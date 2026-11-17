@@ -231,28 +231,57 @@ fn CreateFile(comptime Role: type, comptime buffer_size: usize) type {
 // Input
 // ---------------------------------------------------------------------------
 
-/// The lines of the reader keyed by `Role`, without their `\n`. A line is only
-/// valid until the next one is read. A line and its `\n` must fit the reader's
-/// buffer, so a buffer of `n + 1` bytes reads lines of up to `n`.
-pub fn lines(comptime Role: type) Lines(Role) {
-    return .{};
-}
-
-fn Lines(comptime Role: type) type {
-    expectReader("lines", Role);
+/// A line with its bytes stored inline, without the newline.
+pub fn Line(comptime max_line_bytes: usize) type {
     return struct {
-        pub const zrx_source = {};
-        pub const Item = []const u8;
+        bytes: [max_line_bytes]u8,
+        len: usize,
 
-        pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
-            comptime expectProvided("lines", @TypeOf(env), Role);
-            return pushLines(readerOf(di.get(env, Role)), down);
+        pub fn text(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+
+        pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
+            try writer.writeAll(self.text());
         }
     };
 }
 
-fn pushLines(reader: *Io.Reader, down: anytype) !void {
-    while (try reader.takeDelimiter('\n')) |line| {
+/// The lines of the reader keyed by `Role`. The reader buffer must have
+/// room for `max_line_bytes + 1` bytes to accept a maximum-length line and its newline.
+/// On `error.StreamTooLong`, the reader stays at the start of the rejected line.
+pub fn lines(comptime Role: type, comptime max_line_bytes: usize) Lines(Role, max_line_bytes) {
+    return .{};
+}
+
+fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
+    expectReader("lines", Role);
+    return struct {
+        pub const zrx_source = {};
+        pub const Item = Line(max_line_bytes);
+
+        pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
+            comptime expectProvided("lines", @TypeOf(env), Role);
+            return pushLines(max_line_bytes, readerOf(di.get(env, Role)), down);
+        }
+    };
+}
+
+fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) !void {
+    while (true) {
+        const buffered_line = reader.peekDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => reader.buffered(),
+            else => |e| return e,
+        };
+        if (buffered_line.len == 0) return;
+        const text = if (buffered_line[buffered_line.len - 1] == '\n')
+            buffered_line[0 .. buffered_line.len - 1]
+        else
+            buffered_line;
+        if (text.len > max_line_bytes) return error.StreamTooLong;
+        var line: Line(max_line_bytes) = .{ .bytes = undefined, .len = text.len };
+        @memcpy(line.bytes[0..line.len], text);
+        reader.toss(buffered_line.len);
         if (try down.push(line) == .done) return;
     }
 }
@@ -267,14 +296,14 @@ pub fn stdinLines(comptime max_line_bytes: usize) StdinLines(max_line_bytes) {
 fn StdinLines(comptime max_line_bytes: usize) type {
     return struct {
         pub const zrx_source = {};
-        pub const Item = []const u8;
+        pub const Item = Line(max_line_bytes);
 
         pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
             comptime expectProvided("stdinLines", @TypeOf(env), Io);
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = Io.File.stdin().readerStreaming(di.get(env, Io), &buffer);
-            return pushLines(&reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down);
         }
     };
 }
@@ -291,7 +320,7 @@ fn FileLines(comptime max_line_bytes: usize) type {
         path: []const u8,
 
         pub const zrx_source = {};
-        pub const Item = []const u8;
+        pub const Item = Line(max_line_bytes);
 
         pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
             comptime expectProvided("fileLines", @TypeOf(env), Io);
@@ -301,7 +330,7 @@ fn FileLines(comptime max_line_bytes: usize) type {
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = file.reader(io, &buffer);
-            return pushLines(&reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down);
         }
     };
 }

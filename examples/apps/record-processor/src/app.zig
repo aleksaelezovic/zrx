@@ -43,7 +43,7 @@ pub fn process(io: Io, config: commands.Config, rules: records.Rules) !summaries
     var input = input_file.readerStreaming(io, &input_buffer);
 
     var summary: summaries.Summary = .{};
-    const production = zrx.program(zrx.lines(composition.Input), pipe(.{
+    const production = zrx.program(zrx.lines(composition.Input, records.max_line_bytes), pipe(.{
         zrx.stdout(256),
         zrx.stderr(1024),
         zrx.createFile(composition.Accepted, config.output, 4096, .{ .exclusive = true }),

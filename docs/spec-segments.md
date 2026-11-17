@@ -274,8 +274,9 @@ Until then the behaviour is `main`'s: the segment finds out at its next push.
   the 35 are the two sides waking each other, and 13 are the floor of one
   lock per item. A bigger queue alone barely helps, and slowing the far side
   down on purpose gets to about 21: the sleeping costs what it saves.
-- Handing over chunks instead of items gets under that floor: `batch(64)`,
-  a `map` to an array, `queue(64)`, `flatten()` measures about 4.7 ns/item.
+- Handing over chunks instead of items gets under that floor. The benchmark
+  measured about 4.7 ns/item using the original slice-based `batch(64)`, a
+  `map` to an array, `queue(64)`, and `flatten()`.
 - No cost is attributed to running the source as a task. The project's
   benchmark reads about 36 ns/item on `main` and 47 to 57 here, but another
   harness of the same pipeline reads 35 to 37 here and 43 to 47 on `main`,

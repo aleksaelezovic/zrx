@@ -36,7 +36,7 @@ pub const records_pipe = pipe(.{
 
 ```mermaid
 flowchart TD
-    L["lines(Input)"] --> V["map(validated): parse, identifier, name, amount"]
+    L["lines(Input, max_line_bytes)"] --> V["map(validated): parse, identifier, name, amount"]
     V --> N["scan: number every record"]
     N --> M["map(withinLimit): fatal past the record cap"]
     M --> B["branch"]

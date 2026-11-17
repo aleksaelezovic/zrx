@@ -12,12 +12,13 @@ const createFile = zrx.createFile;
 const stdout = zrx.stdout;
 const print = zrx.print;
 
+const Line = zrx.Line(4096);
 const Copy = struct { writer: *std.Io.Writer };
 
-fn isNotEmpty(line: []const u8) bool {
+fn isNotEmpty(line: Line) bool {
     return line.len != 0;
 }
-fn count(lines: usize, _: []const u8) usize {
+fn count(lines: usize, _: Line) usize {
     return lines + 1;
 }
 
@@ -32,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
 
     const write = pipe(.{
         createFile(Copy, output, 4096, .{}),
-        print(Copy, "{s}\n"),
+        print(Copy, "{f}\n"),
     });
     const report = pipe(.{
         fold(0, count),

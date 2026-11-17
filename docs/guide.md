@@ -102,7 +102,7 @@ so the `Io` must be able to run tasks concurrently; with one that cannot,
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
 | `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
-| `lines(Role)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
+| `lines(Role, n)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
 
@@ -126,8 +126,8 @@ Per item:
 | `take(n)` | | First `n` items, then stops the source. |
 | `skip(n)` | | Drops the first `n` items. |
 | `takeWhile(p)` | `fn (deps..., T) bool` | Items until `p` is first false, then stops the source. |
-| `flatten()` | | Each element of array or slice items. |
-| `batch(n)` | | Slices of `n` items (the last may be shorter), valid during the push. |
+| `flatten()` | | Each element of array, slice, or batch items. |
+| `batch(n)` | | Inline `Batch(T, n)` values (the last may contain fewer items). |
 | `recover(h)` | `fn (deps..., E, T) void` | Handles errors of the operators after it. |
 
 Dependencies:
@@ -291,8 +291,14 @@ branch(.{
 - The stages of one side of a queue never run concurrently with each other:
   one task runs them (under a `merge`, one source at a time). Handlers on *different* sides do; a dependency
   shared across a queue or between programs of a system must be safe for that.
-- Items cross a queue by value. A slice item must stay valid until consumed;
-  slices from `batch` and `lines` are not, so copy before queueing them.
+- Items cross a queue by value. Lines and batches store their contents inline.
+  Queue storage grows with capacity times item size, including the full
+  inline storage of a line or batch.
+- If your source or handler emits pointers or slices, it is responsible for
+  keeping their backing storage valid for as long as any stage can use it.
+  This includes operators that retain items, such as `batch` and `fold`.
+  zrx copies the reference and leaves cleanup to its owner, even if an
+  item is dropped or a run stops early.
 - A queue's task runs on the `Io` in force where the queue stands, so
   `provide(io)` before a queue decides where its far side runs.
 - Stages before a queue may have handled more items than the stages after it
@@ -343,14 +349,23 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `print(Role, "fmt")` | Terminal. Formats every item; a tuple item supplies several arguments. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
 | `createFile(Role, path, n, .{})` | Creates the file and provides a writer to it as `Role`; `.{ .exclusive = true }` refuses to replace an existing one. |
-| `lines(Role)` | Source: lines of the reader keyed by `Role`. |
+| `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
 Whoever owns a writer flushes it. The operators above flush the writers they
 create when the stream ends (a failed flush fails the run) and once more, best
 effort, at teardown. A writer you pass to `run` is yours to flush.
 
-A line is valid until the next one is read.
+Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
+plus its length. Use `line.text()` to inspect the bytes while the line is
+alive, or `print(Role, "{f}\n")` to write it. For `lines(Role, n)`, use a
+reader buffer of at least `n + 1` bytes to fit the longest line and its
+newline. On `error.StreamTooLong`, the reader stays at the start of the
+rejected line. You can retry with a larger limit if the reader has room.
+
+`batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
+or `flatten()` to emit its items. Both slice accessors borrow from the value
+they are called on. Keep the whole value when storing or queueing it.
 
 ## Lifetimes
 

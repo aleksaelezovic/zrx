@@ -348,9 +348,13 @@ fn weigh(group: []const u32) u64 {
     return @as(u64, largest) *% group.len;
 }
 
+fn weighBatch(group: zrx.Batch(u32, 4)) u64 {
+    return weigh(group.slice());
+}
+
 pub fn batched(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.batch(4), map(weigh), fold(@as(u64, 0), addWide), subscribe(store) });
+        const total = pipe(.{ zrx.batch(4), map(weighBatch), fold(@as(u64, 0), addWide), subscribe(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
