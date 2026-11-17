@@ -12,17 +12,43 @@ const lift = core.lift;
 // queue
 // ---------------------------------------------------------------------------
 
-/// A backpressure boundary. Upstream pushes into a bounded buffer of
-/// `capacity` items and waits when it is full; a separate task feeds
-/// everything after the queue, and ends the stream for it once the buffer has
-/// drained. Needs `std.Io` among the dependencies.
-pub fn queue(comptime capacity: usize) Queue(capacity) {
-    return .{};
+/// A bounded task boundary. Pass a comptime capacity for stack storage, or
+/// a pointer to a mutable fixed-size array to use its slots for the run.
+/// Upstream waits when the buffer is full. Needs a `std.Io` dependency.
+/// Inline so that a typed comptime capacity can shape the return type
+/// while a buffer address can be supplied at runtime.
+pub inline fn queue(storage: anytype) (switch (@typeInfo(@TypeOf(storage))) {
+    .comptime_int, .int => Queue(queueCapacity(storage), void),
+    .pointer => QueueFromBuffer(@TypeOf(storage)),
+    else => @compileError("queue: expected a comptime capacity like `queue(32)` or a mutable array pointer like `queue(&slots)`"),
+}) {
+    return if (@typeInfo(@TypeOf(storage)) == .pointer) .{ .slots = storage } else .{ .slots = {} };
 }
 
-fn Queue(comptime capacity: usize) type {
+fn queueCapacity(comptime capacity: anytype) usize {
+    if (capacity < 0 or capacity > std.math.maxInt(usize))
+        @compileError("queue: capacity must fit in usize; pass a positive comptime capacity");
+    return @intCast(capacity);
+}
+
+fn QueueFromBuffer(comptime Pointer: type) type {
+    const ptr = @typeInfo(Pointer).pointer;
+    if (ptr.size == .one and !ptr.attrs.@"const" and !ptr.attrs.@"volatile" and
+        !ptr.attrs.@"allowzero" and @typeInfo(ptr.child) == .array)
+    {
+        if (std.meta.alignment(Pointer) < @alignOf(ptr.child))
+            @compileError("queue: buffer is under-aligned; use a naturally aligned array of the item type");
+        const array = @typeInfo(ptr.child).array;
+        return Queue(array.len, *[array.len]array.child);
+    }
+    @compileError("queue: buffer must be a mutable fixed-size array pointer; pass `&slots` for `var slots: [N]T`");
+}
+
+fn Queue(comptime capacity: usize, comptime Buffer: type) type {
     if (capacity == 0) @compileError("queue: capacity must be at least 1");
     return struct {
+        slots: Buffer,
+
         const Op = @This();
         pub const zrx_operator = {};
         pub const name = "queue";
@@ -30,21 +56,28 @@ fn Queue(comptime capacity: usize) type {
         pub fn Out(comptime Env: type, comptime In: type) type {
             if (!di.has(Env, Io)) @compileError("queue: needs `std.Io` to run its consumer task; pass `io` to `run(.{ io, ... })`");
             if (@sizeOf(In) == 0) @compileError("queue: items of type `" ++ @typeName(In) ++ "` carry no data to buffer");
+            if (Buffer != void) {
+                const Slot = std.meta.Child(std.meta.Child(Buffer));
+                if (Slot != In) @compileError(
+                    "queue: buffer holds `" ++ @typeName(Slot) ++ "` but the pipe sends `" ++ @typeName(In) ++
+                        "`; declare the slots as `[N]" ++ @typeName(In) ++ "`",
+                );
+            }
             return In;
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {
             return struct {
                 io: Io,
-                buffer: [capacity]In,
+                buffer: if (Buffer == void) [capacity]In else void,
                 channel: Io.Queue(In),
 
                 const Self = @This();
                 pub const zrx_boundary = {};
 
-                pub fn init(self: *Self, _: *const Op, env: Env) void {
+                pub fn init(self: *Self, op: *const Op, env: Env) void {
                     self.io = di.get(env, Io);
-                    self.channel = .init(&self.buffer);
+                    self.channel = .init(if (Buffer == void) &self.buffer else op.slots);
                 }
 
                 pub fn taskIo(self: *Self) Io {
@@ -70,16 +103,12 @@ fn Queue(comptime capacity: usize) type {
                 /// finished and the buffer is empty, or when `down` is done;
                 /// fails with what `down` failed with.
                 pub fn work(self: *Self, down: anytype) !void {
-                    // Take whatever is ready in one go rather than one lock per item.
-                    var ready: [@min(capacity, 32)]In = undefined;
                     while (true) {
-                        const count = self.channel.get(self.io, &ready, 1) catch |err| switch (err) {
+                        const item = self.channel.getOne(self.io) catch |err| switch (err) {
                             error.Closed => return,
                             error.Canceled => return error.Canceled,
                         };
-                        for (ready[0..count]) |item| {
-                            if (try down.push(item) == .done) return;
-                        }
+                        if (try down.push(item) == .done) return;
                     }
                 }
 

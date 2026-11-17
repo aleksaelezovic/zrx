@@ -254,6 +254,9 @@ Until then the behaviour is `main`'s: the segment finds out at its next push.
 
 ## Costs
 
+The measurements below are from PR 5, when the queue receiver could take
+several items per read.
+
 - With a queue, no item handler runs on the task that called `run`: the
   source is a task too, so that a failure can interrupt it. Program binding
   acquisition, stage construction, and resource release stay on the caller.

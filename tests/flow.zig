@@ -39,9 +39,22 @@ fn add(sum: u32, value: u32) u32 {
 
 test "a queue delivers every item in order" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 100), pipe(.{ map(double), queue(8), filter(isEven), subscribe(record) })).run(.{ io, &seen });
+    const capacity: usize = 8;
+    try program(range(u32, 0, 100), pipe(.{ map(double), queue(capacity), filter(isEven), subscribe(record) })).run(.{ io, &seen });
     try std.testing.expectEqual(@as(usize, 100), seen.len);
     for (seen.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i * 2)), value);
+}
+
+test "a borrowed queue can reuse the same slots on a later run" {
+    var slots: [2]u32 = undefined;
+    var first: Numbers = .{};
+    var second: Numbers = .{};
+    const work = program(range(u32, 0, 5), pipe(.{ queue(&slots), subscribe(record) }));
+
+    try work.run(.{ io, &first });
+    try work.run(.{ io, &second });
+    try first.expect(&.{ 0, 1, 2, 3, 4 });
+    try second.expect(first.slice());
 }
 
 fn slowly(clock: std.Io, value: u32) !u32 {

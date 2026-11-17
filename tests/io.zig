@@ -220,6 +220,32 @@ test "file lines survive batching and a queue, including the final partial batch
     try std.testing.expectEqualStrings("[AAAA][BBBB][CCCC]", writer.buffered());
 }
 
+const LargeLine = zrx.Line(32 * 1024);
+var large_line_slots: [1024]LargeLine = undefined;
+
+fn runLargeLineQueue(result: *anyerror!void) void {
+    result.* = checkLargeLineQueue();
+}
+
+fn checkLargeLineQueue() !void {
+    var reader: std.Io.Reader = .fixed("one\ntwo\nthree");
+    var buffer: [32]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const work = pipe(.{
+        queue(&large_line_slots),
+        print(*std.Io.Writer, "{f};"),
+    });
+    try program(lines(*std.Io.Reader, 32 * 1024), work).run(.{ io, &reader, &writer });
+    try std.testing.expectEqualStrings("one;two;three;", writer.buffered());
+}
+
+test "a borrowed queue of large lines fits a small caller stack without an allocator dependency" {
+    var result: anyerror!void = undefined;
+    const thread = try std.Thread.spawn(.{ .stack_size = 512 * 1024 }, runLargeLineQueue, .{&result});
+    thread.join();
+    try result;
+}
+
 test "a missing file fails the run before any item" {
     var buffer: [8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);

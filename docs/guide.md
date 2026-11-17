@@ -155,7 +155,7 @@ Flow:
 
 | Operator | Effect |
 |---|---|
-| `queue(n)` | Bounded buffer of `n` items between two tasks. Needs `std.Io`. |
+| `queue(n)`, `queue(&slots)` | Bounded buffer between two tasks. Pass a comptime capacity or a mutable array pointer. Needs `std.Io`. |
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
 | `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
 
@@ -271,10 +271,29 @@ and the stream finishes and flushes as usual.
 ## Concurrency and backpressure
 
 Without `queue` (and without `merge`, whose sources are tasks), a program is
-one loop on the caller's task. `queue(n)` is the only task boundary in a pipe: the stages before it push into a buffer of `n` items and
-wait while it is full; another task feeds the stages after it. That waiting is
-the backpressure: a slow consumer slows the source instead of dropping items or
-growing memory.
+one loop on the caller's task. A `queue` is the task boundary. The stages
+before it push into a fixed-capacity buffer and wait while it is full. Another
+task feeds the stages after it. That wait gives the pipeline backpressure.
+
+`queue(n)` reserves the buffer on the stack of the task calling `run`.
+The buffer uses `n * @sizeOf(Item)` bytes. For large queues, place a mutable
+array in preallocated storage and use `queue(&slots)`.
+
+```zig
+var slots: [1024]zrx.Line(32768) = undefined;
+
+// In the program's pipe, at the point where it carries Line(32768):
+const work = pipe(.{
+    queue(&slots),
+    print(Report, "{f}\n"),
+});
+```
+
+The array length determines capacity and its element type must match the
+queue's input. Keep the array alive through `run` and give each active
+queue exclusive use of its array. Sequential runs can reuse it. The worker
+takes one item at a time and pushes it downstream before taking the next.
+Queue storage requires no allocator dependency.
 
 A queue splits the pipe into *segments*. The source with the stages up to the
 first queue is one segment, and each queue starts the next. With a queue in
