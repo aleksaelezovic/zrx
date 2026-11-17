@@ -169,6 +169,7 @@ Flow:
 | Operator | Effect |
 |---|---|
 | `queue(n)`, `queue(&slots)` | Bounded buffer between two tasks. Pass a comptime capacity or a mutable array pointer. Needs `std.Io`. |
+| `concurrent(n, sub)` | Shares items among `n` worker-local copies of a synchronous pipe, with serialized unordered output. Accepts an operator tuple or `pipe(...)`; needs `std.Io`. |
 | `batchWithin(n, duration)` | Emits `Batch(T, n)` when full or after the first item's maximum age. Needs `std.Io`. |
 | `debounce(duration)` | Emits the latest pending item after a quiet period. Needs `std.Io`. |
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
@@ -288,7 +289,7 @@ values, and the stream finishes as described in the spec's
 
 Without a task boundary (and without `merge`, whose sources are tasks), a
 program is one loop on the caller's task. The built-in boundaries are
-`queue`, `batchWithin` and `debounce`. With `queue`, the stages
+`queue`, `batchWithin`, `debounce` and `concurrent`. With `queue`, the stages
 before it push into a fixed-capacity buffer and wait while it is full. Another
 task feeds the stages after it. That wait gives the pipeline backpressure.
 
@@ -338,9 +339,10 @@ branch(.{
 })
 ```
 
-- The stages of one side of a queue never run concurrently with each other:
-  one task runs them (under a `merge`, one source at a time). Handlers on *different* sides do; a dependency
-  shared across a queue or between programs of a system must be safe for that.
+- A synchronous chain handles one item at a time. `concurrent` replicates
+  its worker pipe; workers take turns pushing into its continuation, as
+  sources of a `merge` do. Dependencies shared across workers, segments, or
+  programs of a system must be safe for concurrent use.
 - Items cross a queue by value. Lines and batches store their contents inline.
   Queue storage grows with capacity times item size, including the full
   inline storage of a line or batch.
@@ -360,6 +362,45 @@ branch(.{
 - When the stages after a boundary are done, the segment before it finds out
   at its next push. A producer that asks for `zrx.Stop` can also observe that
   its consumers have finished while it waits for input.
+
+### Concurrent worker pipes
+
+```zig
+const transform = pipe(.{
+    map(expensiveWork),
+    filter(isValid),
+});
+const app = program(source, .{
+    concurrent(4, transform),
+    fold(0, combine),
+    forEach(saveResult),
+});
+```
+
+Each input goes to one worker, rather than being broadcast as with `branch`.
+Output is unordered and passes through one serialized continuation. Here
+`fold` combines results across all workers. Operators inside the worker pipe
+have separate state: an inner `take(2)` limits each worker to two inputs, and
+an inner `fold` emits one final value per worker, including its seed on empty
+input. A terminal worker pipe makes `concurrent` terminal too.
+
+`n` is a positive comptime integer. The worker pipe is synchronous: put
+`queue`, timed operators, and other `concurrent` operators outside it.
+`concurrent(1, ...)` still starts a worker and requires a concurrent `std.Io`.
+CPU parallelism depends on the supplied `Io` implementation.
+
+The operator reserves `n` input slots and `n` worker states on the caller's
+stack. It starts `n` workers plus a coordinating boundary task; the source
+is also a task. Input waits when the slots are full. No output queue or
+allocator dependency is added. As with `queue`, slices and pointers retain
+their original backing storage; the caller must keep it valid.
+
+Dependencies and program resources are shared according to their existing
+types; copying worker state does not create a resource per worker. On
+successful early completion, input closes and workers finish normally.
+Already-running handlers are not selectively cancelled. Failures and caller
+cancellation use the same scope as the other program tasks. The precise
+statements and tests are in the [segments spec](spec-segments.md#guarantees).
 
 ### Stopping a producer when its consumers finish
 
@@ -568,7 +609,7 @@ compile to the code of the loop. The comparison is of instruction shape: it
 cannot hide an extra call, load, store, branch or comparison, but it does not
 check how the instructions are wired together, which is why the behaviour test
 exists alongside it. It is evidence for those shapes with this compiler, not
-a proof for every pipeline. `queue` is deliberately outside it.
+a proof for every pipeline. Task-boundary operators are deliberately outside it.
 
 Two things make it work, and are worth knowing when writing an operator:
 

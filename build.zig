@@ -14,6 +14,7 @@ const suites = .{ "di", "operators", "handlers", "flow", "timing", "programs", "
 /// Runnable examples and the exact output they must produce.
 const examples = .{
     .{ .name = "quickstart", .stdout = "total: 14\n", .stderr = "" },
+    .{ .name = "concurrent", .stdout = "sum of even squares: 220\n", .stderr = "" },
     .{
         .name = "dependencies",
         .stdout =

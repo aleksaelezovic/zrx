@@ -62,12 +62,17 @@ to this file; edit `AGENTS.md`, not copies.
   errors of a later stage's own finish, or beyond a `queue`, are
   not item errors. No error lane,
   no rollback.
-- **Task boundaries are `queue`, `batchWithin` and `debounce`.**
+- **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a boundary in a sub-pipe. A rejoining route case cannot contain a boundary.
-- **A boundary splits a pipe into segments; each segment is a task.**
+- **Concurrent worker pipes are synchronous.** `concurrent(n, sub)` gives
+  each worker its own pipe state and serializes pushes into the continuation.
+  The boundary registers workers through `Tasks` and `tasks` in the existing
+  scope. Its `work` coordinates their ends; no nested supervisor or selective
+  cancellation is used for successful completion.
+- **A boundary splits a pipe into segments, each with a task.**
   [docs/spec-segments.md](docs/spec-segments.md) is the design record.
   Segment 0 is the source and the stages up to the first boundary. A program
   with neither a boundary nor a `merge` is a plain loop on the caller's task.
@@ -125,6 +130,8 @@ to this file; edit `AGENTS.md`, not copies.
   `has_boundary`, `Tasks` and `tasks`. A review finding against something
   the spec lists as not promised is answered by pointing there, not by a
   change.
+  A boundary can combine its existing hooks with `Tasks` and `tasks` to
+  register auxiliary members in that same scope; these share its demand node.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.

@@ -192,3 +192,113 @@ test "a boundary written against the contract splits the pipe like a queue" {
 fn sumUp(sum: u32, value: u32) u32 {
     return sum + value;
 }
+
+/// An auxiliary task transforms input; the boundary's task delivers output
+/// and ends the continuation. Both use only the public task contracts.
+const BoundaryIo = struct { io: std.Io };
+
+const Assisted = struct {
+    pub const zrx_operator = {};
+    pub const name = "assisted";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            io: std.Io,
+            incoming: std.Io.Queue(In),
+            outgoing: std.Io.Queue(In),
+            in_slot: [1]In,
+            out_slot: [1]In,
+
+            const Self = @This();
+            pub const zrx_boundary = {};
+
+            pub fn init(self: *Self, _: *const Assisted, env: Env) void {
+                self.io = if (comptime zrx.di.has(Env, BoundaryIo)) zrx.di.get(env, BoundaryIo).io else zrx.di.get(env, std.Io);
+                self.incoming = .init(&self.in_slot);
+                self.outgoing = .init(&self.out_slot);
+            }
+            pub fn taskIo(self: *Self) std.Io {
+                return self.io;
+            }
+            pub fn push(self: *Self, item: In, _: anytype) !zrx.Flow {
+                self.incoming.putOne(self.io, item) catch |err| switch (err) {
+                    error.Closed => return .done,
+                    error.Canceled => return error.Canceled,
+                };
+                return .more;
+            }
+            pub fn finish(self: *Self, _: anytype) !void {
+                self.incoming.close(self.io);
+            }
+            pub fn work(self: *Self, down: anytype) !void {
+                while (true) {
+                    const item = self.outgoing.getOne(self.io) catch |err| switch (err) {
+                        error.Closed => return,
+                        error.Canceled => return error.Canceled,
+                    };
+                    if (try down.push(item) == .done) return;
+                }
+            }
+            pub fn retire(self: *Self) void {
+                self.incoming.close(self.io);
+                self.outgoing.close(self.io);
+            }
+            pub fn Tasks(comptime _: type) type {
+                return struct { Worker };
+            }
+            pub fn tasks(self: *Self, down: anytype) Tasks(@TypeOf(down)) {
+                return .{.{ .stage = self }};
+            }
+
+            const Worker = struct {
+                stage: *Self,
+
+                pub fn io(worker: @This()) std.Io {
+                    return worker.stage.io;
+                }
+
+                pub fn run(worker: @This()) !void {
+                    const self = worker.stage;
+                    while (true) {
+                        const item = self.incoming.getOne(self.io) catch |err| switch (err) {
+                            error.Closed => return,
+                            error.Canceled => return error.Canceled,
+                        };
+                        self.outgoing.putOne(self.io, item + 1) catch |err| switch (err) {
+                            error.Closed => return,
+                            error.Canceled => return error.Canceled,
+                        };
+                    }
+                }
+                pub fn retire(worker: @This()) void {
+                    worker.stage.retire();
+                }
+            };
+        };
+    }
+};
+
+test "a boundary registers auxiliary tasks with the existing task hooks" {
+    var seen: Numbers = .{};
+    try program(range(u32, 0, 3), .{ Assisted{}, forEach(record) }).run(.{ std.testing.io, &seen });
+    try seen.expect(&.{ 1, 2, 3 });
+}
+
+test "concurrent workers use their own Io after a boundary with another Io" {
+    var seen: Numbers = .{};
+    const alternate = support.TaskStarts.over(std.testing.io);
+    try program(range(u32, 0, 3), .{
+        Assisted{},
+        zrx.concurrent(2, .{zrx.take(100)}),
+        forEach(record),
+    }).run(.{ std.testing.io, BoundaryIo{ .io = alternate }, &seen });
+    try std.testing.expectEqual(@as(usize, 3), support.TaskStarts.count.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 3), seen.len);
+    var sum: u32 = 0;
+    for (seen.slice()) |item| sum += item;
+    try std.testing.expectEqual(@as(u32, 6), sum);
+}

@@ -32,6 +32,105 @@ pub fn record(comptime T: type) fn (*Recorder(T), T) void {
     }.add;
 }
 
+/// Observes the selected thread blocking on a mutex, then releases the
+/// handler holding it. The test selects the thread immediately before its
+/// downstream push, so no amount of scheduler delay substitutes for a wait.
+pub const GateWait = struct {
+    pub var thread: std.atomic.Value(std.Thread.Id) = .init(0);
+    pub var waiting: std.atomic.Value(bool) = .init(false);
+    var inner: std.Io = undefined;
+    var vtable: std.Io.VTable = undefined;
+    var release: *std.Io.Event = undefined;
+    var armed: std.atomic.Value(bool) = .init(false);
+
+    pub fn over(io: std.Io, event: *std.Io.Event) std.Io {
+        inner = io;
+        vtable = io.vtable.*;
+        vtable.futexWait = wait;
+        release = event;
+        thread.store(0, .seq_cst);
+        waiting.store(false, .seq_cst);
+        armed.store(true, .seq_cst);
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn wait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        if (std.Thread.getCurrentId() == thread.load(.seq_cst) and armed.swap(false, .seq_cst)) {
+            waiting.store(true, .seq_cst);
+            release.set(inner);
+        }
+        return inner.vtable.futexWait(userdata, ptr, expected, timeout);
+    }
+};
+
+pub const TaskStarts = struct {
+    pub var count: std.atomic.Value(usize) = .init(0);
+    var inner: std.Io = undefined;
+    var vtable: std.Io.VTable = undefined;
+
+    pub fn over(io: std.Io) std.Io {
+        inner = io;
+        vtable = io.vtable.*;
+        vtable.groupConcurrent = start;
+        count.store(0, .seq_cst);
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn start(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, function: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+        _ = count.fetchAdd(1, .seq_cst);
+        return inner.vtable.groupConcurrent(userdata, group, context, alignment, function);
+    }
+};
+
+/// Makes the queue and coordinator waits depend on retirement, even if a
+/// cancellation request is not observed at those waits.
+pub const UncancelableWaits = struct {
+    var inner: std.Io = undefined;
+    var vtable: std.Io.VTable = undefined;
+
+    pub fn over(io: std.Io) std.Io {
+        inner = io;
+        vtable = io.vtable.*;
+        vtable.futexWait = wait;
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn wait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, _: std.Io.Timeout) std.Io.Cancelable!void {
+        inner.vtable.futexWaitUncancelable(userdata, ptr, expected);
+    }
+};
+
+/// For a single concurrent boundary: hold auxiliary launches until its
+/// coordinator waits. The source has empty input and cannot be that waiter.
+pub const WorkersAfterWait = struct {
+    var inner: std.Io = undefined;
+    var vtable: std.Io.VTable = undefined;
+    var starts: std.atomic.Value(usize) = .init(0);
+    var waiting: std.atomic.Value(bool) = .init(false);
+
+    pub fn over(io: std.Io) std.Io {
+        inner = io;
+        vtable = io.vtable.*;
+        vtable.groupConcurrent = start;
+        vtable.futexWait = wait;
+        starts.store(0, .seq_cst);
+        waiting.store(false, .seq_cst);
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn start(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, alignment: std.mem.Alignment, function: *const fn (*const anyopaque) void) std.Io.ConcurrentError!void {
+        if (starts.fetchAdd(1, .seq_cst) == 2) {
+            while (!waiting.load(.seq_cst)) std.Thread.yield() catch {};
+        }
+        return inner.vtable.groupConcurrent(userdata, group, context, alignment, function);
+    }
+
+    fn wait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {
+        waiting.store(true, .seq_cst);
+        return inner.vtable.futexWait(userdata, ptr, expected, timeout);
+    }
+};
+
 /// What a `handoff` waits on while it retires, when a test wants it to take
 /// its time there.
 pub const RetireGate = struct {
