@@ -92,8 +92,8 @@ fn isSpliced(comptime T: type) bool {
 
 /// An operator made of several stages, for when its parts must be stages of
 /// their own (see `batch`). `pipe` splices its `ops` in like a nested pipe's,
-/// but it is one operator to its user, not a `pipe(...)`: where a sub-pipe is
-/// expected it is rejected like any other bare operator.
+/// but it is one operator to its user: where a sub-pipe is expected, wrap it
+/// in an operator tuple or `pipe(...)` like any other bare operator.
 pub fn Spliced(comptime operator_name: []const u8, comptime Ops: type) type {
     return struct {
         ops: Ops,
@@ -142,9 +142,18 @@ pub fn subPipeTasks(chains: anytype, tail: anytype, collector: ?completion.Colle
     return out;
 }
 
-/// For operators that take sub-pipelines.
-pub fn expectPipe(comptime who: []const u8, comptime T: type) void {
-    if (comptime !isPipe(T)) @compileError(who ++ ": expected `pipe(.{ ... })`, got `" ++ @typeName(T) ++ "`");
+/// Pipe-taking APIs accept an operator tuple or an already constructed pipe.
+/// Both forms use the same pipe representation and validation.
+pub fn NormalizedPipe(comptime who: []const u8, comptime Given: type) type {
+    @setEvalBranchQuota(di.quota);
+    if (isPipe(Given)) return Given;
+    if (di.isTuple(Given)) return Pipe(Operators(Given));
+    @compileError(who ++ ": expected an operator tuple `.{ ... }` or `pipe(.{ ... })`, got `" ++ @typeName(Given) ++ "`");
+}
+
+pub fn normalizePipe(comptime who: []const u8, given: anytype) NormalizedPipe(who, @TypeOf(given)) {
+    if (comptime isPipe(@TypeOf(given))) return given;
+    return pipe(given);
 }
 
 /// `try lift(x)` works whether or not `x` is an error union.

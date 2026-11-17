@@ -9,7 +9,7 @@ const fromSlice = zrx.fromSlice;
 const range = zrx.range;
 const map = zrx.map;
 const filter = zrx.filter;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 const not = zrx.not;
 const all = zrx.all;
 const any = zrx.any;
@@ -44,25 +44,25 @@ fn counted(calls: *Calls, _: u32) bool {
 
 test "comparisons" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 10), pipe(.{ filter(ge(3)), filter(lt(8)), filter(ne(5)), subscribe(record) })).run(.{&seen});
-    try program(range(u32, 0, 10), pipe(.{ filter(any(.{ eq(0), gt(8) })), subscribe(record) })).run(.{&seen});
-    try program(range(u32, 0, 10), pipe(.{ filter(le(1)), subscribe(record) })).run(.{&seen});
+    try program(range(u32, 0, 10), pipe(.{ filter(ge(3)), filter(lt(8)), filter(ne(5)), forEach(record) })).run(.{&seen});
+    try program(range(u32, 0, 10), pipe(.{ filter(any(.{ eq(0), gt(8) })), forEach(record) })).run(.{&seen});
+    try program(range(u32, 0, 10), pipe(.{ filter(le(1)), forEach(record) })).run(.{&seen});
     try seen.expect(&.{ 3, 4, 6, 7, 0, 9, 0, 1 });
 }
 
 test "not, all and any forward the dependencies of their predicates" {
     var seen: Numbers = .{};
     const keep = all(.{ not(isEven), withinLimit });
-    try program(range(u32, 0, 10), pipe(.{ filter(keep), subscribe(record) })).run(.{ &seen, Limit{ .max = 6 } });
+    try program(range(u32, 0, 10), pipe(.{ filter(keep), forEach(record) })).run(.{ &seen, Limit{ .max = 6 } });
     try seen.expect(&.{ 1, 3, 5 });
 }
 
 test "all and any stop at the first decisive predicate" {
     var seen: Numbers = .{};
     var calls: Calls = .{};
-    try program(range(u32, 0, 4), pipe(.{ filter(all(.{ isEven, counted })), subscribe(record) })).run(.{ &seen, &calls });
+    try program(range(u32, 0, 4), pipe(.{ filter(all(.{ isEven, counted })), forEach(record) })).run(.{ &seen, &calls });
     try std.testing.expectEqual(@as(usize, 2), calls.count);
-    try program(range(u32, 0, 4), pipe(.{ filter(any(.{ isEven, counted })), subscribe(record) })).run(.{ &seen, &calls });
+    try program(range(u32, 0, 4), pipe(.{ filter(any(.{ isEven, counted })), forEach(record) })).run(.{ &seen, &calls });
     try std.testing.expectEqual(@as(usize, 4), calls.count);
     try seen.expect(&.{ 0, 2, 0, 1, 2, 3 });
 }
@@ -74,7 +74,7 @@ fn checked(value: u32) error{Seven}!bool {
 
 test "a fallible predicate makes the combination fallible" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 5, 10), pipe(.{ filter(all(.{ not(checked), isEven })), subscribe(record) })).run(.{&seen});
+    const result = program(range(u32, 5, 10), pipe(.{ filter(all(.{ not(checked), isEven })), forEach(record) })).run(.{&seen});
     try std.testing.expectError(error.Seven, result);
 }
 
@@ -91,18 +91,18 @@ test "field projects, compose chains handlers left to right" {
     var seen: Numbers = .{};
     const orders = [_]Order{ .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 250 } };
     const gross = compose(.{ field(.price), nonZero, addTax });
-    try program(fromSlice(&orders), pipe(.{ map(gross), subscribe(record) })).run(.{ &seen, Tax{ .percent = 20 } });
+    try program(fromSlice(&orders), pipe(.{ map(gross), forEach(record) })).run(.{ &seen, Tax{ .percent = 20 } });
     try seen.expect(&.{ 120, 300 });
 
     const free = [_]Order{.{ .id = 3, .price = 0 }};
-    try std.testing.expectError(error.Free, program(fromSlice(&free), pipe(.{ map(gross), subscribe(record) })).run(.{ &seen, Tax{ .percent = 20 } }));
+    try std.testing.expectError(error.Free, program(fromSlice(&free), pipe(.{ map(gross), forEach(record) })).run(.{ &seen, Tax{ .percent = 20 } }));
 }
 
 test "composed predicates work on projections" {
     var seen: Numbers = .{};
     const orders = [_]Order{ .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 250 }, .{ .id = 3, .price = 90 } };
     const expensive = compose(.{ field(.price), ge(100) });
-    try program(fromSlice(&orders), pipe(.{ filter(expensive), map(field(.id)), subscribe(record) })).run(.{&seen});
+    try program(fromSlice(&orders), pipe(.{ filter(expensive), map(field(.id)), forEach(record) })).run(.{&seen});
     try seen.expect(&.{ 1, 2 });
 }
 
@@ -125,7 +125,7 @@ fn giveUp(err: anyerror, _: u32) error{GaveUp}!u32 {
 test "orElse turns a failure into a value, with the error and the item" {
     var seen: Numbers = .{};
     const prices = [_]u32{ 5, 0, 5000 };
-    try program(fromSlice(&prices), pipe(.{ map(orElse(positive, substitute)), subscribe(record) })).run(.{ &seen, Fallback{ .value = 99 } });
+    try program(fromSlice(&prices), pipe(.{ map(orElse(positive, substitute)), forEach(record) })).run(.{ &seen, Fallback{ .value = 99 } });
     try seen.expect(&.{ 5, 99, 500 });
 }
 
@@ -133,7 +133,7 @@ test "orElse works on composed handlers and may itself fail" {
     var seen: Numbers = .{};
     const orders = [_]Order{ .{ .id = 1, .price = 0 }, .{ .id = 2, .price = 7 }, .{ .id = 3, .price = 5000 } };
     const price = orElse(compose(.{ field(.price), positive }), orderFallback);
-    const result = program(fromSlice(&orders), pipe(.{ map(price), subscribe(record) })).run(.{&seen});
+    const result = program(fromSlice(&orders), pipe(.{ map(price), forEach(record) })).run(.{&seen});
     try std.testing.expectError(error.GaveUp, result);
     try seen.expect(&.{ 1, 7 });
 }
@@ -155,7 +155,7 @@ fn countFallback(_: error{ Canceled, Odd }, _: u32) u32 {
 test "orElse falls back from failures but never from a cancellation" {
     var seen: Numbers = .{};
     fallbacks = 0;
-    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, countFallback)), subscribe(record) })).run(.{&seen});
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, countFallback)), forEach(record) })).run(.{&seen});
     try std.testing.expectError(error.Canceled, result);
     try seen.expect(&.{ 0, 0 });
     try std.testing.expectEqual(@as(u32, 1), fallbacks);
@@ -169,7 +169,7 @@ fn narrowFallback(_: error{Odd}, _: u32) u32 {
 test "a fallback need not name Canceled, which it is never given" {
     var seen: Numbers = .{};
     fallbacks = 0;
-    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, narrowFallback)), subscribe(record) })).run(.{&seen});
+    const result = program(range(u32, 0, 5), pipe(.{ map(orElse(interrupted, narrowFallback)), forEach(record) })).run(.{&seen});
     try std.testing.expectError(error.Canceled, result);
     try seen.expect(&.{ 0, 0 });
     try std.testing.expectEqual(@as(u32, 1), fallbacks);
@@ -177,6 +177,6 @@ test "a fallback need not name Canceled, which it is never given" {
 
 test "constant replaces every item" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 3), pipe(.{ map(constant(@as(u32, 9))), subscribe(record) })).run(.{&seen});
+    try program(range(u32, 0, 3), pipe(.{ map(constant(@as(u32, 9))), forEach(record) })).run(.{&seen});
     try seen.expect(&.{ 9, 9, 9 });
 }

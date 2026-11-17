@@ -4,7 +4,7 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 fn parse(value: u32) error{ Odd, TooBig }!u32 {
     if (value > 100) return error.TooBig;
@@ -18,5 +18,5 @@ fn onlyOdd(_: error{Odd}, _: u32) u32 {
     return 0;
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ map(zrx.orElse(parse, onlyOdd)), subscribe(ignore) })).run(.{});
+    try program(range(u32, 0, 3), pipe(.{ map(zrx.orElse(parse, onlyOdd)), forEach(ignore) })).run(.{});
 }

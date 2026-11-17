@@ -5,7 +5,7 @@
 //! functions whose leading parameters are injected by type. A *system* runs
 //! several programs together. Everything is resolved at compile time.
 //!
-//!     const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), subscribe(report) });
+//!     const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), forEach(report) });
 //!     try program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
 
 // Composition
@@ -40,7 +40,7 @@ pub const recover = transform.recover;
 
 // Terminal operators
 const sink = @import("ops/sink.zig");
-pub const subscribe = sink.subscribe;
+pub const forEach = sink.forEach;
 pub const drain = sink.drain;
 
 // Program resources

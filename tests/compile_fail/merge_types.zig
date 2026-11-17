@@ -4,7 +4,7 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 fn double(value: u32) u32 {
     return value * 2;
@@ -15,5 +15,5 @@ fn isEven(value: u32) bool {
 fn ignore(_: u32) void {}
 
 test {
-    try program(zrx.merge(.{ range(u32, 0, 3), range(u8, 0, 3) }), pipe(.{subscribe(ignore)})).run(.{std.testing.io});
+    try program(zrx.merge(.{ range(u32, 0, 3), range(u8, 0, 3) }), pipe(.{forEach(ignore)})).run(.{std.testing.io});
 }

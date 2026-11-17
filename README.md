@@ -53,9 +53,9 @@ pub fn main(init: std.process.Init) !void {
 | **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
 | **system** | Several programs run together with the same dependencies. |
 
-There is one way to write each thing, and mistakes are compile errors that say
-what to do: a missing dependency, a handler whose parameter does not match the
-stream, an operator after a terminal one, a pipe that never ends.
+Mistakes are compile errors that say what to do: a missing dependency, a
+handler whose parameter does not match the stream, an operator after a terminal
+one, a pipe that never ends.
 
 Read the **[guide](docs/guide.md)** for every operator, the error and
 concurrency model, and how to write operators of your own. The

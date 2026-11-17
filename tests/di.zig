@@ -11,7 +11,7 @@ const filter = zrx.filter;
 const tap = zrx.tap;
 const resource = zrx.resource;
 const branch = zrx.branch;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 const Numbers = support.Recorder(u32);
 const record = support.record(u32);
@@ -31,21 +31,21 @@ fn scaleAndShift(factor: Scale, offset: Offset, value: u32) u32 {
 
 test "handlers receive the dependencies they name, whatever the order at run" {
     var seen: Numbers = .{};
-    const work = pipe(.{ map(scaleAndShift), subscribe(record) });
+    const work = pipe(.{ map(scaleAndShift), forEach(record) });
     try program(range(u32, 1, 4), work).run(.{ Offset{ .by = 1 }, &seen, Scale{ .by = 10 } });
     try seen.expect(&.{ 11, 21, 31 });
 }
 
 test "a dependency may be shared by several handlers" {
     var seen: Numbers = .{};
-    const work = pipe(.{ map(scale), map(scale), subscribe(record) });
+    const work = pipe(.{ map(scale), map(scale), forEach(record) });
     try program(range(u32, 1, 3), work).run(.{ Scale{ .by = 3 }, &seen });
     try seen.expect(&.{ 9, 18 });
 }
 
 test "program bindings are visible to the source and pipe" {
     var seen: Numbers = .{};
-    const app = program(zrx.fromProducer(u32, produce), pipe(.{ map(scale), subscribe(record) }))
+    const app = program(zrx.fromProducer(u32, produce), pipe(.{ map(scale), forEach(record) }))
         .provide(.{Scale{ .by = 5 }});
     try app.run(.{&seen});
     try seen.expect(&.{25});
@@ -57,7 +57,7 @@ fn produce(factor: Scale, out: anytype) !void {
 
 test "program bindings shadow caller values and can be extended" {
     var seen: Numbers = .{};
-    const app = program(range(u32, 1, 3), pipe(.{ map(scaleAndShift), subscribe(record) }))
+    const app = program(range(u32, 1, 3), pipe(.{ map(scaleAndShift), forEach(record) }))
         .provide(.{Scale{ .by = 2 }})
         .provide(.{Offset{ .by = 1 }});
     try app.run(.{ Scale{ .by = 100 }, &seen });
@@ -77,8 +77,8 @@ test "program bindings are visible to both branches" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{ map(scale), subscribe(toLeft) }),
-        pipe(.{ map(scale), subscribe(toRight) }),
+        pipe(.{ map(scale), forEach(toLeft) }),
+        pipe(.{ map(scale), forEach(toRight) }),
     })});
     try program(range(u32, 1, 3), work).provide(.{Scale{ .by = 10 }}).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 10, 20 });
@@ -115,7 +115,7 @@ test "resources are acquired in order, provided downstream, and released in reve
     var seen: Numbers = .{};
     const work = pipe(.{
         map(useSession),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 2), work).provide(.{ resource(connect, disconnect), resource(openSession, closeSession) }).run(.{ &journal, &seen });
     try seen.expect(&.{ 8, 9 });
@@ -130,7 +130,7 @@ fn failing(value: u32) error{Boom}!u32 {
 test "resources are released when the run fails" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
-    const work = pipe(.{ map(failing), subscribe(record) });
+    const work = pipe(.{ map(failing), forEach(record) });
     try std.testing.expectError(error.Boom, program(range(u32, 0, 3), work).provide(.{resource(connect, disconnect)}).run(.{ &journal, &seen }));
     try journal.expect("Cc");
 }
@@ -143,7 +143,7 @@ fn refuse(journal: *Journal, _: Connection) error{Refused}!Session {
 test "a failed acquire releases what was acquired before it and runs nothing" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
-    const work = pipe(.{ map(useSession), subscribe(record) });
+    const work = pipe(.{ map(useSession), forEach(record) });
     try std.testing.expectError(error.Refused, program(range(u32, 0, 3), work).provide(.{ resource(connect, disconnect), resource(refuse, closeSession) }).run(.{ &journal, &seen }));
     try journal.expect("CXc");
     try seen.expect(&.{});
@@ -155,7 +155,7 @@ fn derive(factor: Scale) Offset {
 
 test "a resource without release is a dependency computed from others" {
     var seen: Numbers = .{};
-    const work = pipe(.{ map(shift), subscribe(record) });
+    const work = pipe(.{ map(shift), forEach(record) });
     try program(range(u32, 1, 3), work).provide(.{resource(derive, null)}).run(.{ Scale{ .by = 2 }, &seen });
     try seen.expect(&.{ 201, 202 });
 }
@@ -171,7 +171,7 @@ fn narrow(value: u64) u32 {
 
 test "the data parameter of a handler may be generic" {
     var seen: Numbers = .{};
-    try program(range(u32, 1, 3), pipe(.{ map(widen), map(narrow), subscribe(record) })).run(.{&seen});
+    try program(range(u32, 1, 3), pipe(.{ map(widen), map(narrow), forEach(record) })).run(.{&seen});
     try seen.expect(&.{ 1, 2 });
 }
 
@@ -182,6 +182,6 @@ fn bump(counter: *Counter, value: u32) void {
 
 test "a pointer dependency is shared, not copied" {
     var counter: Counter = .{};
-    try program(range(u32, 1, 4), pipe(.{ tap(bump), subscribe(bump) })).run(.{&counter});
+    try program(range(u32, 1, 4), pipe(.{ tap(bump), forEach(bump) })).run(.{&counter});
     try std.testing.expectEqual(@as(u32, 12), counter.total);
 }

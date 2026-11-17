@@ -41,9 +41,9 @@ fn idAndCents(order: Order) struct { u32, i64 } {
 /// pipe continues after the route.
 const revenue = pipe(.{
     route(.{
-        when(isRefund, pipe(.{map(negated)})),
-        when(isLarge, pipe(.{map(withFee)})),
-        otherwise(pipe(.{map(field(.cents))})),
+        when(isRefund, .{map(negated)}),
+        when(isLarge, .{map(withFee)}),
+        otherwise(.{map(field(.cents))}),
     }),
     fold(0, add),
     print(zrx.Stdout, "revenue: {d}\n"),
@@ -61,11 +61,11 @@ pub fn main(init: std.process.Init) !void {
         .{ .id = 2, .kind = .sale, .cents = 25_000 },
         .{ .id = 3, .kind = .refund, .cents = 4_000 },
     };
-    const app = program(fromSlice(&orders), pipe(.{
+    const app = program(fromSlice(&orders), .{
         branch(.{
             journal,
             revenue,
         }),
-    })).provide(.{stdout(256)});
+    }).provide(.{stdout(256)});
     try app.run(.{init.io});
 }
