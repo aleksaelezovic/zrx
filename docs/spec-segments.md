@@ -114,16 +114,29 @@ moment inside the run.
     "debounce restarts its deadline and emits the latest item during source
     silence", "debounce coalesces input while downstream is busy", and
     "timed operators emit nothing for empty input" (`tests/timing.zig`).*
+12. **A producer waiting on `Stop` can finish early without another item.**
+    With built-in branching and task boundaries, a downstream limit that
+    leaves the producer with no consumers lets the program return normally.
+    A live sibling can still receive items. Downstream segments finish and
+    report finish errors under guarantees 1 and 2.
+    *Tests: "a downstream limit wakes a producer without another item and
+    all segments finish", "a shared producer keeps running until both
+    queued consumers are done", "a live direct branch still receives items
+    when a queued branch stops", "a branch that stopped synchronously no
+    longer holds shared upstream open", "a producer can stop a pending input
+    wait without canceling its segment", "a queued downstream limit wakes
+    an idle producer inside merge", and "a finish error still fails the run
+    after a downstream limit", and "caller cancellation still interrupts a
+    producer responding to Stop" (`tests/flow.zig`).*
 
 ## Not promised
 
 A review finding against one of these is answered by pointing here.
 
-- That a source waiting for input is interrupted when the stages behind a
-  queue are done. It finds out at its next push, as on `main`. (See "Taken
-  out".) `merge` cancels its other sources when a push of one of them is
-  answered `.done`, which with a queue after the merge is likewise only at
-  a push.
+- Interrupting arbitrary calls on early completion. A producer waiting for
+  input cooperates by waiting on `Stop` alongside that input. Other sources
+  discover completion at a push. A custom operator with sub-pipes may keep
+  upstream demand live until a push.
 - That a sub-pipe beside one that fails gets the items meant for it. A
   failure ends the run.
 - That a run fails with `error.ConcurrencyUnavailable` when a member cannot
@@ -196,6 +209,14 @@ Mechanism, not promises. It may change as long as the guarantees hold.
   `Io` of the first boundary. Tasks are started in an `Io.Group`.
 - **`merge`** tells its scope when a push is answered `.done`; the scope then
   cancels the other sources and ends as a success.
+- **A producer that requests `Stop`** gets a signal through its source
+  environment. At task setup the chain links demand from segments and from
+  terminal branch and route cases. A boundary worker reports `.done` after
+  its work returns successfully. A direct case reports it on its first
+  `.done`. Each node withdraws demand once, either explicitly or when all
+  of its consumers have withdrawn theirs. Reaching the source sets its
+  event. The source returns normally and end-of-stream processing follows
+  the existing segment lifecycle.
 
 ### Decisions
 
@@ -243,9 +264,8 @@ lock, right before what it allows and after every step that can take time.
   input cannot see a flag, so the library needs a way to end one from
   outside: a type-keyed dependency and a source wrapper, composed from the
   source contract.
-- **No context passed between segments** *(proposed)*. A segment learns that
-  the stream is ending when its queue is closed and empty, which is when its
-  `finish` runs. A handler that wants a flag of its own injects one.
+- A segment learns that its input stream is ending when its boundary has
+  drained. A handler that needs a flag of its own injects one.
 
 ## Taken out: interrupting a segment that works for nothing
 
@@ -269,8 +289,9 @@ structural, not a matter of more care:
 - It needs a static tree of who feeds whom, which put three more
   declarations on every stage with sub-pipes.
 
-If it returns, it is a PR of its own, with this list as its starting point.
-Until then the behaviour is `main`'s: the segment finds out at its next push.
+The `Stop` dependency gives a participating producer a way to return normally
+when its downstream completes. The scope continues to use cancellation for
+failures and caller cancellation.
 
 ## Costs
 
@@ -364,5 +385,4 @@ itself.
    here and removed again: it corrupted short writes and dropped `sendFile`.
    `src/io.zig` is what `main` has.
 
-Not built, by explicit decision only: the stop trigger for sources; an
-owning chunk so that `batch` can cross a queue.
+Stopping a source from outside remains a proposal.

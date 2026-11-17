@@ -14,6 +14,7 @@ const di = @import("di.zig");
 const core = @import("pipe.zig");
 const program = @import("program.zig");
 const tasks = @import("tasks.zig");
+const completion = @import("completion.zig");
 const Flow = core.Flow;
 const lift = core.lift;
 
@@ -144,6 +145,7 @@ pub fn fromProducer(comptime T: type, comptime producer: anytype) FromProducer(T
 fn FromProducer(comptime T: type, comptime producer: anytype) type {
     return struct {
         pub const zrx_source = {};
+        pub const zrx_stop_source = std.mem.indexOfScalar(type, di.requires("fromProducer", producer, 1), completion.Stop) != null;
         pub const Item = T;
 
         pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
@@ -199,6 +201,10 @@ fn Merge(comptime Ss: type) type {
         sources: Ss,
 
         pub const zrx_source = {};
+        pub const zrx_stop_source = blk: {
+            for (members) |S| if (completion.sourceWantsStop(S)) break :blk true;
+            break :blk false;
+        };
         pub const Item = members[0].Item;
 
         pub fn run(self: *const @This(), env: anytype, down: anytype) !void {

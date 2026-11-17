@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 const di = @import("../di.zig");
 const core = @import("../pipe.zig");
+const completion = @import("../completion.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -178,19 +179,23 @@ fn Branch(comptime Ps: type) type {
             return struct {
                 chains: @Tuple(&chains),
                 live: [n]bool,
+                demands: if (tracks_demand) [n]completion.Demand else void,
 
                 pub const has_boundary = core.anyBoundary(@Tuple(&chains));
+                const tracks_demand = has_boundary and di.has(Env, completion.Track);
 
                 pub fn Tasks(comptime _: type) type {
                     return core.TasksOf(@Tuple(&chains), Closed);
                 }
 
                 pub fn tasks(self: *@This(), down: anytype) Tasks(@TypeOf(down)) {
+                    if (tracks_demand) return core.subPipeTasks(&self.chains, Closed{}, down.collector, &self.demands);
                     return core.tasksOf(&self.chains, Closed{});
                 }
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) void {
                     self.live = @splat(true);
+                    self.demands = if (tracks_demand) @splat(.{}) else {};
                     inline for (0..n) |i| {
                         self.chains[i].init(&op.pipes[i], env);
                     }
@@ -202,6 +207,7 @@ fn Branch(comptime Ps: type) type {
                         if (self.live[i]) {
                             if (try self.chains[i].push(item, Closed{}) == .done) {
                                 self.live[i] = false;
+                                if (tracks_demand) self.demands[i].complete();
                             } else {
                                 wanted = true;
                             }
@@ -322,6 +328,7 @@ fn Route(comptime Cs: type) type {
                 chains: @Tuple(&chains),
                 tests: @Tuple(&tests),
                 live: [n]bool,
+                demands: if (tracks_demand) [n]completion.Demand else void,
                 /// The route wants no more items: no case does, or the pipe
                 /// after it is done. Kept as one flag because it is asked
                 /// ahead of the per-item work, where walking `live` instead
@@ -372,17 +379,20 @@ fn Route(comptime Cs: type) type {
 
                 /// Only terminal cases can hold a boundary (see `Out`).
                 pub const has_boundary = core.anyBoundary(@Tuple(&chains));
+                const tracks_demand = has_boundary and di.has(Env, completion.Track);
 
                 pub fn Tasks(comptime _: type) type {
                     return if (rejoins) @Tuple(&.{}) else core.TasksOf(@Tuple(&chains), Closed);
                 }
 
                 pub fn tasks(self: *Self, down: anytype) Tasks(@TypeOf(down)) {
+                    if (tracks_demand) return core.subPipeTasks(&self.chains, Closed{}, down.collector, &self.demands);
                     return if (rejoins) .{} else core.tasksOf(&self.chains, Closed{});
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) void {
                     self.live = @splat(true);
+                    self.demands = if (tracks_demand) @splat(.{}) else {};
                     self.done = false;
                     self.downstream_done = false;
                     inline for (0..n) |i| {
@@ -410,6 +420,7 @@ fn Route(comptime Cs: type) type {
 
                 fn caseDone(self: *Self, comptime i: usize) void {
                     self.live[i] = false;
+                    if (tracks_demand) self.demands[i].complete();
                     inline for (0..n) |k| if (self.live[k]) return;
                     self.done = true;
                 }
