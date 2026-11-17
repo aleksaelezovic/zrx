@@ -168,10 +168,22 @@ test "the line limit counts the line, not its newline" {
     try std.testing.expectEqualStrings("AB,", rejected.buffered());
 }
 
-test "line limits apply to a caller-provided reader, also at EOF" {
-    var reader: std.Io.Reader = .fixed("AB\nABCDE");
-    const work = program(lines(*std.Io.Reader, 4), pipe(.{zrx.drain()}));
-    try std.testing.expectError(error.StreamTooLong, work.run(.{&reader}));
+test "a larger line limit can retry on the same reader, including at EOF" {
+    const cases = [_]struct { input: []const u8, output: []const u8 }{
+        .{ .input = "ABCDE\nok\n", .output = "[ABCDE][ok]" },
+        .{ .input = "ABCDE", .output = "[ABCDE]" },
+    };
+    const first = program(lines(*std.Io.Reader, 4), pipe(.{zrx.drain()}));
+    const retry = program(lines(*std.Io.Reader, 5), pipe(.{print(*std.Io.Writer, "[{f}]")}));
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.input);
+        try std.testing.expectError(error.StreamTooLong, first.run(.{&reader}));
+
+        var buffer: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try retry.run(.{ &reader, &writer });
+        try std.testing.expectEqualStrings(case.output, writer.buffered());
+    }
 }
 
 test "file lines survive batching and a queue, including the final partial batch" {

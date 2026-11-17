@@ -360,7 +360,8 @@ Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is
 alive, or `print(Role, "{f}\n")` to write it. For `lines(Role, n)`, use a
 reader buffer of at least `n + 1` bytes to fit the longest line and its
-newline.
+newline. On `error.StreamTooLong`, the reader stays at the start of the
+rejected line. You can retry with a larger limit if the reader has room.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
