@@ -103,17 +103,12 @@ fn Queue(comptime capacity: usize, comptime Buffer: type) type {
                 /// finished and the buffer is empty, or when `down` is done;
                 /// fails with what `down` failed with.
                 pub fn work(self: *Self, down: anytype) !void {
-                    // Batch small items without a large scratch array for wide items.
-                    const read_size = @min(capacity, 32, @max(1, 4096 / @sizeOf(In)));
-                    var ready: [read_size]In = undefined;
                     while (true) {
-                        const count = self.channel.get(self.io, &ready, 1) catch |err| switch (err) {
+                        const item = self.channel.getOne(self.io) catch |err| switch (err) {
                             error.Closed => return,
                             error.Canceled => return error.Canceled,
                         };
-                        for (ready[0..count]) |item| {
-                            if (try down.push(item) == .done) return;
-                        }
+                        if (try down.push(item) == .done) return;
                     }
                 }
 

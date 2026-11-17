@@ -291,9 +291,9 @@ const work = pipe(.{
 
 The array length determines capacity and its element type must match the
 queue's input. Keep the array alive through `run` and give each active
-queue exclusive use of its array. Sequential runs can reuse it. Both forms
-use a small receive buffer on the worker stack, up to 4 KiB of items or one
-item if it is larger. Queue storage requires no allocator dependency.
+queue exclusive use of its array. Sequential runs can reuse it. The worker
+takes one item at a time and pushes it downstream before taking the next.
+Queue storage requires no allocator dependency.
 
 A queue splits the pipe into *segments*. The source with the stages up to the
 first queue is one segment, and each queue starts the next. With a queue in
