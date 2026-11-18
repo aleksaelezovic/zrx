@@ -15,6 +15,7 @@ const all = zrx.all;
 const any = zrx.any;
 const compose = zrx.compose;
 const orElse = zrx.orElse;
+const reduce = zrx.reduce;
 const field = zrx.field;
 const constant = zrx.constant;
 const eq = zrx.eq;
@@ -179,4 +180,65 @@ test "constant replaces every item" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 3), pipe(.{ map(constant(@as(u32, 9))), forEach(record) })).run(.{&seen});
     try seen.expect(&.{ 9, 9, 9 });
+}
+
+// --- reduce ---------------------------------------------------------------
+
+fn sum(total: u32, value: u32) u32 {
+    return total + value;
+}
+
+const Scale = struct { by: u32 };
+fn scaledSum(scale: Scale, total: u32, value: u32) u32 {
+    return total + value * scale.by;
+}
+
+fn sumBelowTen(total: u32, value: u32) error{TooLarge}!u32 {
+    if (value >= 10) return error.TooLarge;
+    return total + value;
+}
+
+test "reduce folds the elements of an array, slice or batch item" {
+    var seen: Numbers = .{};
+    const rows = [_][3]u32{ .{ 1, 2, 3 }, .{ 10, 20, 30 } };
+    try program(fromSlice(&rows), .{ map(reduce(0, sum)), forEach(record) }).run(.{&seen});
+
+    const slices = [_][]const u32{ &.{ 4, 5 }, &.{}, &.{6} };
+    try program(fromSlice(&slices), .{ map(reduce(100, sum)), forEach(record) }).run(.{&seen});
+
+    // The last batch is partial: only its valid items are folded.
+    try program(range(u32, 1, 6), .{ zrx.batch(2), map(reduce(0, sum)), forEach(record) }).run(.{&seen});
+    try seen.expect(&.{ 6, 60, 109, 100, 106, 3, 7, 5 });
+}
+
+test "reduce forwards the reducer's dependencies and its errors" {
+    var seen: Numbers = .{};
+    const rows = [_][2]u32{ .{ 1, 2 }, .{ 3, 4 } };
+    try program(fromSlice(&rows), .{ map(reduce(0, scaledSum)), forEach(record) }).run(.{ &seen, Scale{ .by = 10 } });
+    try seen.expect(&.{ 30, 70 });
+
+    const mixed = [_][2]u32{ .{ 1, 2 }, .{ 3, 40 } };
+    const failing = program(fromSlice(&mixed), .{ map(reduce(0, sumBelowTen)), forEach(record) });
+    try std.testing.expectError(error.TooLarge, failing.run(.{&seen}));
+    try seen.expect(&.{ 30, 70, 3 });
+}
+
+const Spread = struct {
+    low: u32 = std.math.maxInt(u32),
+    high: u32 = 0,
+
+    fn add(spread: Spread, value: u32) Spread {
+        return .{ .low = @min(spread.low, value), .high = @max(spread.high, value) };
+    }
+
+    fn width(spread: Spread) u32 {
+        return spread.high - spread.low;
+    }
+};
+
+test "reduce composes: a struct seed, then a handler over the result" {
+    var seen: Numbers = .{};
+    const rows = [_][3]u32{ .{ 5, 1, 9 }, .{ 7, 7, 7 } };
+    try program(fromSlice(&rows), .{ map(compose(.{ reduce(Spread{}, Spread.add), Spread.width })), forEach(record) }).run(.{&seen});
+    try seen.expect(&.{ 8, 0 });
 }

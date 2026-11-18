@@ -4,6 +4,7 @@
 //! is. Composites forward the dependencies of the handlers they are built from.
 const std = @import("std");
 const di = @import("di.zig");
+const sequence = @import("ops/transform.zig");
 
 fn Handlers(comptime who: []const u8, comptime handlers: anytype) void {
     @setEvalBranchQuota(di.quota);
@@ -195,6 +196,52 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
             if (!canCancel(Failure(Args))) return F;
             const Own = if (Fallible(F)) @typeInfo(F).error_union.error_set else error{};
             return (Own || error{Canceled})!Wanted;
+        }
+    };
+}
+
+/// Folds the elements of an array, slice or batch item into one value:
+/// `map(reduce(Window{}, Window.add))`. The result is `seed` for an empty
+/// item. Where `fold` reduces a stream, this reduces one item.
+pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
+    // Checks the reducer's shape before its state parameter is looked at.
+    _ = di.requires("reduce", reducer, 2);
+    // The reducer's declared state parameter, else the seed's type, as for `fold`.
+    const State = di.Param(reducer, 2, 0) orelse @TypeOf(seed);
+    return struct {
+        pub const zrx_handler = {};
+
+        pub fn requires(comptime arity: usize) []const type {
+            expectOneItem(arity);
+            return di.requires("reduce", reducer, 2);
+        }
+
+        pub fn call(env: anytype, args: anytype) Reduced(@TypeOf(env), di.types(@TypeOf(args))) {
+            const In = @TypeOf(args[0]);
+            var state: State = seed;
+            for (if (comptime sequence.isBatch(In)) args[0].slice() else args[0]) |element| {
+                const next = di.invoke(reducer, env, .{ state, element });
+                state = if (comptime Fallible(@TypeOf(next))) try next else next;
+            }
+            return state;
+        }
+
+        fn expectOneItem(comptime arity: usize) void {
+            if (arity != 1) @compileError(std.fmt.comptimePrint(
+                "reduce: folds the elements of one item, but receives {d} values here; use it where a handler takes a single item, as in map(reduce(seed, f))",
+                .{arity},
+            ));
+        }
+
+        fn Reduced(comptime Env: type, comptime Args: []const type) type {
+            @setEvalBranchQuota(di.quota);
+            expectOneItem(Args.len);
+            const Element = sequence.Element(Args[0]) orelse
+                @compileError("reduce: items must be arrays, slices, or batches, got `" ++ @typeName(Args[0]) ++ "`");
+            di.check("reduce", reducer, Env, &.{ State, Element });
+            const R = di.Result("reduce", reducer, &.{ State, Element });
+            sequence.expectReturn("reduce", "reducer", R, State);
+            return if (Fallible(R)) @typeInfo(R).error_union.error_set!State else State;
         }
     };
 }

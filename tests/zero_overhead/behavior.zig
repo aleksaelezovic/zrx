@@ -156,6 +156,34 @@ test "printed" {
     try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
 }
 
+test "written" {
+    for (inputs) |items| {
+        var with_bytes: [256]u8 = undefined;
+        var without_bytes: [256]u8 = undefined;
+        var with: std.Io.Writer = .fixed(&with_bytes);
+        var without: std.Io.Writer = .fixed(&without_bytes);
+        try std.testing.expect(cases.written(true, items, &with));
+        try std.testing.expect(cases.written(false, items, &without));
+        try std.testing.expectEqualStrings(without.buffered(), with.buffered());
+    }
+    var small_with: [3]u8 = undefined;
+    var small_without: [3]u8 = undefined;
+    var with: std.Io.Writer = .fixed(&small_with);
+    var without: std.Io.Writer = .fixed(&small_without);
+    try std.testing.expectEqual(cases.written(false, inputs[3], &without), cases.written(true, inputs[3], &with));
+}
+
+test "reduced" {
+    const rows = [_][4]u32{ .{ 1, 6, 7, 2 }, .{ 0, 0, 0, 0 }, .{ 100, 5, 6, 1000 } };
+    for ([_][]const [4]u32{ &.{}, rows[0..1], &rows }) |some| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.reduced(true, some, &with);
+        cases.reduced(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
 test "fellBack" {
     for (inputs) |items| {
         var with: u64 = 99;

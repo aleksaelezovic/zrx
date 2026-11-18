@@ -13,6 +13,7 @@ const filter = zrx.filter;
 const take = zrx.take;
 const branch = zrx.branch;
 const print = zrx.print;
+const write = zrx.write;
 const lines = zrx.lines;
 const fileLines = zrx.fileLines;
 const fileWriter = zrx.fileWriter;
@@ -160,6 +161,154 @@ test "fileWriter replaces an existing file unless asked to create a new file" {
     var writer: std.Io.Writer = .fixed(&buffer);
     try program(fileLines(path, 64), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("new,", writer.buffered());
+}
+
+var flushes: usize = 0;
+
+fn countFlush(_: *std.Io.Writer) std.Io.Writer.Error!void {
+    flushes += 1;
+}
+
+test "write flushes once, at the end of the stream, where print flushes every item" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var vtable = writer.vtable.*;
+    vtable.flush = countFlush;
+    writer.vtable = &vtable;
+
+    flushes = 0;
+    try program(range(u32, 1, 4), .{write(*std.Io.Writer, "{d};")}).run(.{&writer});
+    try std.testing.expectEqualStrings("1;2;3;", writer.buffered());
+    try std.testing.expectEqual(@as(usize, 1), flushes);
+
+    flushes = 0;
+    try program(range(u32, 1, 4), .{print(*std.Io.Writer, "{d};")}).run(.{&writer});
+    try std.testing.expectEqual(@as(usize, 4), flushes);
+}
+
+test "write reports a flush error at stream end" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var vtable = writer.vtable.*;
+    vtable.flush = failFlush;
+    writer.vtable = &vtable;
+    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 2), .{write(*std.Io.Writer, "{d}")}).run(.{&writer}));
+    try std.testing.expectEqualStrings("01", writer.buffered());
+}
+
+fn filesIn(dir: std.Io.Dir) !usize {
+    var count: usize = 0;
+    var it = dir.iterate();
+    while (try it.next(io)) |_| count += 1;
+    return count;
+}
+
+test "a published file appears only when the run succeeds, and replaces nothing" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const published = fileWriter(Report, path, 4, .{ .mode = .publish });
+
+    // A failed run leaves nothing behind, not even its temporary file.
+    const failing = program(range(u32, 0, 10), .{ map(failAtThree), write(Report, "{d}\n") }).provide(.{published});
+    try std.testing.expectError(error.Three, failing.run(.{io}));
+    try std.testing.expectEqual(@as(usize, 0), try filesIn(tmp.dir));
+
+    // A successful one publishes everything, including what was still buffered.
+    try program(range(u32, 0, 3), .{write(Report, "{d}\n")}).provide(.{published}).run(.{io});
+    try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
+
+    // The path is now taken: a second run fails and the file is as it was.
+    const again = program(range(u32, 7, 9), .{write(Report, "{d}\n")}).provide(.{published});
+    try std.testing.expectError(error.PathAlreadyExists, again.run(.{io}));
+    try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+}
+
+const Name = zrx.Line(4);
+const Pet = struct { name: Name, legs: u32 };
+
+fn named(text: []const u8) !Pet {
+    return .{ .name = try .from(text), .legs = 4 };
+}
+
+fn json(pet: Pet) std.json.Formatter(Pet) {
+    return std.json.fmt(pet, .{});
+}
+
+test "a line copies bounded text and is a string to std.json" {
+    var buffer: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const names = [_][]const u8{ "rex", "", "judy" };
+    try program(fromSlice(&names), .{ map(named), map(json), write(*std.Io.Writer, "{f}\n") }).run(.{&writer});
+    try std.testing.expectEqualStrings(
+        \\{"name":"rex","legs":4}
+        \\{"name":"","legs":4}
+        \\{"name":"judy","legs":4}
+        \\
+    , writer.buffered());
+
+    try std.testing.expectError(error.StreamTooLong, Name.from("tiger"));
+}
+
+test "a line that is not UTF-8 is an array of numbers to std.json, like any such bytes" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const bytes = "a\xff";
+    try writer.print("{f} {f}", .{ std.json.fmt(try Name.from(bytes), .{}), std.json.fmt(@as([]const u8, bytes), .{}) });
+    try std.testing.expectEqualStrings("[97,255] [97,255]", writer.buffered());
+}
+
+fn toBoth(report: Report, log: Log, value: u32) !void {
+    try report.writer.print("{d}\n", .{value});
+    try log.writer.print("saw {d}\n", .{value});
+}
+
+test "published files are named one by one, the last bound first, and one failing leaves the others" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var report_bytes: [128]u8 = undefined;
+    var log_bytes: [128]u8 = undefined;
+    const report_path = try std.fmt.bufPrint(&report_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const log_path = try std.fmt.bufPrint(&log_bytes, ".zig-cache/tmp/{s}/log.txt", .{tmp.sub_path});
+    // The first file bound is named last, and its path is taken.
+    try tmp.dir.writeFile(io, .{ .sub_path = "report.txt", .data = "taken\n" });
+
+    const both = program(range(u32, 0, 2), .{zrx.forEach(toBoth)}).provide(.{
+        fileWriter(Report, report_path, 64, .{ .mode = .publish }),
+        fileWriter(Log, log_path, 64, .{ .mode = .publish }),
+    });
+    try std.testing.expectError(error.PathAlreadyExists, both.run(.{io}));
+
+    // The run failed, and the file named before the failure is there, whole.
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(log_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
+    try program(fileLines(report_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
+    try std.testing.expectEqualStrings("saw 0,saw 1,taken,", writer.buffered());
+}
+
+fn unflushed(report: Report, value: u32) !void {
+    try report.writer.print("{d}\n", .{value});
+}
+
+test "a published file holds what a handler wrote without flushing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/direct.txt", .{tmp.sub_path});
+    // The buffer holds everything: nothing reaches the file before the publish.
+    try program(range(u32, 0, 3), .{zrx.forEach(unflushed)}).provide(.{fileWriter(Report, path, 64, .{ .mode = .publish })}).run(.{io});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
 test "the line limit counts the line, not its newline" {

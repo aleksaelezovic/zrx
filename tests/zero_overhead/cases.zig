@@ -434,6 +434,54 @@ export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool
     return printed(exported_with_zrx, ptr[0..len], writer);
 }
 
+/// `write` is `print` without the flush after each item. Its format differs
+/// from the one in `printed` on purpose: two callers of one instantiation of
+/// `std.Io.Writer.print` keep it out of line under a compiler-chosen name,
+/// which differs between the two variants.
+pub fn written(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+    if (with_zrx) {
+        const lines = pipe(.{ filter(isEven), zrx.write(*std.Io.Writer, "{d},") });
+        program(fromSlice(items), lines).run(.{writer}) catch return false;
+    } else {
+        for (items) |value| {
+            if (value % 2 != 0) continue;
+            writer.print("{d},", .{value}) catch return false;
+        }
+        writer.flush() catch return false;
+    }
+    return true;
+}
+
+export fn same_write(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
+    return written(exported_with_zrx, ptr[0..len], writer);
+}
+
+// --- reduce -------------------------------------------------------------------------------------
+
+fn widest(most: u32, value: u32) u32 {
+    return @max(most, value);
+}
+
+/// The largest value of every row, summed.
+pub fn reduced(comptime with_zrx: bool, rows: []const [4]u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(zrx.reduce(0, widest)), fold(@as(u64, 0), add), forEach(store) });
+        run(program(fromSlice(rows), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (rows) |row| {
+            var most: u32 = 0;
+            for (row) |value| most = @max(most, value);
+            sum +%= most;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_reduce(ptr: [*]const [4]u32, len: usize, out: *u64) void {
+    reduced(exported_with_zrx, ptr[0..len], out);
+}
+
 // --- orElse -------------------------------------------------------------------------------------
 
 fn halved(_: error{TooSmall}, value: u32) u32 {

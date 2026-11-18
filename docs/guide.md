@@ -136,6 +136,7 @@ so the `Io` must be able to run tasks concurrently; with one that cannot,
 | `fromIterator(&iterator)` | `iterator.next()` until null; `next` may return `?T` or `E!?T`. |
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
 | `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
+| `mergeTagged(T, .{ .a = x, .b = y })` | `merge`, with every item marked by the source it came from; see [below](#knowing-where-an-item-came-from). |
 | `lines(Role, n)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
@@ -145,6 +146,40 @@ fn ticks(clock: Clock, out: anytype) !void {
     while (try out.push(clock.now()) == .more) {}
 }
 ```
+
+### Knowing where an item came from
+
+`merge` forgets which source an item came from. `mergeTagged` keeps it: name
+one source for each tag of an enum, and every item arrives as
+`Tagged(Enum, Item)`, a struct with the fields `source` and `item`.
+
+```zig
+const Side = enum { left, right };
+
+fn parse(line: zrx.Tagged(Side, Line)) !Event { ... }
+
+const logs = mergeTagged(Side, .{
+    .left = fileLines(left_path, max_line),
+    .right = fileLines(right_path, max_line),
+});
+```
+
+To merge sources of *different* item types, pass a tagged union instead. Each
+source feeds the variant of its name, and the items are the union itself:
+
+```zig
+const Input = union(enum) { tick: Tick, line: Line };
+
+const input = mergeTagged(Input, .{
+    .tick = fromProducer(Tick, ticks),
+    .line = stdinLines(max_line),
+});
+```
+
+A union item is as large as its largest variant, which is what a `queue`
+after it stores per slot. With an enum every source must emit the same type;
+a union whose variants all hold the same type is rejected in favor of the
+enum. Everything else is `merge`: the sources run as tasks and take turns.
 
 ## Operators
 
@@ -181,7 +216,8 @@ Terminal:
 |---|---|
 | `forEach(f)` | Runs `f(deps..., item)` for every item. |
 | `drain()` | Discards every item. |
-| `print(Role, "fmt")` | Formats every item to a writer. |
+| `print(Role, "fmt")` | Formats every item to a writer and flushes it. |
+| `write(Role, "fmt")` | Formats every item to a writer; flushes once, at the end. |
 
 Every handler may also return an error union of the type shown.
 
@@ -212,6 +248,7 @@ they are built from.
 | `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
 | `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
+| `reduce(seed, f)` | Folds the elements of an array, slice or batch item with `f(deps..., state, element)`; `seed` for an empty one. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
 | `eq(v)`, `ne(v)`, `lt(v)`, `le(v)`, `gt(v)`, `ge(v)` | Comparison with a comptime value. |
@@ -219,6 +256,17 @@ they are built from.
 ```zig
 const isHot = compose(.{ field(.celsius), gt(80) });
 const wanted = all(.{ isHot, not(isMuted) });
+```
+
+`reduce` is to one item what `fold` is to the stream. After `batch` or
+`batchWithin` it turns each group into a summary:
+
+```zig
+const windows = pipe(.{
+    batchWithin(8, .fromMilliseconds(200)),
+    map(reduce(Window{}, Window.add)),
+    forEach(save),
+});
 ```
 
 ## Errors
@@ -488,23 +536,67 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | | |
 |---|---|
 | `print(Role, "fmt")` | Terminal. Formats and flushes every item. A tuple supplies several format arguments. |
+| `write(Role, "fmt")` | Terminal. Like `print`, but flushes only at the end of the stream. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
-| `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The default mode is `.replace`. Use `.create_new` to require a new path. |
+| `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
 Pass `stdout`, `stderr`, and `fileWriter` to `Program.provide`. The file
 closes when the program releases its resources. `print` flushes after each
-item and again at normal stream end. Handlers that write directly to a
+item and again at normal stream end: use it for output someone reads as it
+is produced. `write` leaves items in the writer's buffer and flushes at
+normal stream end only: use it for a file, where a flush per item is a
+system call per item. Handlers that write directly to a
 writer control their own flushing. If multiple tasks use one writer, the
 caller must serialize those writes.
 
+`fileWriter` modes:
+
+- `.replace` creates the file, or empties it if it exists.
+- `.create_new` fails with `error.PathAlreadyExists` if something is there.
+- `.publish` writes to a temporary file in the same directory and gives it
+  its name after the work wrapped by the binding succeeds and the writer is
+  flushed. A failure before publication leaves the destination untouched.
+  If the path already exists at publication, the run returns
+  `error.PathAlreadyExists`.
+
+Each file is published atomically. With several published files, the last
+one bound is named first, following resource release order. If naming one
+fails, `run` returns that error and the files published earlier stay in place.
+
+```zig
+program(source, work).provide(.{
+    fileWriter(Summary, summary_path, 4096, .{ .mode = .publish }), // named second
+    fileWriter(Archive, archive_path, 4096, .{ .mode = .publish }), // named first
+})
+```
+
+To write JSON lines, map each item to `std.json.fmt` and format it with `{f}`:
+
+```zig
+fn json(event: Event) std.json.Formatter(Event) {
+    return std.json.fmt(event, .{});
+}
+
+const archive = pipe(.{
+    map(json),
+    write(Archive, "{f}\n"),
+});
+```
+
 Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is
-alive, or `print(Role, "{f}\n")` to write it. For `lines(Role, n)`, use a
-reader buffer of at least `n + 1` bytes to fit the longest line and its
-newline. On `error.StreamTooLong`, the reader stays at the start of the
-rejected line. You can retry with a larger limit if the reader has room.
+alive, or `print(Role, "{f}\n")` to write it. `Line(n).from(text)` copies
+text into a line of your own (`error.StreamTooLong` if it does not fit), so
+a record that crosses a `queue` can own a name without a slice into someone
+else's buffer. A line source accepts arbitrary bytes, and `std.json` formats
+a line like a byte slice. By default, valid UTF-8 becomes a JSON string and
+invalid UTF-8 becomes an array of numbers. `emit_strings_as_arrays` uses
+arrays for both. For `lines(Role, n)`, use a reader buffer of at least
+`n + 1` bytes to fit the longest line and its newline. On
+`error.StreamTooLong`, the reader stays at the start of the rejected line.
+You can retry with a larger limit if the reader has room.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
@@ -601,7 +693,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Twelve are `same`; `take`, `batch`
+Every synchronous operator has a fixture. Fourteen are `same`; `take`, `batch`
 and the handler combinators are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
