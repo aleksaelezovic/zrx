@@ -88,3 +88,15 @@ test "malformed input leaves no published alerts or summary" {
     try invoke(temp.dir, &.{ "left", "right", "alerts" }, 2, "", "fatal: InvalidLogRecord\n");
     try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "alerts", .{}));
 }
+
+test "a failed write on the queued alert branch prevents a report" {
+    var left: std.Io.Reader = .fixed(left_text);
+    var right: std.Io.Reader = .fixed(right_text);
+    var short: [1]u8 = undefined;
+    var report_bytes: [512]u8 = undefined;
+    var alerts: std.Io.Writer = .fixed(&short);
+    var report: std.Io.Writer = .fixed(&report_bytes);
+    const result = app.analyze(io, .{ .reader = &left }, .{ .reader = &right }, &alerts, &report);
+    try std.testing.expectError(error.WriteFailed, result);
+    try std.testing.expectEqualStrings("", report.buffered());
+}
