@@ -23,7 +23,7 @@ const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
 const otherwise = zrx.otherwise;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 const drain = zrx.drain;
 
 /// Which variant the exported functions are compiled as.
@@ -61,8 +61,7 @@ fn run(runnable: anytype, deps: anytype) void {
 
 pub fn sumScaled(comptime with_zrx: bool, items: []const u32, by: u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), subscribe(store) });
-        run(program(fromSlice(items), total), .{ Scale{ .by = by }, Result{ .out = out } });
+        run(program(fromSlice(items), .{ map(scale), filter(isLarge), fold(@as(u64, 0), add), forEach(store) }), .{ Scale{ .by = by }, Result{ .out = out } });
     } else {
         var sum: u64 = 0;
         for (items) |value| {
@@ -83,7 +82,7 @@ pub fn nestedProvide(comptime with_zrx: bool, items: []const u32, by: u32, out: 
     if (with_zrx) {
         const scaled = pipe(.{map(scale)});
         const even = pipe(.{ scaled, pipe(.{filter(isEven)}) });
-        const total = pipe(.{ even, pipe(.{ fold(@as(u64, 0), add), subscribe(store) }) });
+        const total = pipe(.{ even, pipe(.{ fold(@as(u64, 0), add), forEach(store) }) });
         run(program(fromSlice(items), total).provide(.{ Scale{ .by = by }, Result{ .out = out } }), .{});
     } else {
         var sum: u64 = 0;
@@ -111,9 +110,9 @@ fn increment(value: u32) u32 {
 pub fn routed(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
         const total = pipe(.{
-            route(.{ when(isEven, pipe(.{map(triple)})), otherwise(pipe(.{map(increment)})) }),
+            route(.{ when(isEven, .{map(triple)}), otherwise(.{map(increment)}) }),
             fold(@as(u64, 0), add),
-            subscribe(store),
+            forEach(store),
         });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
@@ -134,8 +133,8 @@ export fn same_route(ptr: [*]const u32, len: usize, out: *u64) void {
 pub fn branched(comptime with_zrx: bool, items: []const u32, first: *u64, second: *u64) void {
     if (with_zrx) {
         const totals = pipe(.{branch(.{
-            pipe(.{ fold(@as(u64, 0), add), subscribe(store) }),
-            pipe(.{ filter(isEven), map(triple), fold(@as(u64, 0), add), subscribe(storeSecond) }),
+            .{ fold(@as(u64, 0), add), forEach(store) },
+            pipe(.{ filter(isEven), map(triple), fold(@as(u64, 0), add), forEach(storeSecond) }),
         })});
         run(program(fromSlice(items), totals), .{ Result{ .out = first }, Second{ .out = second } });
     } else {
@@ -158,7 +157,7 @@ export fn same_branch(ptr: [*]const u32, len: usize, first: *u64, second: *u64) 
 
 pub fn flattened(comptime with_zrx: bool, rows: []const [4]u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ flatten(), filter(isLarge), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ flatten(), filter(isLarge), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(rows), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
@@ -219,7 +218,7 @@ pub fn combined(comptime with_zrx: bool, orders: []const Order, out: *u64) void 
             zrx.compose(.{ zrx.field(.price), zrx.ge(100) }),
             zrx.not(zrx.compose(.{ zrx.field(.id), isEven })),
         });
-        const total = pipe(.{ filter(wanted), map(zrx.field(.price)), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ filter(wanted), map(zrx.field(.price)), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(orders), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
@@ -240,7 +239,7 @@ export fn lean_combinators(ptr: [*]const Order, len: usize, out: *u64) void {
 
 pub fn taken(comptime with_zrx: bool, items: []const u32, limit: usize, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ filter(isEven), take(limit), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ filter(isEven), take(limit), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
@@ -271,7 +270,7 @@ fn addWide(sum: u64, value: u64) u64 {
 /// The sum of all prefix sums.
 pub fn scanned(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.scan(@as(u64, 0), add), fold(@as(u64, 0), addWide), subscribe(store) });
+        const total = pipe(.{ zrx.scan(@as(u64, 0), add), fold(@as(u64, 0), addWide), forEach(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var prefix: u64 = 0;
@@ -292,7 +291,7 @@ export fn same_scan(ptr: [*]const u32, len: usize, out: *u64) void {
 
 pub fn skipped(comptime with_zrx: bool, items: []const u32, count: usize, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.skip(count), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ zrx.skip(count), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
@@ -322,7 +321,7 @@ fn isBelow(limit: Limit, value: u32) bool {
 
 pub fn takenWhile(comptime with_zrx: bool, items: []const u32, below: u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.takeWhile(isBelow), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ zrx.takeWhile(isBelow), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total), .{ Limit{ .below = below }, Result{ .out = out } });
     } else {
         var sum: u64 = 0;
@@ -353,7 +352,7 @@ fn weighBatch(group: zrx.Batch(u32, 4)) u64 {
 
 pub fn batched(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ zrx.batch(4), map(weighBatch), fold(@as(u64, 0), addWide), subscribe(store) });
+        const total = pipe(.{ zrx.batch(4), map(weighBatch), fold(@as(u64, 0), addWide), forEach(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
@@ -397,7 +396,7 @@ fn biased(session: Session, value: u32) u32 {
 pub fn withResource(comptime with_zrx: bool, items: []const u32, opened: *u32, closed: *u32, out: *u64) void {
     const ledger: Ledger = .{ .opened = opened, .closed = closed };
     if (with_zrx) {
-        const total = pipe(.{ map(biased), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ map(biased), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total).provide(.{zrx.resource(open, close)}), .{ ledger, Result{ .out = out } });
     } else {
         const session = open(ledger);
@@ -444,7 +443,7 @@ fn halved(_: error{TooSmall}, value: u32) u32 {
 /// Small values count for half instead of being dropped.
 pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ map(zrx.orElse(checked, halved)), fold(@as(u64, 0), add), subscribe(store) });
+        const total = pipe(.{ map(zrx.orElse(checked, halved)), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;

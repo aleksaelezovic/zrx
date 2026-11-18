@@ -4,7 +4,7 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 fn double(value: u32) u32 {
     return value * 2;
@@ -16,6 +16,6 @@ fn ignore(_: u32) void {}
 
 test {
     try program(range(u32, 0, 3), pipe(.{
-        zrx.route(.{ zrx.otherwise(pipe(.{subscribe(ignore)})), zrx.when(isEven, pipe(.{subscribe(ignore)})) }),
+        zrx.route(.{ zrx.otherwise(pipe(.{forEach(ignore)})), zrx.when(isEven, pipe(.{forEach(ignore)})) }),
     })).run(.{});
 }

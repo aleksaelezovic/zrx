@@ -2,13 +2,12 @@
 //! acquired as a resource with a lifetime. Handlers only name what they need.
 const std = @import("std");
 const zrx = @import("zrx");
-const pipe = zrx.pipe;
 const program = zrx.program;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const tap = zrx.tap;
 const resource = zrx.resource;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 const stdout = zrx.stdout;
 
 /// Given to `run`: available to the whole program.
@@ -51,10 +50,10 @@ pub fn main(init: std.process.Init) !void {
     var saved: u32 = 0;
     const values = [_]i32{ 5, 12, 19 };
 
-    const app = program(fromSlice(&values), pipe(.{
+    const app = program(fromSlice(&values), .{
         map(timesTen),
-        subscribe(save),
-    })).provide(.{
+        forEach(save),
+    }).provide(.{
         stdout(256),
         resource(openLogger, null),
         resource(connect, disconnect),

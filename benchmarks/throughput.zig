@@ -11,7 +11,7 @@ const map = zrx.map;
 const filter = zrx.filter;
 const fold = zrx.fold;
 const queue = zrx.queue;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 const Scale = struct { by: u32 };
 const Total = struct { out: *u64 };
@@ -29,8 +29,8 @@ fn store(total: Total, value: u64) void {
     total.out.* = value;
 }
 
-const direct = pipe(.{ map(scale), filter(isOdd), fold(@as(u64, 0), add), subscribe(store) });
-const queued = pipe(.{ map(scale), queue(256), filter(isOdd), fold(@as(u64, 0), add), subscribe(store) });
+const direct = pipe(.{ map(scale), filter(isOdd), fold(@as(u64, 0), add), forEach(store) });
+const queued = pipe(.{ map(scale), queue(256), filter(isOdd), fold(@as(u64, 0), add), forEach(store) });
 
 fn byHand(items: []const u32, by: u32) u64 {
     var sum: u64 = 0;

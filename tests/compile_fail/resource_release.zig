@@ -4,7 +4,7 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 fn double(value: u32) u32 {
     return value * 2;
@@ -20,5 +20,5 @@ fn open() Handle {
 }
 fn close(_: Handle) error{Busy}!void {}
 test {
-    try program(range(u32, 0, 3), pipe(.{subscribe(ignore)})).provide(.{zrx.resource(open, close)}).run(.{});
+    try program(range(u32, 0, 3), pipe(.{forEach(ignore)})).provide(.{zrx.resource(open, close)}).run(.{});
 }

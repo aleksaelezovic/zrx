@@ -19,7 +19,7 @@ fn Map(comptime handler: anytype) type {
 
         pub fn Out(comptime Env: type, comptime In: type) type {
             const T = di.Payload(di.Bound(name, handler, Env, &.{In}).Return);
-            if (T == void) @compileError("map: handler returns no value; use tap(...) for an effect that keeps the item, or subscribe(...) to end the pipe");
+            if (T == void) @compileError("map: handler returns no value; use tap(...) for an effect that keeps the item, or forEach(...) to end the pipe");
             return T;
         }
 

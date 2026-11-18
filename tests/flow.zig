@@ -19,7 +19,7 @@ const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
 const otherwise = zrx.otherwise;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 const drain = zrx.drain;
 
 const Numbers = support.Recorder(u32);
@@ -40,7 +40,7 @@ fn add(sum: u32, value: u32) u32 {
 test "a queue delivers every item in order" {
     var seen: Numbers = .{};
     const capacity: usize = 8;
-    try program(range(u32, 0, 100), pipe(.{ map(double), queue(capacity), filter(isEven), subscribe(record) })).run(.{ io, &seen });
+    try program(range(u32, 0, 100), pipe(.{ map(double), queue(capacity), filter(isEven), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectEqual(@as(usize, 100), seen.len);
     for (seen.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i * 2)), value);
 }
@@ -49,7 +49,7 @@ test "a borrowed queue can reuse the same slots on a later run" {
     var slots: [2]u32 = undefined;
     var first: Numbers = .{};
     var second: Numbers = .{};
-    const work = program(range(u32, 0, 5), pipe(.{ queue(&slots), subscribe(record) }));
+    const work = program(range(u32, 0, 5), pipe(.{ queue(&slots), forEach(record) }));
 
     try work.run(.{ io, &first });
     try work.run(.{ io, &second });
@@ -64,14 +64,14 @@ fn slowly(clock: std.Io, value: u32) !u32 {
 
 test "a full queue makes the producer wait instead of dropping items" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 40), pipe(.{ queue(1), map(slowly), subscribe(record) })).run(.{ io, &seen });
+    try program(range(u32, 0, 40), pipe(.{ queue(1), map(slowly), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectEqual(@as(usize, 40), seen.len);
     for (seen.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i)), value);
 }
 
 test "the stream end waits for the queue to drain, then finishes what follows it" {
     var seen: Numbers = .{};
-    try program(range(u32, 1, 101), pipe(.{ queue(4), fold(@as(u32, 0), add), subscribe(record) })).run(.{ io, &seen });
+    try program(range(u32, 1, 101), pipe(.{ queue(4), fold(@as(u32, 0), add), forEach(record) })).run(.{ io, &seen });
     try seen.expect(&.{5050});
 }
 
@@ -82,27 +82,27 @@ fn failAtFive(value: u32) error{Five}!u32 {
 
 test "an error after a queue fails the run" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 1000), pipe(.{ queue(2), map(failAtFive), subscribe(record) })).run(.{ io, &seen });
+    const result = program(range(u32, 0, 1000), pipe(.{ queue(2), map(failAtFive), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
 test "an error before a queue stops its consumer" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 1000), pipe(.{ map(failAtFive), queue(2), subscribe(record) })).run(.{ io, &seen });
+    const result = program(range(u32, 0, 1000), pipe(.{ map(failAtFive), queue(2), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try std.testing.expect(seen.len <= 5);
 }
 
 test "take after a queue stops an endless source" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ queue(4), take(3), subscribe(record) })).run(.{ io, &seen });
+    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ queue(4), take(3), forEach(record) })).run(.{ io, &seen });
     try seen.expect(&.{ 0, 1, 2 });
 }
 
 test "queues compose: two boundaries in one pipe" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 50), pipe(.{ queue(2), map(double), queue(2), fold(@as(u32, 0), add), subscribe(record) })).run(.{ io, &seen });
+    try program(range(u32, 0, 50), pipe(.{ queue(2), map(double), queue(2), fold(@as(u32, 0), add), forEach(record) })).run(.{ io, &seen });
     try seen.expect(&.{2450});
 }
 
@@ -144,14 +144,14 @@ const StoppableSource = struct {
 
 test "a downstream limit wakes a producer without another item and all segments finish" {
     const source = fromProducer(u32, StoppableSource.produce);
-    const end = pipe(.{ map(StoppableSource.waitForSource), take(1), mark(1), fold(@as(u32, 5), add), subscribe(record) });
+    const end = pipe(.{ map(StoppableSource.waitForSource), take(1), mark(1), fold(@as(u32, 5), add), forEach(record) });
     const shapes = .{
-        pipe(.{ mark(0), queue(1), end }),
+        .{ mark(0), queue(1), end },
         pipe(.{ mark(0), queue(1), queue(1), end }),
-        pipe(.{ mark(0), queue(1), map(StoppableSource.waitForSource), take(1), queue(1), mark(1), fold(@as(u32, 5), add), subscribe(record) }),
+        pipe(.{ mark(0), queue(1), map(StoppableSource.waitForSource), take(1), queue(1), mark(1), fold(@as(u32, 5), add), forEach(record) }),
         pipe(.{ mark(0), zrx.batchWithin(1, .fromSeconds(1)), zrx.flatten(), end }),
-        pipe(.{ mark(0), branch(.{pipe(.{ queue(1), end })}) }),
-        pipe(.{ mark(0), route(.{otherwise(pipe(.{ queue(1), end }))}) }),
+        pipe(.{ mark(0), branch(.{.{ queue(1), end }}) }),
+        pipe(.{ mark(0), route(.{otherwise(.{ queue(1), end })}) }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -168,9 +168,9 @@ test "a downstream limit wakes a producer without another item and all segments 
 }
 
 test "a shared producer keeps running until both queued consumers are done" {
-    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), subscribe(StoppableSource.leftFinished) });
-    const right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(2), subscribe(record) });
-    const routed_right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(1), subscribe(record) });
+    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), forEach(StoppableSource.leftFinished) });
+    const right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(2), forEach(record) });
+    const routed_right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(1), forEach(record) });
     const shapes = .{
         pipe(.{branch(.{ left, right })}),
         pipe(.{route(.{ when(isEven, routed_right), otherwise(left) })}),
@@ -188,8 +188,8 @@ test "a shared producer keeps running until both queued consumers are done" {
 test "a live direct branch still receives items when a queued branch stops" {
     var state: StoppableSource = .{ .wait_for_left = true, .finite = true };
     var seen: Numbers = .{};
-    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), subscribe(StoppableSource.leftFinished) });
-    const work = pipe(.{branch(.{ left, pipe(.{subscribe(record)}) })});
+    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), forEach(StoppableSource.leftFinished) });
+    const work = pipe(.{branch(.{ left, pipe(.{forEach(record)}) })});
     try program(fromProducer(u32, StoppableSource.produce), work).run(.{ io, &state, &seen });
     try seen.expect(&.{ 1, 2 });
 }
@@ -198,7 +198,7 @@ test "a branch that stopped synchronously no longer holds shared upstream open" 
     var state: StoppableSource = .{};
     var seen: Numbers = .{};
     const left = pipe(.{ take(1), queue(1), drain() });
-    const right = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), subscribe(record) });
+    const right = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), forEach(record) });
     const work = program(fromProducer(u32, StoppableSource.produce), pipe(.{branch(.{ left, right })}));
     try work.run(.{ io, &state, &seen });
     try std.testing.expect(state.stopped);
@@ -252,7 +252,7 @@ test "a producer can stop a pending input wait without canceling its segment" {
     var pending: PendingInput = .{};
     var source: StoppableSource = .{};
     var seen: Numbers = .{};
-    const work = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), subscribe(record) });
+    const work = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), forEach(record) });
     try program(fromProducer(u32, PendingInput.produce), work).run(.{ io, &pending, &source, &seen });
     try std.testing.expect(pending.interrupted);
     try seen.expect(&.{1});
@@ -278,7 +278,7 @@ test "a queued downstream limit wakes an idle producer inside merge" {
     var state: MergedWait = .{};
     var seen: Numbers = .{};
     const source = zrx.merge(.{ zrx.fromValue(@as(u32, 1)), fromProducer(u32, MergedWait.idle) });
-    const work = pipe(.{ queue(1), map(MergedWait.waitForIdle), take(1), subscribe(record) });
+    const work = pipe(.{ queue(1), map(MergedWait.waitForIdle), take(1), forEach(record) });
     try program(source, work).run(.{ io, &state, &seen });
     try std.testing.expect(state.stopped);
     try seen.expect(&.{1});
@@ -320,12 +320,12 @@ fn toRight(sink: Right, value: u32) void {
     sink.seen.add(value);
 }
 
-test "branch hands every item to each sub-pipe" {
+test "branch hands every item to tuple and constructed sub-pipes" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{ map(double), subscribe(toLeft) }),
-        pipe(.{ filter(isEven), subscribe(toRight) }),
+        .{ map(double), forEach(toLeft) },
+        pipe(.{ filter(isEven), forEach(toRight) }),
     })});
     try program(range(u32, 0, 5), work).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4, 6, 8 });
@@ -342,8 +342,8 @@ test "a branch stops the source once every sub-pipe is done" {
     var right: Numbers = .{};
     var pulls: Pulls = .{};
     const work = pipe(.{ tap(countPull), branch(.{
-        pipe(.{ take(2), subscribe(toLeft) }),
-        pipe(.{ take(4), subscribe(toRight) }),
+        pipe(.{ take(2), forEach(toLeft) }),
+        pipe(.{ take(4), forEach(toRight) }),
     }) });
     try program(range(u32, 0, 1000), work).run(.{ &pulls, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 1 });
@@ -355,8 +355,8 @@ test "branches finish in order when the stream ends" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{ fold(@as(u32, 0), add), subscribe(toLeft) }),
-        pipe(.{ map(double), fold(@as(u32, 0), add), subscribe(toRight) }),
+        pipe(.{ fold(@as(u32, 0), add), forEach(toLeft) }),
+        pipe(.{ map(double), fold(@as(u32, 0), add), forEach(toRight) }),
     })});
     try program(range(u32, 1, 5), work).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{10});
@@ -367,8 +367,8 @@ test "a branch that starts with a queue runs beside its siblings" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{ queue(4), map(slowly), subscribe(toLeft) }),
-        pipe(.{ queue(4), map(double), subscribe(toRight) }),
+        .{ queue(4), map(slowly), forEach(toLeft) },
+        pipe(.{ queue(4), map(double), forEach(toRight) }),
     })});
     try program(range(u32, 0, 30), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectEqual(@as(usize, 30), left.len);
@@ -381,8 +381,8 @@ test "an error in a queued branch fails the run" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{ queue(2), map(failAtFive), subscribe(toLeft) }),
-        pipe(.{ queue(2), subscribe(toRight) }),
+        pipe(.{ queue(2), map(failAtFive), forEach(toLeft) }),
+        pipe(.{ queue(2), forEach(toRight) }),
     })});
     const result = program(range(u32, 0, 20), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Five, result);
@@ -394,8 +394,8 @@ test "branches nest" {
     var right: Numbers = .{};
     var seen: Numbers = .{};
     const work = pipe(.{branch(.{
-        pipe(.{subscribe(record)}),
-        pipe(.{ map(double), branch(.{ pipe(.{subscribe(toLeft)}), pipe(.{ filter(isEven), take(1), subscribe(toRight) }) }) }),
+        pipe(.{forEach(record)}),
+        pipe(.{ map(double), branch(.{ pipe(.{forEach(toLeft)}), pipe(.{ filter(isEven), take(1), forEach(toRight) }) }) }),
     })});
     try program(range(u32, 1, 4), work).run(.{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try seen.expect(&.{ 1, 2, 3 });
@@ -414,9 +414,9 @@ test "route sends each item to the first case that takes it" {
     var right: Numbers = .{};
     var seen: Numbers = .{};
     const work = pipe(.{route(.{
-        when(isSmall, pipe(.{subscribe(toLeft)})),
-        when(isEven, pipe(.{subscribe(toRight)})),
-        otherwise(pipe(.{subscribe(record)})),
+        when(isSmall, .{forEach(toLeft)}),
+        when(isEven, pipe(.{forEach(toRight)})),
+        otherwise(.{forEach(record)}),
     })});
     try program(range(u32, 0, 8), work).run(.{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 1, 2 });
@@ -426,7 +426,7 @@ test "route sends each item to the first case that takes it" {
 
 test "an item no case takes is dropped" {
     var left: Numbers = .{};
-    const work = pipe(.{route(.{when(isSmall, pipe(.{subscribe(toLeft)}))})});
+    const work = pipe(.{route(.{when(isSmall, pipe(.{forEach(toLeft)}))})});
     try program(range(u32, 0, 8), work).run(.{Left{ .seen = &left }});
     try left.expect(&.{ 0, 1, 2 });
 }
@@ -439,10 +439,10 @@ test "cases that emit the same type rejoin the pipe" {
     var seen: Numbers = .{};
     const work = pipe(.{
         route(.{
-            when(isEven, pipe(.{map(double)})),
-            otherwise(pipe(.{map(plusHundred)})),
+            when(isEven, .{map(double)}),
+            otherwise(.{map(plusHundred)}),
         }),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 5), work).run(.{&seen});
     try seen.expect(&.{ 0, 101, 4, 103, 8 });
@@ -455,7 +455,7 @@ test "a rejoining route stops when the pipe after it is done" {
         tap(countPull),
         route(.{ when(isEven, pipe(.{map(double)})), otherwise(pipe(.{map(plusHundred)})) }),
         take(2),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 1000), work).run(.{ &seen, &pulls });
     try seen.expect(&.{ 0, 101 });
@@ -466,10 +466,10 @@ test "a case keeps its own state and finishes with the stream" {
     var seen: Numbers = .{};
     const work = pipe(.{
         route(.{
-            when(isEven, pipe(.{fold(@as(u32, 0), add)})),
+            when(isEven, .{fold(@as(u32, 0), add)}),
             otherwise(pipe(.{take(1)})),
         }),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 7), work).run(.{&seen});
     try seen.expect(&.{ 1, 12 });
@@ -487,7 +487,7 @@ test "once the pipe after a route is done, no case forwards to it again" {
         }),
         tap(countPull),
         take(1),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 5), work).run(.{ &seen, &tapped });
     try seen.expect(&.{6});
@@ -543,7 +543,7 @@ test "a route that is done asks no predicate" {
             otherwise(pipe(.{map(double)})),
         }),
         take(1),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 0, 5), work).run(.{ &seen, &asked });
     try seen.expect(&.{0});
@@ -559,8 +559,8 @@ test "case predicates use program dependencies" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{route(.{
-        when(above, pipe(.{subscribe(toLeft)})),
-        otherwise(pipe(.{subscribe(toRight)})),
+        when(above, pipe(.{forEach(toLeft)})),
+        otherwise(pipe(.{forEach(toRight)})),
     })});
     try program(range(u32, 0, 8), work).run(.{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 3, 4, 5, 6, 7 });
@@ -571,8 +571,8 @@ test "terminal cases can be queued" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const work = pipe(.{route(.{
-        when(isEven, pipe(.{ queue(2), subscribe(toLeft) })),
-        otherwise(pipe(.{ queue(2), map(double), subscribe(toRight) })),
+        when(isEven, pipe(.{ queue(2), forEach(toLeft) })),
+        otherwise(pipe(.{ queue(2), map(double), forEach(toRight) })),
     })});
     try program(range(u32, 0, 6), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4 });
@@ -673,7 +673,7 @@ test "the end of the stream travels with the data: each segment finishes once" {
         queue(1),
         fold(@as(u32, 0), add),
         mark(2),
-        subscribe(record),
+        forEach(record),
     });
     try program(range(u32, 1, 11), work).run(.{ io, &seen, &ticks, &first, &second, &third });
     try seen.expect(&.{55});
@@ -696,13 +696,13 @@ test "queued sub-pipes of a branch each finish once when the stream ends" {
         queue(2),
         mark(1),
         fold(@as(u32, 0), add),
-        subscribe(toLeft),
+        forEach(toLeft),
     });
     const echo = pipe(.{
         queue(2),
         map(slowly),
         mark(2),
-        subscribe(toRight),
+        forEach(toRight),
     });
     const work = pipe(.{
         mark(0),
@@ -723,14 +723,14 @@ fn failAnyhow(value: u32) anyerror!u32 {
 
 test "a queue works in a pipe whose handlers return anyerror" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAnyhow), subscribe(record) })).run(.{ io, &seen });
+    const result = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAnyhow), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
 test "Io may be provided where the queue needs it" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 5), pipe(.{ queue(2), subscribe(record) })).provide(.{io}).run(.{&seen});
+    try program(range(u32, 0, 5), pipe(.{ queue(2), forEach(record) })).provide(.{io}).run(.{&seen});
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
@@ -753,7 +753,7 @@ test "a failure after a queue ends the run while the source is waiting" {
     var seen: Numbers = .{};
     var stalled: Stalled = .{};
     const source = fromProducer(u32, PushThenStall(5).run);
-    const result = program(source, pipe(.{ queue(2), map(failAtFive), subscribe(record) })).run(.{ io, &seen, &stalled });
+    const result = program(source, pipe(.{ queue(2), map(failAtFive), forEach(record) })).run(.{ io, &seen, &stalled });
     try std.testing.expectError(error.Five, result);
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
 }
@@ -765,15 +765,15 @@ test "a failure behind two queues, or in a queued sub-pipe, ends the run while t
     const source = fromProducer(u32, PushThenStall(5).run);
     const deps = .{ io, &stalled, Left{ .seen = &left }, Right{ .seen = &right } };
 
-    const twice = pipe(.{ queue(2), map(double), queue(2), map(failAtTen), subscribe(toLeft) });
+    const twice = pipe(.{ queue(2), map(double), queue(2), map(failAtTen), forEach(toLeft) });
     try std.testing.expectError(error.Ten, program(source, twice).run(deps));
 
     const failing = pipe(.{
         queue(2),
         map(failAtFive),
-        subscribe(toLeft),
+        forEach(toLeft),
     });
-    const split = pipe(.{branch(.{ failing, pipe(.{subscribe(toRight)}) })});
+    const split = pipe(.{branch(.{ failing, pipe(.{forEach(toRight)}) })});
     try std.testing.expectError(error.Five, program(source, split).run(deps));
 
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
@@ -832,7 +832,7 @@ test "nothing is released while a handler behind a queue is still using it" {
     var hold: Hold = .{};
     const work = pipe(.{
         queue(2),
-        subscribe(holdBoth),
+        forEach(holdBoth),
     });
     const result = program(fromProducer(u32, pushThenFail), work).provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) }).run(.{ io, &hold });
     try std.testing.expectError(error.SourceFailed, result);
@@ -908,13 +908,13 @@ test "once a segment has failed, no other segment ends its stream normally" {
         map(carryOnWhenInterrupted),
         fold(@as(u32, 0), add),
         mark(1),
-        subscribe(toLeft),
+        forEach(toLeft),
     });
     const failing = pipe(.{
         RaiseAtEnd{},
         queue(8),
         map(failOnceDraining),
-        subscribe(toRight),
+        forEach(toRight),
     });
     const work = pipe(.{
         mark(0),
@@ -947,7 +947,7 @@ test "a source that returns after a failure elsewhere does not end the stream" {
         mark(0),
         queue(2),
         map(failAtFive),
-        subscribe(record),
+        forEach(record),
     });
     const result = program(fromProducer(u32, pushThenEndWhenInterrupted), work).run(.{ io, &seen, &ticks, &before });
     try std.testing.expectError(error.Five, result);
@@ -992,7 +992,7 @@ test "cancelling the caller of a queued program cancels every segment and skips 
         mark(0),
         queue(2),
         mark(1),
-        subscribe(noteHandled),
+        forEach(noteHandled),
     });
     const waiting = program(fromProducer(u32, PushThenStall(1).run), work);
     const Deps = struct { std.Io, *Stalled, *Caught, *Ticks, *Trace(0), *Trace(1) };
@@ -1091,8 +1091,8 @@ fn checkShape(comptime shape: type) !void {
 
 /// Three segments in a row.
 const InARow = struct {
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) })) {
-        return pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) });
     }
     fn ended() usize {
         return item_count;
@@ -1105,11 +1105,11 @@ const InARow = struct {
 /// The ended side is two segments deep; the source also feeds a sub-pipe directly.
 const BesideTheSource = struct {
     fn Deep(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) }));
     }
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(Deep(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
-        const deep: Deep(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
-        return pipe(.{ mark(0), branch(.{ deep, pipe(.{subscribe(toRight)}) }) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(Deep(ending), undefined), pipe(.{forEach(toRight)}) }) })) {
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) });
+        return pipe(.{ mark(0), branch(.{ deep, pipe(.{forEach(toRight)}) }) });
     }
     fn ended() usize {
         return item_count;
@@ -1122,11 +1122,11 @@ const BesideTheSource = struct {
 /// A segment behind a queue feeds the ended side through another queue and a sub-pipe directly.
 const BesideASegment = struct {
     fn Last(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }));
+        return @TypeOf(pipe(.{ queue(1), mark(2), ender(ending), forEach(toLeft) }));
     }
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Last(ending), undefined), pipe(.{subscribe(toRight)}) }) })) {
-        const last: Last(ending) = pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) });
-        return pipe(.{ mark(0), queue(1), mark(1), branch(.{ last, pipe(.{subscribe(toRight)}) }) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Last(ending), undefined), pipe(.{forEach(toRight)}) }) })) {
+        const last: Last(ending) = pipe(.{ queue(1), mark(2), ender(ending), forEach(toLeft) });
+        return pipe(.{ mark(0), queue(1), mark(1), branch(.{ last, pipe(.{forEach(toRight)}) }) });
     }
     fn ended() usize {
         return item_count;
@@ -1139,12 +1139,12 @@ const BesideASegment = struct {
 /// Two queued sub-pipes of one branch: one ends, the other takes everything.
 const TwoQueued = struct {
     fn First(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), ender(ending), subscribe(toLeft) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), ender(ending), forEach(toLeft) }));
     }
-    const Second = @TypeOf(pipe(.{ queue(1), mark(2), subscribe(toRight) }));
+    const Second = @TypeOf(pipe(.{ queue(1), mark(2), forEach(toRight) }));
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(First(ending), undefined), @as(Second, undefined) }) })) {
-        const first: First(ending) = pipe(.{ queue(1), mark(1), ender(ending), subscribe(toLeft) });
-        const second: Second = pipe(.{ queue(1), mark(2), subscribe(toRight) });
+        const first: First(ending) = pipe(.{ queue(1), mark(1), ender(ending), forEach(toLeft) });
+        const second: Second = pipe(.{ queue(1), mark(2), forEach(toRight) });
         return pipe(.{ mark(0), branch(.{ first, second }) });
     }
     fn ended() usize {
@@ -1158,12 +1158,12 @@ const TwoQueued = struct {
 /// Behind a queue, a branch of a sub-pipe two segments deep and a queued one.
 const Nested = struct {
     fn Deep(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(toLeft) }));
+        return @TypeOf(pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), forEach(toLeft) }));
     }
-    const Other = @TypeOf(pipe(.{ queue(1), mark(4), subscribe(toRight) }));
+    const Other = @TypeOf(pipe(.{ queue(1), mark(4), forEach(toRight) }));
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), mark(1), branch(.{ @as(Deep(ending), undefined), @as(Other, undefined) }) })) {
-        const deep: Deep(ending) = pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), subscribe(toLeft) });
-        const other: Other = pipe(.{ queue(1), mark(4), subscribe(toRight) });
+        const deep: Deep(ending) = pipe(.{ queue(1), mark(2), queue(1), mark(3), ender(ending), forEach(toLeft) });
+        const other: Other = pipe(.{ queue(1), mark(4), forEach(toRight) });
         return pipe(.{ mark(0), queue(1), mark(1), branch(.{ deep, other }) });
     }
     fn ended() usize {
@@ -1177,15 +1177,15 @@ const Nested = struct {
 /// A route whose cases are both queued: the even items go to the ended side.
 const Routed = struct {
     fn Even(comptime ending: Way) type {
-        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) }));
+        return @TypeOf(pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) }));
     }
-    const Odd = @TypeOf(pipe(.{ queue(1), mark(3), subscribe(toRight) }));
+    const Odd = @TypeOf(pipe(.{ queue(1), mark(3), forEach(toRight) }));
     fn Cases(comptime ending: Way) type {
         return @TypeOf(route(.{ when(isEven, @as(Even(ending), undefined)), otherwise(@as(Odd, undefined)) }));
     }
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), @as(Cases(ending), undefined) })) {
-        const even: Even(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), subscribe(toLeft) });
-        const odd: Odd = pipe(.{ queue(1), mark(3), subscribe(toRight) });
+        const even: Even(ending) = pipe(.{ queue(1), mark(1), queue(1), mark(2), ender(ending), forEach(toLeft) });
+        const odd: Odd = pipe(.{ queue(1), mark(3), forEach(toRight) });
         return pipe(.{ mark(0), route(.{ when(isEven, even), otherwise(odd) }) });
     }
     fn ended() usize {
@@ -1218,12 +1218,12 @@ test "invariants: queued cases of a route" {
 /// Timed batching between queues, with a direct sibling after it.
 const TimedBatches = struct {
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), zrx.batchWithin(3, .fromSeconds(3600)), zrx.flatten(), mark(1), branch(.{
-        pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }),
-        pipe(.{subscribe(toRight)}),
+        pipe(.{ queue(1), mark(2), ender(ending), forEach(toLeft) }),
+        pipe(.{forEach(toRight)}),
     }) })) {
         return pipe(.{ mark(0), queue(1), zrx.batchWithin(3, .fromSeconds(3600)), zrx.flatten(), mark(1), branch(.{
-            pipe(.{ queue(1), mark(2), ender(ending), subscribe(toLeft) }),
-            pipe(.{subscribe(toRight)}),
+            pipe(.{ queue(1), mark(2), ender(ending), forEach(toLeft) }),
+            pipe(.{forEach(toRight)}),
         }) });
     }
     fn ended() usize {
@@ -1237,12 +1237,12 @@ const TimedBatches = struct {
 /// A debounced branch beside a queued one. Input end releases its last item.
 const Debounced = struct {
     fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{
-        pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), subscribe(toLeft) }),
-        pipe(.{ queue(1), mark(2), subscribe(toRight) }),
+        pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), forEach(toLeft) }),
+        pipe(.{ queue(1), mark(2), forEach(toRight) }),
     }) })) {
         return pipe(.{ mark(0), branch(.{
-            pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), subscribe(toLeft) }),
-            pipe(.{ queue(1), mark(2), subscribe(toRight) }),
+            pipe(.{ mark(1), ender(ending), zrx.debounce(.fromSeconds(3600)), mark(3), forEach(toLeft) }),
+            pipe(.{ queue(1), mark(2), forEach(toRight) }),
         }) });
     }
     fn ended() usize {
@@ -1283,12 +1283,12 @@ test "a segment decides to end its stream after it has retired, not before" {
     const retiring = pipe(.{
         support.handoff(8),
         mark(1),
-        subscribe(toLeft),
+        forEach(toLeft),
     });
     const failing = pipe(.{
         queue(8),
         map(failOnceRetiring),
-        subscribe(toRight),
+        forEach(toRight),
     });
     const work = pipe(.{branch(.{ retiring, failing })});
     const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &beyond, &gate, Left{ .seen = &left }, Right{ .seen = &right } });
@@ -1306,7 +1306,7 @@ test "a cancel request that reaches the caller while the run joins its tasks is 
         mark(0),
         queue(2),
         mark(1),
-        subscribe(record),
+        forEach(record),
     });
     const finite = program(range(u32, 0, 3), work);
     const Deps = struct { std.Io, *Numbers, *Ticks, *Trace(0), *Trace(1) };
@@ -1325,7 +1325,7 @@ test "a cancel request that reaches the caller while the run joins its tasks is 
 
 test "the caller's cancellation also comes before a failure the run already has" {
     var seen: Numbers = .{};
-    const failing = program(range(u32, 5, 8), pipe(.{ queue(2), map(failAtFive), subscribe(record) }));
+    const failing = program(range(u32, 5, 8), pipe(.{ queue(2), map(failAtFive), forEach(record) }));
     const Deps = struct { std.Io, *Numbers };
     called_returned.store(false, .seq_cst);
     const held = support.JoinHeld.over(io);
@@ -1381,7 +1381,7 @@ test "a failure is on record before the queue behind it lets its producer go" {
         ReleaseGateAtEnd{},
         support.handoff(8),
         map(failAlways),
-        subscribe(toRight),
+        forEach(toRight),
     });
     const result = program(fromProducer(u32, pushUntilDone), work).run(.{ io, &ticks, &before, &gate, Right{ .seen = &right } });
     try std.testing.expectError(error.Ended, result);
@@ -1392,9 +1392,9 @@ test "a failure while a segment ends its stream fails the run" {
     var seen: Numbers = .{};
     // Behind a queue, and in the source's own segment: the fold's final value
     // fails in the stage after it.
-    const behind = pipe(.{ queue(2), fold(@as(u32, 0), add), map(failAlways), subscribe(record) });
+    const behind = pipe(.{ queue(2), fold(@as(u32, 0), add), map(failAlways), forEach(record) });
     try std.testing.expectError(error.Ended, program(range(u32, 1, 4), behind).run(.{ io, &seen }));
-    const before = pipe(.{ fold(@as(u32, 0), add), map(failAlways), queue(2), subscribe(record) });
+    const before = pipe(.{ fold(@as(u32, 0), add), map(failAlways), queue(2), forEach(record) });
     try std.testing.expectError(error.Ended, program(range(u32, 1, 4), before).run(.{ io, &seen }));
     try seen.expect(&.{});
 }
@@ -1437,12 +1437,12 @@ test "every task is asked to cancel at once: one that does not notice does not s
     // first, the handler would never be asked.
     const waiting = pipe(.{
         queue(2),
-        subscribe(waitInIo),
+        forEach(waitInIo),
     });
     const failing = pipe(.{
         queue(2),
         map(failOnceWaiting),
-        subscribe(ignore),
+        forEach(ignore),
     });
     const work = pipe(.{branch(.{ waiting, failing })});
     const result = program(fromProducer(u32, pushThenAwaitAck), work).run(.{ io, &acked });
@@ -1463,7 +1463,7 @@ test "the caller is asked to cancel while the run starts its tasks" {
     inline for (.{ 1, 2 }) |nth| {
         var seen: Numbers = .{};
         var stalled: Stalled = .{};
-        const waiting = program(fromProducer(u32, PushThenStall(1).run), pipe(.{ queue(2), subscribe(record) }));
+        const waiting = program(fromProducer(u32, PushThenStall(1).run), pipe(.{ queue(2), forEach(record) }));
         const Deps = struct { std.Io, *Numbers, *Stalled };
         var caller = try plain.concurrent(Called(@TypeOf(waiting), Deps).run, .{ &waiting, Deps{ support.LaunchHeld.over(plain, nth), &seen, &stalled } });
         while (!support.LaunchHeld.launching.load(.seq_cst)) std.Thread.yield() catch {};

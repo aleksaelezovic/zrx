@@ -134,7 +134,7 @@ fn Queue(comptime capacity: usize, comptime Buffer: type) type {
 /// run it concurrently with its siblings.
 pub fn branch(pipes: anytype) Branch(Pipes("branch", @TypeOf(pipes))) {
     var out: Pipes("branch", @TypeOf(pipes)) = undefined;
-    inline for (0..pipes.len) |i| out[i] = pipes[i];
+    inline for (0..pipes.len) |i| out[i] = core.normalizePipe("branch", pipes[i]);
     return .{ .pipes = out };
 }
 
@@ -143,8 +143,9 @@ fn Pipes(comptime who: []const u8, comptime Given: type) type {
     if (!di.isTuple(Given)) @compileError(who ++ ": expected a tuple of pipes `.{ pipe(...), pipe(...) }`, got `" ++ @typeName(Given) ++ "`");
     const list = di.types(Given);
     if (list.len == 0) @compileError(who ++ ": needs at least one sub-pipe");
-    for (list) |P| core.expectPipe(who, P);
-    return @Tuple(list);
+    var normalized: [list.len]type = undefined;
+    for (list, 0..) |P, i| normalized[i] = core.NormalizedPipe(who, P);
+    return @Tuple(&normalized);
 }
 
 fn Branch(comptime Ps: type) type {
@@ -162,7 +163,7 @@ fn Branch(comptime Ps: type) type {
             for (pipes, 0..) |P, i| {
                 const T = P.Out(Env, In);
                 if (T != End) @compileError(std.fmt.comptimePrint(
-                    "branch: sub-pipe {d} still emits `{s}`; every branch must end with a terminal operator such as subscribe(...) or drain()",
+                    "branch: sub-pipe {d} still emits `{s}`; every branch must end with a terminal operator such as forEach(...) or drain()",
                     .{ i, @typeName(T) },
                 ));
             }
@@ -229,17 +230,16 @@ fn Branch(comptime Ps: type) type {
 // ---------------------------------------------------------------------------
 
 /// A `route` case: items for which `predicate(deps..., item)` is true go to `sub`.
-pub fn when(comptime predicate: anytype, sub: anytype) Case("when", predicate, @TypeOf(sub)) {
-    return .{ .pipe = sub };
+pub fn when(comptime predicate: anytype, sub: anytype) Case(predicate, core.NormalizedPipe("when", @TypeOf(sub))) {
+    return .{ .pipe = core.normalizePipe("when", sub) };
 }
 
 /// The final `route` case: items no earlier case took go to `sub`.
-pub fn otherwise(sub: anytype) Case("otherwise", null, @TypeOf(sub)) {
-    return .{ .pipe = sub };
+pub fn otherwise(sub: anytype) Case(null, core.NormalizedPipe("otherwise", @TypeOf(sub))) {
+    return .{ .pipe = core.normalizePipe("otherwise", sub) };
 }
 
-fn Case(comptime who: []const u8, comptime case_predicate: anytype, comptime P: type) type {
-    core.expectPipe(who, P);
+fn Case(comptime case_predicate: anytype, comptime P: type) type {
     return struct {
         pipe: P,
 

@@ -11,7 +11,7 @@ const fromProducer = zrx.fromProducer;
 const map = zrx.map;
 const filter = zrx.filter;
 const resource = zrx.resource;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 const compose = zrx.compose;
 const field = zrx.field;
 const gt = zrx.gt;
@@ -72,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     const monitor = program(fromSlice(&readings), pipe(.{
         filter(isHot),
         map(toAlert),
-        subscribe(post),
+        forEach(post),
     })).provide(.{resource(dial, hangUp)});
     const notifier = program(fromProducer(Alert, receive), pipe(.{
         map(describe),

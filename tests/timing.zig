@@ -166,7 +166,7 @@ const Output = struct {
 fn Run(comptime op: anytype) type {
     return struct {
         fn run(clock: Io, input: *Input, output: *Output) !void {
-            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.subscribe(Output.collect) })).run(.{ clock, input, output });
+            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock, input, output });
         }
     };
 }
@@ -330,7 +330,7 @@ test "timed operators emit nothing for empty input" {
         const clock = Clock.start();
         var output: Output = .{};
         output.init();
-        try zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.subscribe(Output.collect) })).run(.{ clock, &output });
+        try zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock, &output });
         var extra: [1]Result = undefined;
         try std.testing.expectEqual(@as(usize, 0), try output.results.get(io, &extra, 0));
     }
@@ -342,7 +342,7 @@ test "batchWithin preserves every item and a program can run again" {
     const work = zrx.program(zrx.range(u32, 0, 100), zrx.pipe(.{
         zrx.batchWithin(7, .fromSeconds(3600)),
         zrx.flatten(),
-        zrx.subscribe(support.record(u32)),
+        zrx.forEach(support.record(u32)),
     }));
     for (0..2) |_| {
         seen.len = 0;
@@ -359,7 +359,7 @@ fn RejectRun(comptime op: anytype) type {
         }
 
         fn run(clock: Io, input: *Input) !void {
-            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.subscribe(reject) })).run(.{ clock, input });
+            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(reject) })).run(.{ clock, input });
         }
     };
 }
@@ -382,7 +382,7 @@ test "timed operators stop at a done downstream and infer their errors" {
     inline for (.{ zrx.batchWithin(3, .fromSeconds(3600)), zrx.debounce(.fromSeconds(3600)) }) |op| {
         var output: Output = .{};
         output.init();
-        const work = zrx.program(zrx.range(u32, 0, 1000), zrx.pipe(.{ op, zrx.take(1), zrx.subscribe(Output.collect) }));
+        const work = zrx.program(zrx.range(u32, 0, 1000), zrx.pipe(.{ op, zrx.take(1), zrx.forEach(Output.collect) }));
         try work.run(.{ io, &output });
         var extra: [1]Result = undefined;
         try std.testing.expectEqual(@as(usize, 1), try output.results.get(io, &extra, 0));

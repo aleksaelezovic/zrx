@@ -7,15 +7,15 @@ const End = core.End;
 const lift = core.lift;
 
 /// Ends the pipe by running `handler(deps..., item)` for every item.
-pub fn subscribe(comptime handler: anytype) Subscribe(handler) {
+pub fn forEach(comptime handler: anytype) ForEach(handler) {
     return .{};
 }
 
-fn Subscribe(comptime handler: anytype) type {
+fn ForEach(comptime handler: anytype) type {
     return struct {
         const Op = @This();
         pub const zrx_operator = {};
-        pub const name = "subscribe";
+        pub const name = "forEach";
 
         pub fn Out(comptime Env: type, comptime In: type) type {
             transform.expectReturn(name, "handler", di.Bound(name, handler, Env, &.{In}).Return, void);

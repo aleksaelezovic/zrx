@@ -16,7 +16,9 @@ to this file; edit `AGENTS.md`, not copies.
 - One way to write each thing. Before adding an operator, option or accepted
   form, check that it cannot already be written with what exists; if it can,
   do not add a second spelling. Prefer rejecting an ambiguous form with a
-  compile error that says what to write instead.
+  compile error that says what to write instead. Pipe-taking APIs explicitly
+  accept both operator tuples and constructed `pipe(...)` values; normalize
+  tuples to the existing pipe representation at those API boundaries.
 - Build from core principles upward: new behavior is composed from the
   operator, source and handler contracts, not special-cased in the core.
   `src/pipe.zig` (chain), `src/di.zig` (injection) and `src/program.zig` stay
@@ -126,8 +128,10 @@ to this file; edit `AGENTS.md`, not copies.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
-- **Programs must terminate.** `program` takes a source and a `pipe(...)`;
-  `branch`, `when` and `otherwise` take `pipe(...)` too, never a bare operator.
+- **Programs must terminate.** `program` takes a source and a terminated
+  operator tuple or `pipe(...)` value. Each child of `branch`, and the
+  sub-pipes of `when` and `otherwise`, accept those same two forms, never a
+  bare operator. Every branch must terminate; route cases may rejoin.
 
 ## Zero overhead
 

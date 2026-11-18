@@ -4,7 +4,7 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const range = zrx.range;
 const map = zrx.map;
-const subscribe = zrx.subscribe;
+const forEach = zrx.forEach;
 
 fn double(value: u32) u32 {
     return value * 2;
@@ -16,5 +16,5 @@ fn ignore(_: u32) void {}
 
 const Scale = struct { by: u32 };
 test {
-    try program(range(u32, 0, 3), pipe(.{subscribe(ignore)})).run(.{ Scale{ .by = 1 }, Scale{ .by = 2 } });
+    try program(range(u32, 0, 3), pipe(.{forEach(ignore)})).run(.{ Scale{ .by = 1 }, Scale{ .by = 2 } });
 }

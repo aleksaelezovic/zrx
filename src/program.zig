@@ -18,16 +18,15 @@ pub fn isProgram(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "zrx_program");
 }
 
-/// One source feeding one pipe. The pipe must terminate.
+/// One source feeding an operator tuple or a constructed pipe. It must terminate.
 /// Nothing happens until `run`.
-pub fn program(source: anytype, pipeline: anytype) Program(@TypeOf(source), @TypeOf(pipeline), @Tuple(&.{})) {
-    return .{ .source = source, .pipe = pipeline, .bindings = .{} };
+pub fn program(source: anytype, pipeline: anytype) Program(@TypeOf(source), core.NormalizedPipe("program", @TypeOf(pipeline)), @Tuple(&.{})) {
+    return .{ .source = source, .pipe = core.normalizePipe("program", pipeline), .bindings = .{} };
 }
 
 pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type {
     @setEvalBranchQuota(di.quota);
     if (!isSource(S)) @compileError("program: the first argument must be a source such as fromSlice(...), got `" ++ @typeName(S) ++ "`");
-    core.expectPipe("program", P);
     return struct {
         source: S,
         pipe: P,
@@ -59,7 +58,7 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
             const Out = P.Out(Env, S.Item);
             if (Out != End) @compileError(
                 "program: the pipe must terminate, but it still emits `" ++ @typeName(Out) ++
-                    "`; end it with subscribe(...), drain() or another terminal operator",
+                    "`; end it with forEach(...), drain() or another terminal operator",
             );
 
             const wants_stop = comptime completion.sourceWantsStop(S);

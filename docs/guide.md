@@ -65,7 +65,20 @@ const total = pipe(.{
 Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
 `pipe(.{ a, b, c, d })`.
 
-A pipe that ends with a terminal operator (`subscribe`, `drain`, `print`,
+Where a pipe is expected, pass an inline operator tuple or a constructed
+`pipe(...)` value. This applies to `program`, each child of `branch`, and the
+sub-pipes of `when` and `otherwise`. Both forms construct the same pipe;
+`pipe(...)` is useful for named, reusable compositions. Bare operators are
+rejected; wrap even a single operator in `.{ ... }`.
+
+```zig
+const app = program(source, .{
+    parse,
+    forEach(save),
+});
+```
+
+A pipe that ends with a terminal operator (`forEach`, `drain`, `print`,
 `branch`, a `route` whose cases all terminate) is *terminated*; nothing may
 follow it.
 
@@ -80,11 +93,11 @@ try app.run(.{ io, logger });
 and uses the source and dependencies supplied by the caller.
 
 ```zig
-const report = program(source, pipe(.{
+const report = program(source, .{
     queue(32),
     fold(0, add),
     print(Report, "{d}\n"),
-})).provide(.{
+}).provide(.{
     fileWriter(Report, path, 4096, .{ .mode = .create_new }),
 });
 
@@ -165,7 +178,7 @@ Terminal:
 
 | Operator | Effect |
 |---|---|
-| `subscribe(f)` | Runs `f(deps..., item)` for every item. |
+| `forEach(f)` | Runs `f(deps..., item)` for every item. |
 | `drain()` | Discards every item. |
 | `print(Role, "fmt")` | Formats every item to a writer. |
 
@@ -178,9 +191,9 @@ same item type and the pipe continues after the route:
 
 ```zig
 route(.{
-    when(isRefund, pipe(.{map(negated)})),
-    when(isLarge, pipe(.{map(withFee)})),
-    otherwise(pipe(.{map(field(.cents))})),
+    when(isRefund, .{map(negated)}),
+    when(isLarge, .{map(withFee)}),
+    otherwise(.{map(field(.cents))}),
 }),
 fold(0, add),
 ```
@@ -230,7 +243,7 @@ pipe(.{
     recover(reject),
     map(parse),
     map(validate),
-    subscribe(save),
+    forEach(save),
 })
 ```
 
@@ -312,16 +325,16 @@ concurrent by starting with a queue:
 
 ```zig
 branch(.{
-    pipe(.{
+    .{
         queue(64),
         map(slowWrite),
         drain(),
-    }),
-    pipe(.{
+    },
+    .{
         queue(64),
         batch(10),
-        subscribe(report),
-    }),
+        forEach(report),
+    },
 })
 ```
 
@@ -391,12 +404,12 @@ full statement, with what is *not* promised.
 ```zig
 const writes = pipe(.{
     batchWithin(1000, .fromSeconds(60)),
-    subscribe(saveBatch),
+    forEach(saveBatch),
 });
 
 const searches = pipe(.{
     debounce(.fromMilliseconds(250)),
-    subscribe(search),
+    forEach(search),
 });
 ```
 
