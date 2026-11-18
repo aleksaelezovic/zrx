@@ -109,30 +109,19 @@ pub fn build(b: *std.Build) void {
         b.step("example-" ++ entry.name, "Run the " ++ entry.name ++ " example").dependOn(&run.step);
     }
     {
-        // copy_lines takes paths: give it a generated input and check both outputs.
+        // The CLI creates files exclusively. Give each invocation a fresh
+        // destination even if an old output survived in the build cache.
         const exe = exampleExecutable(b, zrx, "copy_lines", target, optimize);
-        const input = b.addWriteFiles().add("input.txt", "alpha\n\nbeta\ngamma\n");
-        const run = b.addRunArtifact(exe);
-        run.addFileArg(input);
-        const output = run.addOutputFileArg("output.txt");
-        run.expectStdOutEqual("copied 3 lines\n");
-        const copied = b.addCheckFile(output, .{ .expected_exact = "alpha\nbeta\ngamma\n" });
-        copied.step.dependOn(&run.step);
+        const options = b.addOptions();
+        options.addOptionPath("executable", exe.getEmittedBin());
+        const fixture = b.addTest(.{ .name = "copy-lines-cli", .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_copy_lines.zig"),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        fixture.root_module.addOptions("options", options);
         const copy_lines = b.step("example-copy_lines", "Run the copy_lines example");
-        copy_lines.dependOn(&copied.step);
-
-        // Use a separate input so this check cannot affect the successful copy.
-        const protected_contents = "keep this input\n";
-        const protected = b.addWriteFiles().add("protected.txt", protected_contents);
-        const same_path = b.addRunArtifact(exe);
-        same_path.addFileArg(protected);
-        same_path.addFileArg(protected);
-        same_path.expectExitCode(1);
-        same_path.expectStdOutEqual("");
-        same_path.expectStdErrMatch("error: PathAlreadyExists");
-        const preserved = b.addCheckFile(protected, .{ .expected_exact = protected_contents });
-        preserved.step.dependOn(&same_path.step);
-        copy_lines.dependOn(&preserved.step);
+        copy_lines.dependOn(&b.addRunArtifact(fixture).step);
         example.dependOn(copy_lines);
         b.step("install-copy-lines", "Install the copy_lines example as zig-out/bin/copy_lines")
             .dependOn(&b.addInstallArtifact(exe, .{}).step);
