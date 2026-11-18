@@ -144,3 +144,14 @@ test "station order uses Java's UTF-16 ordering" {
     try std.testing.expect(stationLess({}, "🌡", "\u{e000}"));
     try std.testing.expect(!stationLess({}, "\u{e000}", "🌡"));
 }
+
+test "a full station table still accepts updates to existing stations" {
+    const allocator = std.testing.allocator;
+    var stations = try Stations.init(allocator);
+    defer stations.deinit(allocator);
+    var line: [64]u8 = undefined;
+    for (0..max_stations) |i| try stations.add(try std.fmt.bufPrint(&line, "station-{d};0.0", .{i}));
+    try stations.add("station-0;1.0");
+    try std.testing.expectEqual(@as(u64, 2), stations.stats.get("station-0").?.count);
+    try std.testing.expectError(error.TooManyStations, stations.add("another;0.0"));
+}
