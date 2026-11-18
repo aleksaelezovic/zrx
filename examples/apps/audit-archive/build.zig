@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
     const check = b.step("check", "Check formatting and run every test");
     check.dependOn(tests);
     check.dependOn(&exe.step);
+    check.dependOn(&benchmark.step);
     check.dependOn(&b.addFmt(.{
         .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src"), b.path("tests") },
         .check = true,
