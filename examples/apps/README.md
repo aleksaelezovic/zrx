@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [Audit archive](audit-archive/README.md) | Ordered redacted archives with preallocated backpressure |
 
 ## Project boundary
 

@@ -1,0 +1,8 @@
+.{
+    .name = .audit_archive,
+    .fingerprint = 0xc4de88ec471e089d,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{ .zrx = .{ .path = "../../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "README.md", "src", "tests" },
+}
