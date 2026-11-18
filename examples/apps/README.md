@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [Multi file log analyzer](multi-file-log-analyzer/README.md) | Finite log merge, queued fan-out and aggregate reporting |
 
 ## Project boundary
 

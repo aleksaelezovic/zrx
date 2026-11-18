@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [record-processor]
+        app: [record-processor, multi-file-log-analyzer]
     defaults:
       run:
         shell: bash
