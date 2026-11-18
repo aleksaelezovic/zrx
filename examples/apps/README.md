@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [Offline telemetry](offline-telemetry/README.md) | Independent streams with routing and timed batching |
 
 ## Project boundary
 
