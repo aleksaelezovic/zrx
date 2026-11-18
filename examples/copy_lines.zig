@@ -1,5 +1,5 @@
-//! File I/O: copy the non-empty lines of one file to another and report how
-//! many were copied. Usage: copy-lines INPUT OUTPUT
+//! File I/O: copy the non-empty lines of one file to a new file and report
+//! how many were copied. Usage: copy-lines INPUT NEW_OUTPUT
 const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
@@ -25,7 +25,7 @@ fn count(lines: usize, _: Line) usize {
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3) {
-        std.debug.print("usage: copy-lines INPUT OUTPUT\n", .{});
+        std.debug.print("usage: copy-lines INPUT NEW_OUTPUT\n", .{});
         std.process.exit(2);
     }
     const input = args[1];
@@ -44,6 +44,6 @@ pub fn main(init: std.process.Init) !void {
             write,
             report,
         }),
-    })).provide(.{ fileWriter(Copy, output, 4096, .{}), stdout(64) });
+    })).provide(.{ fileWriter(Copy, output, 4096, .{ .mode = .create_new }), stdout(64) });
     try copy.run(.{init.io});
 }

@@ -117,8 +117,22 @@ pub fn build(b: *std.Build) void {
         run.expectStdOutEqual("copied 3 lines\n");
         const copied = b.addCheckFile(output, .{ .expected_exact = "alpha\nbeta\ngamma\n" });
         copied.step.dependOn(&run.step);
-        example.dependOn(&copied.step);
-        b.step("example-copy_lines", "Run the copy_lines example").dependOn(&copied.step);
+        const copy_lines = b.step("example-copy_lines", "Run the copy_lines example");
+        copy_lines.dependOn(&copied.step);
+
+        // Use a separate input so this check cannot affect the successful copy.
+        const protected_contents = "keep this input\n";
+        const protected = b.addWriteFiles().add("protected.txt", protected_contents);
+        const same_path = b.addRunArtifact(exe);
+        same_path.addFileArg(protected);
+        same_path.addFileArg(protected);
+        same_path.expectExitCode(1);
+        same_path.expectStdOutEqual("");
+        same_path.expectStdErrMatch("error: PathAlreadyExists");
+        const preserved = b.addCheckFile(protected, .{ .expected_exact = protected_contents });
+        preserved.step.dependOn(&same_path.step);
+        copy_lines.dependOn(&preserved.step);
+        example.dependOn(copy_lines);
         b.step("install-copy-lines", "Install the copy_lines example as zig-out/bin/copy_lines")
             .dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
