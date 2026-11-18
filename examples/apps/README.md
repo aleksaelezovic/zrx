@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [File integrity manifest](file-integrity-manifest/README.md) | Bounded concurrent hashing and per-file errors |
 
 ## Project boundary
 
