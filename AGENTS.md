@@ -143,6 +143,9 @@ to this file; edit `AGENTS.md`, not copies.
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
   cannot, so it happens in the binding after the rest of the run returns.
+  That makes it atomic per file and not per run: say so wherever it is
+  described. The first wording promised that a failed run leaves no file,
+  and a review showed two published files where it did.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.

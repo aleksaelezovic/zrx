@@ -134,9 +134,12 @@ pub const FileMode = enum {
     /// Create the file; `error.PathAlreadyExists` if something is there.
     create_new,
     /// Write to a temporary file in the same directory, and give it its name
-    /// only once the run has succeeded and the writer is flushed. A failed
-    /// run leaves no file. Nothing is replaced: if something is at the path
-    /// by then, the run fails with `error.PathAlreadyExists`.
+    /// once everything this binding wraps has returned without an error and
+    /// the writer is flushed. A failure before publication leaves the
+    /// destination untouched. If the path already exists at publication,
+    /// the run returns `error.PathAlreadyExists`. With several published
+    /// files, the last one bound is named first. Any files already published
+    /// stay in place if a later publication fails.
     publish,
 };
 
@@ -216,7 +219,9 @@ pub fn Line(comptime max_line_bytes: usize) type {
             try writer.writeAll(self.text());
         }
 
-        /// A line is a JSON string to `std.json`.
+        /// `std.json` formats a line like a byte slice. By default, valid
+        /// UTF-8 becomes a JSON string and invalid UTF-8 becomes an array
+        /// of numbers. `emit_strings_as_arrays` uses arrays for both.
         pub fn jsonStringify(self: *const @This(), json: anytype) !void {
             try json.write(self.text());
         }

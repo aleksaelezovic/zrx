@@ -556,9 +556,21 @@ caller must serialize those writes.
 - `.replace` creates the file, or empties it if it exists.
 - `.create_new` fails with `error.PathAlreadyExists` if something is there.
 - `.publish` writes to a temporary file in the same directory and gives it
-  its name once the run has succeeded and the writer is flushed. A failed
-  run leaves no file. Nothing is replaced: the run fails with
-  `error.PathAlreadyExists` if something is at the path by then.
+  its name after the work wrapped by the binding succeeds and the writer is
+  flushed. A failure before publication leaves the destination untouched.
+  If the path already exists at publication, the run returns
+  `error.PathAlreadyExists`.
+
+Each file is published atomically. With several published files, the last
+one bound is named first, following resource release order. If naming one
+fails, `run` returns that error and the files published earlier stay in place.
+
+```zig
+program(source, work).provide(.{
+    fileWriter(Summary, summary_path, 4096, .{ .mode = .publish }), // named second
+    fileWriter(Archive, archive_path, 4096, .{ .mode = .publish }), // named first
+})
+```
 
 To write JSON lines, map each item to `std.json.fmt` and format it with `{f}`:
 
@@ -578,10 +590,13 @@ plus its length. Use `line.text()` to inspect the bytes while the line is
 alive, or `print(Role, "{f}\n")` to write it. `Line(n).from(text)` copies
 text into a line of your own (`error.StreamTooLong` if it does not fit), so
 a record that crosses a `queue` can own a name without a slice into someone
-else's buffer; `std.json` writes a line as a string. For `lines(Role, n)`, use a
-reader buffer of at least `n + 1` bytes to fit the longest line and its
-newline. On `error.StreamTooLong`, the reader stays at the start of the
-rejected line. You can retry with a larger limit if the reader has room.
+else's buffer. A line source accepts arbitrary bytes, and `std.json` formats
+a line like a byte slice. By default, valid UTF-8 becomes a JSON string and
+invalid UTF-8 becomes an array of numbers. `emit_strings_as_arrays` uses
+arrays for both. For `lines(Role, n)`, use a reader buffer of at least
+`n + 1` bytes to fit the longest line and its newline. On
+`error.StreamTooLong`, the reader stays at the start of the rejected line.
+You can retry with a larger limit if the reader has room.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value

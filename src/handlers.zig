@@ -204,17 +204,19 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
 /// `map(reduce(Window{}, Window.add))`. The result is `seed` for an empty
 /// item. Where `fold` reduces a stream, this reduces one item.
 pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
-    if (!di.isHandler(reducer)) @compileError("reduce: expected a reducer `fn (deps..., state, element) state`, got `" ++ @typeName(@TypeOf(reducer)) ++ "`");
+    // Checks the reducer's shape before its state parameter is looked at.
+    _ = di.requires("reduce", reducer, 2);
     // The reducer's declared state parameter, else the seed's type, as for `fold`.
     const State = di.Param(reducer, 2, 0) orelse @TypeOf(seed);
     return struct {
         pub const zrx_handler = {};
 
-        pub fn requires(comptime _: usize) []const type {
+        pub fn requires(comptime arity: usize) []const type {
+            expectOneItem(arity);
             return di.requires("reduce", reducer, 2);
         }
 
-        pub fn call(env: anytype, args: anytype) Reduced(@TypeOf(args[0])) {
+        pub fn call(env: anytype, args: anytype) Reduced(@TypeOf(env), di.types(@TypeOf(args))) {
             const In = @TypeOf(args[0]);
             var state: State = seed;
             for (if (comptime sequence.isBatch(In)) args[0].slice() else args[0]) |element| {
@@ -224,10 +226,19 @@ pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
             return state;
         }
 
-        fn Reduced(comptime In: type) type {
+        fn expectOneItem(comptime arity: usize) void {
+            if (arity != 1) @compileError(std.fmt.comptimePrint(
+                "reduce: folds the elements of one item, but receives {d} values here; use it where a handler takes a single item, as in map(reduce(seed, f))",
+                .{arity},
+            ));
+        }
+
+        fn Reduced(comptime Env: type, comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
-            const Element = sequence.Element(In) orelse
-                @compileError("reduce: items must be arrays, slices, or batches, got `" ++ @typeName(In) ++ "`");
+            expectOneItem(Args.len);
+            const Element = sequence.Element(Args[0]) orelse
+                @compileError("reduce: items must be arrays, slices, or batches, got `" ++ @typeName(Args[0]) ++ "`");
+            di.check("reduce", reducer, Env, &.{ State, Element });
             const R = di.Result("reduce", reducer, &.{ State, Element });
             sequence.expectReturn("reduce", "reducer", R, State);
             return if (Fallible(R)) @typeInfo(R).error_union.error_set!State else State;

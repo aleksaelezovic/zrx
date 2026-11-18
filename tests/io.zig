@@ -256,6 +256,43 @@ test "a line copies bounded text and is a string to std.json" {
     try std.testing.expectError(error.StreamTooLong, Name.from("tiger"));
 }
 
+test "a line that is not UTF-8 is an array of numbers to std.json, like any such bytes" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const bytes = "a\xff";
+    try writer.print("{f} {f}", .{ std.json.fmt(try Name.from(bytes), .{}), std.json.fmt(@as([]const u8, bytes), .{}) });
+    try std.testing.expectEqualStrings("[97,255] [97,255]", writer.buffered());
+}
+
+fn toBoth(report: Report, log: Log, value: u32) !void {
+    try report.writer.print("{d}\n", .{value});
+    try log.writer.print("saw {d}\n", .{value});
+}
+
+test "published files are named one by one, the last bound first, and one failing leaves the others" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var report_bytes: [128]u8 = undefined;
+    var log_bytes: [128]u8 = undefined;
+    const report_path = try std.fmt.bufPrint(&report_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const log_path = try std.fmt.bufPrint(&log_bytes, ".zig-cache/tmp/{s}/log.txt", .{tmp.sub_path});
+    // The first file bound is named last, and its path is taken.
+    try tmp.dir.writeFile(io, .{ .sub_path = "report.txt", .data = "taken\n" });
+
+    const both = program(range(u32, 0, 2), .{zrx.forEach(toBoth)}).provide(.{
+        fileWriter(Report, report_path, 64, .{ .mode = .publish }),
+        fileWriter(Log, log_path, 64, .{ .mode = .publish }),
+    });
+    try std.testing.expectError(error.PathAlreadyExists, both.run(.{io}));
+
+    // The run failed, and the file named before the failure is there, whole.
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try program(fileLines(log_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
+    try program(fileLines(report_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
+    try std.testing.expectEqualStrings("saw 0,saw 1,taken,", writer.buffered());
+}
+
 fn unflushed(report: Report, value: u32) !void {
     try report.writer.print("{d}\n", .{value});
 }
