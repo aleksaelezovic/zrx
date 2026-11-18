@@ -128,3 +128,45 @@ test "invalid input fails without publishing events" {
     try invoke(temp.dir, &.{ "north", "south", "output" }, 2, "", "fatal: InvalidReading\n");
     try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "output", .{}));
 }
+
+test "routine readings are summarized once across consecutive windows" {
+    var north: std.Io.Reader = .fixed("1,1000\n2,2000\n3,3000\n4,4000\n5,5000\n6,6000\n7,7000\n8,8000\n9,0\n");
+    var south: std.Io.Reader = .fixed("");
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try app.process(io, .{ .reader = &north }, .{ .reader = &south }, &writer);
+
+    const Window = struct {
+        kind: []const u8,
+        sensor: app.Sensor,
+        first_ts_ms: usize,
+        last_ts_ms: usize,
+        count: usize,
+        min_mc: i32,
+        max_mc: i32,
+        sum_mc: i32,
+    };
+    const temperatures = [_]i32{ 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 0 };
+    var next: usize = 1;
+    var lines = std.mem.splitScalar(u8, writer.buffered(), '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0 and lines.index == null) break;
+        const parsed = try std.json.parseFromSlice(Window, allocator, line, .{});
+        defer parsed.deinit();
+        const window = parsed.value;
+        try std.testing.expectEqualStrings("window", window.kind);
+        try std.testing.expectEqual(app.Sensor.north, window.sensor);
+        try std.testing.expect(window.count >= 1 and window.count <= app.batch_size);
+        try std.testing.expectEqual(next, window.first_ts_ms);
+        try std.testing.expectEqual(next + window.count - 1, window.last_ts_ms);
+        try std.testing.expect(window.last_ts_ms <= temperatures.len);
+        const values = temperatures[window.first_ts_ms - 1 .. window.last_ts_ms];
+        try std.testing.expectEqual(std.mem.min(i32, values), window.min_mc);
+        try std.testing.expectEqual(std.mem.max(i32, values), window.max_mc);
+        var sum: i32 = 0;
+        for (values) |value| sum += value;
+        try std.testing.expectEqual(sum, window.sum_mc);
+        next = window.last_ts_ms + 1;
+    }
+    try std.testing.expectEqual(temperatures.len + 1, next);
+}
