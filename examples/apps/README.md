@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [One Billion Row Challenge](one-billion-rows/README.md) | Station aggregation with paired Zig and zrx executables |
 
 ## Project boundary
 
