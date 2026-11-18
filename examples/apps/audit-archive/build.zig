@@ -17,16 +17,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "zrx", .module = zrx }},
     });
-    const exe = b.addExecutable(.{
-        .name = "audit-archive",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{.{ .name = "app", .module = app }},
-        }),
+    const plain = b.createModule(.{
+        .root_source_file = b.path("src/plain.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    b.installArtifact(exe);
+    const exe = addCli(b, "audit-archive", app);
+    const plain_exe = addCli(b, "audit-archive-zig", plain);
 
     const benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark.zig"),
@@ -54,19 +51,36 @@ pub fn build(b: *std.Build) void {
     });
     const options = b.addOptions();
     options.addOptionPath("executable", exe.getEmittedBin());
+    options.addOptionPath("plain_executable", plain_exe.getEmittedBin());
     integration_module.addOptions("options", options);
     const integration = b.addTest(.{ .root_module = integration_module });
 
     const tests = b.step("test", "Run unit, composition and executable tests");
     tests.dependOn(&b.addRunArtifact(unit).step);
+    tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = plain })).step);
     tests.dependOn(&b.addRunArtifact(bench_test).step);
     tests.dependOn(&b.addRunArtifact(integration).step);
     const check = b.step("check", "Check formatting and run every test");
     check.dependOn(tests);
     check.dependOn(&exe.step);
+    check.dependOn(&plain_exe.step);
     check.dependOn(&benchmark.step);
     check.dependOn(&b.addFmt(.{
         .paths = &.{ b.path("build.zig"), b.path("build.zig.zon"), b.path("src"), b.path("tests") },
         .check = true,
     }).step);
+}
+
+fn addCli(b: *std.Build, name: []const u8, app: *std.Build.Module) *std.Build.Step.Compile {
+    const exe = b.addExecutable(.{
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = app.resolved_target,
+            .optimize = app.optimize,
+            .imports = &.{.{ .name = "app", .module = app }},
+        }),
+    });
+    b.installArtifact(exe);
+    return exe;
 }

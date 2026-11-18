@@ -1,9 +1,7 @@
 const std = @import("std");
-const zrx = @import("zrx");
 
 pub const max_line = 1024;
 pub const scratch_bytes = 8 * 1024;
-pub const Line = zrx.Line(max_line);
 const Action = enum { read, create, update, delete };
 
 const JsonUnsigned = struct {
@@ -55,10 +53,10 @@ pub const Record = struct {
     }
 };
 
-pub fn redact(line: Line) error{InvalidRecord}!Record {
+pub fn redact(line: []const u8) error{InvalidRecord}!Record {
     var scratch: [scratch_bytes]u8 = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&scratch);
-    const raw = std.json.parseFromSliceLeaky(Input, fixed.allocator(), line.text(), .{}) catch
+    const raw = std.json.parseFromSliceLeaky(Input, fixed.allocator(), line, .{}) catch
         return error.InvalidRecord;
     const resource = raw.resource.bytes;
     const action = std.meta.stringToEnum(Action, raw.action.bytes) orelse return error.InvalidRecord;
@@ -83,10 +81,9 @@ test "redaction copies decoded fields and writes a fixed allowlist" {
     const input =
         \\{"id":1,"ts_ms":2,"action":"read","resource":"port\u002d7","actor":"private","detail":"secret"}
     ;
-    var line: Line = .{ .bytes = undefined, .len = input.len };
-    @memcpy(line.bytes[0..input.len], input);
-    const record = try redact(line);
-    @memset(&line.bytes, 'x');
+    var line = input.*;
+    const record = try redact(&line);
+    @memset(&line, 'x');
     var buffer: [256]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     try record.write(&writer);
@@ -106,8 +103,6 @@ test "unknown, duplicate and unsafe fields fail validation" {
         \\{"id":1,"ts_ms":2,"action":"read","resource":[120],"actor":"a"}
         ,
     }) |input| {
-        var line: Line = .{ .bytes = undefined, .len = input.len };
-        @memcpy(line.bytes[0..input.len], input);
-        try std.testing.expectError(error.InvalidRecord, redact(line));
+        try std.testing.expectError(error.InvalidRecord, redact(input));
     }
 }

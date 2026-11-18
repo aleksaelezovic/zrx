@@ -80,3 +80,28 @@ are outside that counter. Peak RSS includes those process costs.
 The app uses a terminal handler and an explicit flush to keep the archive
 buffered. The queue wait probe lives in the test and benchmark as an injected
 `std.Io` wrapper.
+
+## Standalone Zig comparison
+
+Build both real CLIs and run the optional Python 3.11+ comparison on macOS
+or Linux:
+
+```sh
+zig build -Doptimize=ReleaseFast
+python3 compare.py --records 300000 --runs 5
+```
+
+Both executables take `[--sync] INPUT|- OUTPUT`. The default uses two tasks
+and four slots of 32 owned records. The plain executable uses `std.Io.Queue`
+and `std.Io.Select`. Its parser borrows the reader's line until it has
+produced an owned record. Both executables use the same validator, serializer,
+16 KiB writer buffer, final flush and atomic publication. `--sync` removes
+the queue and batch from either CLI.
+
+The comparison warms the input, runs each complete CLI in mixed order, and
+checks each output checksum after timing. It reports wall time and peak
+process RSS from the operating system. Queue layout and concurrency are
+matched. The plain CLI can borrow input, so the comparison includes the
+cost of the zrx line source's copy as well as pipeline dispatch and task
+supervision. The synthetic slow-sink benchmark above makes backpressure
+observable separately from the file system.

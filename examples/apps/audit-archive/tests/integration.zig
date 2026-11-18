@@ -5,8 +5,8 @@ const options = @import("options");
 const io = std.testing.io;
 const allocator = std.testing.allocator;
 
-fn invoke(dir: std.Io.Dir, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
-    const exe = try std.Io.Dir.cwd().realPathFileAlloc(io, options.executable, allocator);
+fn invoke(exe_path: []const u8, dir: std.Io.Dir, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
+    const exe = try std.Io.Dir.cwd().realPathFileAlloc(io, exe_path, allocator);
     defer allocator.free(exe);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -48,9 +48,9 @@ test "the archive CLI publishes every redacted record including the EOF remainde
     const records = app.batch_size * (app.queue_depth + 1) + 1;
     const input = repeat(line ++ "\n", records);
     try temp.dir.writeFile(io, .{ .sub_path = "input", .data = input[0 .. input.len - 1] });
-    try invoke(temp.dir, &.{ "input", "archive" }, 0, "", "");
+    try invoke(options.executable, temp.dir, &.{ "input", "archive" }, 0, "", "");
     try expectFile(temp.dir, "archive", &repeat(redacted, records));
-    try invoke(temp.dir, &.{ "input", "archive" }, 2, "", "fatal: PathAlreadyExists\n");
+    try invoke(options.executable, temp.dir, &.{ "input", "archive" }, 2, "", "fatal: PathAlreadyExists\n");
     try expectFile(temp.dir, "archive", &repeat(redacted, records));
 }
 
@@ -58,7 +58,7 @@ test "a malformed record after a full batch leaves no archive" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     try temp.dir.writeFile(io, .{ .sub_path = "input", .data = &(repeat(line ++ "\n", app.batch_size) ++ "private payload\n".*) });
-    try invoke(temp.dir, &.{ "input", "archive" }, 2, "", "fatal: InvalidRecord\n");
+    try invoke(options.executable, temp.dir, &.{ "input", "archive" }, 2, "", "fatal: InvalidRecord\n");
     try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "archive", .{}));
 }
 
@@ -118,7 +118,7 @@ const Gate = struct {
             // contend with its queue reads. One batch fits, the next waits.
             if (i == 2) try gate.arrived.wait(io);
             if (i == 5) source_gate = gate;
-            var item: app.records.Line = .{ .bytes = undefined, .len = line.len };
+            var item: app.Line = .{ .bytes = undefined, .len = line.len };
             @memcpy(item.bytes[0..line.len], line);
             item.bytes[6] = '1' + @as(u8, @intCast(i));
             if (try out.push(item) == .done) return;
@@ -127,7 +127,7 @@ const Gate = struct {
 
     fn run(gate: *Gate) !void {
         var slots: [1]zrx.Batch(app.records.Record, 2) = undefined;
-        const program = zrx.program(zrx.fromProducer(app.records.Line, produce), app.archivePipe(2, &slots));
+        const program = zrx.program(zrx.fromProducer(app.Line, produce), app.archivePipe(2, &slots));
         try program.run(.{ gate.observedIo(), gate, app.Archive{ .writer = &gate.writer } });
     }
 };
@@ -172,4 +172,21 @@ test "an error flushing the last buffered bytes fails the archive" {
     } };
     try std.testing.expectError(error.WriteFailed, app.archive(io, &input, &writer));
     try std.testing.expectEqualStrings(redacted, writer.buffered());
+}
+
+test "standalone Zig and zrx CLIs agree in sync and queued modes" {
+    const count = app.batch_size * (app.queue_depth + 1) + 1;
+    const valid = repeat(line ++ "\n", count);
+    for ([_][]const u8{ options.executable, options.plain_executable }) |exe_path| {
+        for ([_]bool{ false, true }) |sync| {
+            var temp = std.testing.tmpDir(.{});
+            defer temp.cleanup();
+            try temp.dir.writeFile(io, .{ .sub_path = "input", .data = valid[0 .. valid.len - 1] });
+            try invoke(exe_path, temp.dir, if (sync) &.{ "--sync", "input", "archive" } else &.{ "input", "archive" }, 0, "", "");
+            try expectFile(temp.dir, "archive", &repeat(redacted, count));
+            try temp.dir.writeFile(io, .{ .sub_path = "invalid", .data = "invalid\n" });
+            try invoke(exe_path, temp.dir, if (sync) &.{ "--sync", "invalid", "missing" } else &.{ "invalid", "missing" }, 2, "", "fatal: InvalidRecord\n");
+            try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "missing", .{}));
+        }
+    }
 }

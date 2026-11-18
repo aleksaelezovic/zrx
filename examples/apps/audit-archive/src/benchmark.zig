@@ -18,7 +18,7 @@ const Config = struct {
     source_us: u32 = 0,
 };
 
-const Raw = struct { line: app.records.Line, start: ?Io.Timestamp };
+const Raw = struct { line: app.Line, start: ?Io.Timestamp };
 const Item = struct { cleaned: app.records.Record, start: ?Io.Timestamp };
 
 const DigestSink = struct {
@@ -125,7 +125,7 @@ const Histogram = struct {
 const Run = struct {
     io: Io,
     config: Config,
-    template: app.records.Line,
+    template: app.Line,
     trace_queue: bool,
     sink: *DigestSink,
     producer_wait: Wait = .{},
@@ -149,7 +149,7 @@ const Run = struct {
     }
 
     fn redact(raw: Raw) !Item {
-        return .{ .cleaned = try app.records.redact(raw.line), .start = raw.start };
+        return .{ .cleaned = try app.redact(raw.line), .start = raw.start };
     }
 
     fn encode(self: *Run, item: Item) !void {
@@ -183,7 +183,7 @@ const Result = struct {
 fn measure(io: Io, mode: Mode, config: Config, comptime width: usize, comptime depth: usize) !Result {
     var output_buffer: [app.output_buffer_bytes]u8 = undefined;
     var buffer: [app.records.max_line]u8 = @splat('x');
-    var input: app.records.Line = .{ .bytes = undefined, .len = 0 };
+    var input: app.Line = .{ .bytes = undefined, .len = 0 };
     input.len = (try std.fmt.bufPrint(
         &input.bytes,
         "{{\"id\":1000000000,\"ts_ms\":1710000000000,\"action\":\"update\",\"resource\":\"warehouse-12\",\"actor\":\"operator\",\"detail\":\"{s}\"}}",
