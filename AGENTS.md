@@ -37,7 +37,7 @@ to this file; edit `AGENTS.md`, not copies.
   (`fold`, `batch`) are still pushed and refused there. Only an operator
   that pushes into several places keeps track of them (`branch` and `route`
   of their sub-pipes, a rejoining `route` of the pipe after it, `merge` of
-  its gate); the chain remembers nothing, and no promise is made that no
+  its gate); the synchronous chain remembers nothing, and no promise is made that no
   handler runs for a value nobody takes. PR 3 tried to make that a guarantee and
   needed machinery in the chain, across tasks, that kept regressing.
 - **Operators are values; state is separate.** An operator declares
@@ -112,12 +112,12 @@ to this file; edit `AGENTS.md`, not copies.
   segment and an operator only say what each step is. A decision that turns
   out to be taken at the wrong moment is moved in that sequence, not patched
   where the symptom showed.
-- **Not in the library: interrupting a part of the pipe because what it
-  feeds is done.** PR 5 had it and took it out; the spec says why ("Taken
-  out"). It needs a task to be cancelled and still end its stream, which
-  put phases, a retired state, cancel protection and a join that cannot be
-  cancelled into the scope, and it drew most of the review findings. It
-  returns only by explicit decision, as a PR of its own.
+- **Successful completion can notify a cooperating producer.** A producer
+  that asks for `zrx.Stop` gets a signal owned by the run. Segment and fan-out
+  demand is wired at setup for that producer. A completed consumer withdraws
+  demand, and a producer that observes the signal returns normally. Selective
+  task cancellation remains out of scope. The spec records the problems in
+  PR 5 with cancelling a task that still had to finish its stream.
 - **Do not add to the stage contract for concurrency.** A boundary stage has
   `zrx_boundary`, `work`, `retire` and `taskIo`; a stage with sub-pipes has
   `has_boundary`, `Tasks` and `tasks`. A review finding against something

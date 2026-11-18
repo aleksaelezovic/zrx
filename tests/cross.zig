@@ -53,3 +53,15 @@ export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     zrx.system(.{ batches, latest }).run(.{io.*}) catch return false;
     return true;
 }
+
+fn stopAware(stop: zrx.Stop, io: std.Io, out: anytype) !void {
+    if (try out.push(1) == .more) try stop.wait(io);
+}
+
+export fn zrx_cross_completion(io: *const std.Io) bool {
+    const left = pipe(.{ zrx.queue(1), zrx.take(1), zrx.drain() });
+    const right = pipe(.{ zrx.take(1), zrx.drain() });
+    const work = program(zrx.fromProducer(u32, stopAware), pipe(.{zrx.branch(.{ left, right })}));
+    work.run(.{io.*}) catch return false;
+    return true;
+}

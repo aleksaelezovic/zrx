@@ -344,9 +344,25 @@ branch(.{
 - A `route` case that rejoins the pipe cannot contain a task boundary (the
   pipe after the route would be pushed to from two tasks). Put the boundary
   after the route.
-- When the stages after a queue are done (`take`), the segment before it
-  finds out at its next push. A source that is waiting for input at that
-  moment keeps waiting until its next item or its end.
+- When the stages after a boundary are done, the segment before it finds out
+  at its next push. A producer that asks for `zrx.Stop` can also observe that
+  its consumers have finished while it waits for input.
+
+### Stopping a producer when its consumers finish
+
+Declare `stop: zrx.Stop` among a `fromProducer` handler's dependencies.
+`run` supplies it to the source. Use `stop.requested()` between reads or
+wait on `stop.wait(io)` alongside the input, for example with `std.Io.Select`.
+Once it signals, return normally so the program can finish. Continue to
+stop when `out.push` answers `.done`, and propagate cancellation and input
+errors. The signal applies to downstream completion across task boundaries.
+In a synchronous pipe the producer learns about completion through `push`.
+
+A custom source can declare `pub const zrx_stop_source = true` and get
+`zrx.Stop` from its source environment. If sources are merged, each source
+that can wait for more input needs to cooperate for the merge to finish
+without further input. Built-in line sources continue to discover completion
+through `push`.
 
 ### What a run guarantees
 
@@ -553,9 +569,7 @@ Two things make it work, and are worth knowing when writing an operator:
 ## Not here yet
 
 Stopping a source from outside, so that a signal or a timeout ends a run
-gracefully, is proposed in [the segments spec](spec-segments.md) and not
-built. Nor is interrupting a source that waits for input once the stages
-behind a queue are done; the spec says why.
+gracefully, is proposed in [the segments spec](spec-segments.md).
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

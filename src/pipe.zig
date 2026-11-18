@@ -64,6 +64,7 @@
 const std = @import("std");
 const Io = std.Io;
 const di = @import("di.zig");
+const completion = @import("completion.zig");
 
 /// What a push tells its caller: keep sending, or stop because nothing
 /// downstream wants more. A stage that returned `.done` may still be pushed
@@ -120,11 +121,19 @@ pub fn TasksOf(comptime Chains: type, comptime Tail: type) type {
 /// The tasks of `chains`, a pointer to a tuple of chains: what a stage with
 /// sub-pipes returns from its `tasks`.
 pub fn tasksOf(chains: anytype, tail: anytype) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
+    return subPipeTasks(chains, tail, null, &.{});
+}
+
+pub fn subPipeTasks(chains: anytype, tail: anytype, collector: ?completion.Collector, demands: []completion.Demand) TasksOf(@typeInfo(@TypeOf(chains)).pointer.child, @TypeOf(tail)) {
     const Chains = @typeInfo(@TypeOf(chains)).pointer.child;
     var out: TasksOf(Chains, @TypeOf(tail)) = undefined;
     comptime var next = 0;
     inline for (0..comptime di.types(Chains).len) |i| {
-        const inner = chains[i].tasks(tail);
+        const inner = if (collector) |collect| child: {
+            const demand = &demands[i];
+            collect.owner.addConsumer(demand);
+            break :child chains[i].collectTasks(tail, .{ .owner = demand, .nodes = collect.nodes });
+        } else chains[i].tasks(tail);
         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
             out[next] = inner[k];
             next += 1;
@@ -257,6 +266,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
         states: @Tuple(&stages),
 
         const Self = @This();
+        const tracks_demand = di.has(Env, completion.Track);
 
         /// A pointer to every stage, in order.
         pub const Refs = @Tuple(&pointers);
@@ -275,6 +285,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return struct {
                 refs: Refs,
                 tail: Tail,
+                collector: if (tracks_demand) ?completion.Collector else void = if (tracks_demand) null else {},
 
                 pub fn push(down: @This(), item: items[i]) !Flow {
                     if (i == n) {
@@ -310,15 +321,36 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             /// One task per boundary in this chain and its sub-pipes, in
             /// order: members of a `Scope`.
             pub fn tasks(refs: Refs, tail: anytype) Tasks(@TypeOf(tail)) {
+                return @This().collectTasks(refs, tail, null);
+            }
+
+            pub fn collectTasks(refs: Refs, tail: anytype, collect: ?completion.Collector) Tasks(@TypeOf(tail)) {
                 var out: Tasks(@TypeOf(tail)) = undefined;
+                var collector = collect;
                 comptime var next = 0;
                 inline for (0..n) |i| {
                     if (comptime @hasDecl(stages[i], "zrx_boundary")) {
-                        out[next] = .{ .refs = refs, .tail = tail };
+                        out[next] = .{
+                            .refs = refs,
+                            .tail = tail,
+                            .demand = if (tracks_demand) if (collector) |*c| c.addSegment() else null else {},
+                        };
                         next += 1;
                     } else if (comptime @hasDecl(stages[i], "Tasks")) {
-                        const down: Down(@TypeOf(tail), i + 1) = .{ .refs = refs, .tail = tail };
+                        const down: Down(@TypeOf(tail), i + 1) = .{
+                            .refs = refs,
+                            .tail = tail,
+                            .collector = if (tracks_demand) collector else {},
+                        };
+                        const before = if (collector) |c| c.owner.consumers.raw else 0;
                         const inner = refs[i].tasks(down);
+                        if (tracks_demand and inner.len != 0) {
+                            // An extension can use Tasks without taking part in
+                            // demand tracking. Its input must still stay live.
+                            if (collector) |c| {
+                                if (c.owner.consumers.raw == before) c.owner.consumers.raw += 1;
+                            }
+                        }
                         inline for (0..comptime di.types(@TypeOf(inner)).len) |k| {
                             out[next] = inner[k];
                             next += 1;
@@ -366,6 +398,7 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             return struct {
                 refs: Refs,
                 tail: Tail,
+                demand: if (tracks_demand) ?*completion.Demand else void,
 
                 pub fn io(segment: @This()) Io {
                     return segment.refs[j].taskIo();
@@ -373,6 +406,14 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
                 pub fn run(segment: @This()) !void {
                     const down: Down(Tail, j + 1) = .{ .refs = segment.refs, .tail = segment.tail };
+                    if (tracks_demand) {
+                        if (segment.demand) |demand| {
+                            var done = false;
+                            try segment.refs[j].work(ObserveDone(@TypeOf(down), items[j + 1]){ .down = down, .done = &done });
+                            if (done) demand.complete();
+                            return;
+                        }
+                    }
                     return segment.refs[j].work(down);
                 }
 
@@ -426,6 +467,25 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
 
         pub fn tasks(self: *Self, tail: anytype) Tasks(@TypeOf(tail)) {
             return at.tasks(self.refsOf(), tail);
+        }
+
+        pub fn collectTasks(self: *Self, tail: anytype, collector: completion.Collector) Tasks(@TypeOf(tail)) {
+            return at.collectTasks(self.refsOf(), tail, collector);
+        }
+    };
+}
+
+fn ObserveDone(comptime Downstream: type, comptime Item: type) type {
+    return struct {
+        down: Downstream,
+        done: *bool,
+
+        pub fn push(self: @This(), item: Item) !Flow {
+            if (try self.down.push(item) == .done) {
+                self.done.* = true;
+                return .done;
+            }
+            return .more;
         }
     };
 }

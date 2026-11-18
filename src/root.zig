@@ -21,6 +21,7 @@ pub const range = sources.range;
 pub const fromIterator = sources.fromIterator;
 pub const fromProducer = sources.fromProducer;
 pub const merge = sources.merge;
+pub const Stop = @import("completion.zig").Stop;
 
 // Per-item operators
 const transform = @import("ops/transform.zig");

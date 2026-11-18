@@ -106,6 +106,209 @@ test "queues compose: two boundaries in one pipe" {
     try seen.expect(&.{2450});
 }
 
+const StoppableSource = struct {
+    waiting: std.Io.Event = .unset,
+    left_finished: std.Io.Event = .unset,
+    stopped: bool = false,
+    wait_for_left: bool = false,
+    finite: bool = false,
+
+    fn produce(stop: zrx.Stop, clock: std.Io, state: *StoppableSource, out: anytype) !void {
+        if (try out.push(1) == .done) return error.UnexpectedDone;
+        if (state.wait_for_left) {
+            try state.left_finished.wait(clock);
+            try std.testing.expect(!stop.requested());
+            if (try out.push(2) == .done) return error.UnexpectedDone;
+            try std.testing.expect(!stop.requested());
+        }
+        if (state.finite) return;
+        state.waiting.set(clock);
+        try stop.wait(clock);
+        state.stopped = true;
+    }
+
+    fn waitForSource(clock: std.Io, state: *StoppableSource, item: u32) !u32 {
+        try state.waiting.wait(clock);
+        return item;
+    }
+
+    fn leftFinished(clock: std.Io, state: *StoppableSource, _: u32) void {
+        state.left_finished.set(clock);
+    }
+
+    fn waitForSecondPush(clock: std.Io, state: *StoppableSource, item: u32) !u32 {
+        if (item == 2) try state.waiting.wait(clock);
+        return item;
+    }
+};
+
+test "a downstream limit wakes a producer without another item and all segments finish" {
+    const source = fromProducer(u32, StoppableSource.produce);
+    const end = pipe(.{ map(StoppableSource.waitForSource), take(1), mark(1), fold(@as(u32, 5), add), subscribe(record) });
+    const shapes = .{
+        pipe(.{ mark(0), queue(1), end }),
+        pipe(.{ mark(0), queue(1), queue(1), end }),
+        pipe(.{ mark(0), queue(1), map(StoppableSource.waitForSource), take(1), queue(1), mark(1), fold(@as(u32, 5), add), subscribe(record) }),
+        pipe(.{ mark(0), zrx.batchWithin(1, .fromSeconds(1)), zrx.flatten(), end }),
+        pipe(.{ mark(0), branch(.{pipe(.{ queue(1), end })}) }),
+        pipe(.{ mark(0), route(.{otherwise(pipe(.{ queue(1), end }))}) }),
+    };
+    inline for (shapes) |shape| {
+        var state: StoppableSource = .{};
+        var seen: Numbers = .{};
+        var ticks: Ticks = .{};
+        var upstream: Trace(0) = .{};
+        var downstream: Trace(1) = .{};
+        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream });
+        try std.testing.expect(state.stopped);
+        try seen.expect(&.{6});
+        try upstream.events.expect("ipf");
+        try downstream.events.expect("ipf");
+    }
+}
+
+test "a shared producer keeps running until both queued consumers are done" {
+    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), subscribe(StoppableSource.leftFinished) });
+    const right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(2), subscribe(record) });
+    const routed_right = pipe(.{ queue(1), map(StoppableSource.waitForSecondPush), take(1), subscribe(record) });
+    const shapes = .{
+        pipe(.{branch(.{ left, right })}),
+        pipe(.{route(.{ when(isEven, routed_right), otherwise(left) })}),
+        pipe(.{branch(.{ pipe(.{branch(.{left})}), right })}),
+    };
+    inline for (shapes, 0..) |shape, i| {
+        var state: StoppableSource = .{ .wait_for_left = true };
+        var seen: Numbers = .{};
+        try program(fromProducer(u32, StoppableSource.produce), shape).run(.{ io, &state, &seen });
+        try std.testing.expect(state.stopped);
+        try seen.expect(if (i == 1) &.{2} else &.{ 1, 2 });
+    }
+}
+
+test "a live direct branch still receives items when a queued branch stops" {
+    var state: StoppableSource = .{ .wait_for_left = true, .finite = true };
+    var seen: Numbers = .{};
+    const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), subscribe(StoppableSource.leftFinished) });
+    const work = pipe(.{branch(.{ left, pipe(.{subscribe(record)}) })});
+    try program(fromProducer(u32, StoppableSource.produce), work).run(.{ io, &state, &seen });
+    try seen.expect(&.{ 1, 2 });
+}
+
+test "a branch that stopped synchronously no longer holds shared upstream open" {
+    var state: StoppableSource = .{};
+    var seen: Numbers = .{};
+    const left = pipe(.{ take(1), queue(1), drain() });
+    const right = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), subscribe(record) });
+    const work = program(fromProducer(u32, StoppableSource.produce), pipe(.{branch(.{ left, right })}));
+    try work.run(.{ io, &state, &seen });
+    try std.testing.expect(state.stopped);
+    try seen.expect(&.{1});
+}
+
+test "a finish error still fails the run after a downstream limit" {
+    var state: StoppableSource = .{};
+    const work = program(fromProducer(u32, StoppableSource.produce), pipe(.{
+        queue(1), map(StoppableSource.waitForSource), take(1), queue(1), fold(@as(u32, 4), add), map(failAtFive), drain(),
+    }));
+    try std.testing.expectError(error.Five, work.run(.{ io, &state }));
+}
+
+const PendingInput = struct {
+    ready: std.Io.Event = .unset,
+    interrupted: bool = false,
+
+    fn read(clock: std.Io, state: *PendingInput, source: *StoppableSource) std.Io.Cancelable!void {
+        source.waiting.set(clock);
+        state.ready.wait(clock) catch |err| {
+            state.interrupted = true;
+            return err;
+        };
+    }
+
+    fn waitForStop(stop: zrx.Stop, clock: std.Io) std.Io.Cancelable!void {
+        return stop.wait(clock);
+    }
+
+    fn produce(stop: zrx.Stop, clock: std.Io, pending: *PendingInput, source: *StoppableSource, out: anytype) !void {
+        if (try out.push(1) == .done) return;
+
+        const Result = union(enum) { input: std.Io.Cancelable!void, stop: std.Io.Cancelable!void };
+        var buffer: [2]Result = undefined;
+        var select = std.Io.Select(Result).init(clock, &buffer);
+        defer select.cancelDiscard();
+        try select.concurrent(.input, read, .{ clock, pending, source });
+        try select.concurrent(.stop, waitForStop, .{ stop, clock });
+        switch (try select.await()) {
+            .input => |result| {
+                try result;
+                return error.UnexpectedInput;
+            },
+            .stop => |result| try result,
+        }
+    }
+};
+
+test "a producer can stop a pending input wait without canceling its segment" {
+    var pending: PendingInput = .{};
+    var source: StoppableSource = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), subscribe(record) });
+    try program(fromProducer(u32, PendingInput.produce), work).run(.{ io, &pending, &source, &seen });
+    try std.testing.expect(pending.interrupted);
+    try seen.expect(&.{1});
+}
+
+const MergedWait = struct {
+    waiting: std.Io.Event = .unset,
+    stopped: bool = false,
+
+    fn idle(stop: zrx.Stop, clock: std.Io, state: *MergedWait, _: anytype) !void {
+        state.waiting.set(clock);
+        try stop.wait(clock);
+        state.stopped = true;
+    }
+
+    fn waitForIdle(clock: std.Io, state: *MergedWait, value: u32) !u32 {
+        try state.waiting.wait(clock);
+        return value;
+    }
+};
+
+test "a queued downstream limit wakes an idle producer inside merge" {
+    var state: MergedWait = .{};
+    var seen: Numbers = .{};
+    const source = zrx.merge(.{ zrx.fromValue(@as(u32, 1)), fromProducer(u32, MergedWait.idle) });
+    const work = pipe(.{ queue(1), map(MergedWait.waitForIdle), take(1), subscribe(record) });
+    try program(source, work).run(.{ io, &state, &seen });
+    try std.testing.expect(state.stopped);
+    try seen.expect(&.{1});
+}
+
+const StoppingInput = struct {
+    stopping: std.Io.Event = .unset,
+
+    fn produce(stop: zrx.Stop, clock: std.Io, state: *StoppingInput, out: anytype) !void {
+        if (try out.push(1) == .done) return;
+        try stop.wait(clock);
+        state.stopping.set(clock);
+        var released: std.Io.Event = .unset;
+        try released.wait(clock);
+    }
+
+    fn run(clock: std.Io, state: *StoppingInput) !void {
+        const work = pipe(.{ queue(1), take(1), drain() });
+        return program(fromProducer(u32, produce), work).run(.{ clock, state });
+    }
+};
+
+test "caller cancellation still interrupts a producer responding to Stop" {
+    var state: StoppingInput = .{};
+    var running = try io.concurrent(StoppingInput.run, .{ io, &state });
+    defer running.cancel(io) catch {};
+    try state.stopping.wait(io);
+    try std.testing.expectError(error.Canceled, running.cancel(io));
+}
+
 // --- branch ---------------------------------------------------------------
 
 const Left = struct { seen: *Numbers };

@@ -5,6 +5,7 @@ const di = @import("di.zig");
 const core = @import("pipe.zig");
 const resources = @import("resources.zig");
 const tasks = @import("tasks.zig");
+const completion = @import("completion.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -61,16 +62,22 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
                     "`; end it with subscribe(...), drain() or another terminal operator",
             );
 
-            const Frame = P.Stage(Env, S.Item);
+            const wants_stop = comptime completion.sourceWantsStop(S);
+            const tracks_demand = comptime wants_stop and P.Stage(Env, S.Item).has_boundary;
+            const StageEnv = if (tracks_demand) di.Extend(Env, completion.Track) else Env;
+            const SourceEnv = if (wants_stop) di.Extend(Env, completion.Stop) else Env;
+            const Frame = P.Stage(StageEnv, S.Item);
             const Body = struct {
                 program: *const Self,
                 env: Env,
 
                 pub fn call(body: @This(), refs: Frame.Refs) !void {
-                    Frame.at.init(refs, &body.program.pipe.ops, body.env);
+                    const stage_env = if (tracks_demand) di.extend(body.env, completion.Track{}) else body.env;
+                    Frame.at.init(refs, &body.program.pipe.ops, stage_env);
                     if (comptime !Frame.has_boundary) {
                         // The whole program is one loop on this task.
-                        try body.program.source.run(body.env, Entry(Frame, S.Item){ .refs = refs });
+                        const source_env = if (wants_stop) di.extend(body.env, completion.Stop{}) else body.env;
+                        try body.program.source.run(source_env, Entry(Frame, S.Item){ .refs = refs });
                         try Frame.at.finish(refs, Closed{});
                     } else {
                         // The pipe crosses a task boundary: the source and
@@ -79,9 +86,17 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
                         // stream for its own stages; all of them have
                         // returned before program resources are released.
                         // The feed runs on the `Io` of the first boundary.
-                        const segments = Frame.at.tasks(refs, Closed{});
+                        var signal: if (tracks_demand) completion.Signal else void = undefined;
+                        var root: if (tracks_demand) completion.Demand else void = if (tracks_demand) .{ .signal = &signal } else {};
+                        var nodes: if (tracks_demand) [di.types(Frame.Tasks(Closed)).len]completion.Demand else void = undefined;
+                        const segments = if (tracks_demand) tracked: {
+                            var slots: []completion.Demand = &nodes;
+                            break :tracked Frame.at.collectTasks(refs, Closed{}, .{ .owner = &root, .nodes = &slots });
+                        } else Frame.at.tasks(refs, Closed{});
                         const io = segments[0].io();
-                        const feed: Feed(S, Env, Frame) = .{ .source = &body.program.source, .env = body.env, .refs = refs, .on = io };
+                        if (tracks_demand) signal = .{ .io = io };
+                        const source_env = if (wants_stop) di.extend(body.env, completion.Stop{ .signal = &signal }) else body.env;
+                        const feed: Feed(S, SourceEnv, Frame) = .{ .source = &body.program.source, .env = source_env, .refs = refs, .on = io };
                         var scope: tasks.Scope = .{};
                         try scope.run(io, .{feed} ++ segments);
                     }
