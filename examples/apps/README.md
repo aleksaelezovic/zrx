@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [HTTP benchmark](http-bench/README.md) | Keep-alive HTTP/1.1 using the same standard library transport |
 
 ## Project boundary
 
