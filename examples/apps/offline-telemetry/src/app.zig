@@ -35,11 +35,11 @@ fn parse(line: Line) error{InvalidReading}!Reading {
     return .{ .ts_ms = ts_ms, .temp_mc = temp_mc };
 }
 
-pub const Output = struct {
+pub const Destination = struct {
     writer: *Io.Writer,
     mutex: Io.Mutex = .init,
 
-    fn emit(self: *Output, io: Io, record: anytype) !void {
+    fn emit(self: *Destination, io: Io, record: anytype) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
         try std.json.Stringify.value(record, .{}, self.writer);
@@ -48,8 +48,11 @@ pub const Output = struct {
     }
 };
 
-fn alert(io: Io, output: *Output, feed: Feed, item: Reading) !void {
-    try output.emit(io, .{
+pub const Alerts = struct { output: *Destination };
+pub const Windows = struct { output: *Destination };
+
+fn alert(io: Io, alerts: Alerts, feed: Feed, item: Reading) !void {
+    try alerts.output.emit(io, .{
         .kind = "alert",
         .sensor = feed.sensor,
         .ts_ms = item.ts_ms,
@@ -57,7 +60,7 @@ fn alert(io: Io, output: *Output, feed: Feed, item: Reading) !void {
     });
 }
 
-fn saveWindow(io: Io, output: *Output, feed: Feed, group: zrx.Batch(Reading, batch_size)) !void {
+fn saveWindow(io: Io, archive: Windows, feed: Feed, group: zrx.Batch(Reading, batch_size)) !void {
     var minimum: i32 = std.math.maxInt(i32);
     var maximum: i32 = std.math.minInt(i32);
     var sum: i32 = 0;
@@ -66,7 +69,7 @@ fn saveWindow(io: Io, output: *Output, feed: Feed, group: zrx.Batch(Reading, bat
         maximum = @max(maximum, item.temp_mc);
         sum += item.temp_mc;
     }
-    try output.emit(io, .{
+    try archive.output.emit(io, .{
         .kind = "window",
         .sensor = feed.sensor,
         .first_ts_ms = group.items[0].ts_ms,
@@ -95,23 +98,31 @@ pub fn feedProgram(source: anytype, sensor: Sensor) @TypeOf(zrx.program(source, 
     return zrx.program(source, pipeline).provide(.{Feed{ .sensor = sensor }});
 }
 
-pub fn process(io: Io, north: North, south: South, writer: *Io.Writer) !void {
-    var output: Output = .{ .writer = writer };
+pub fn process(io: Io, north: North, south: South, archive: *Io.Writer, alerts: *Io.Writer) !void {
+    if (archive == alerts) return error.WritersMustBeDistinct;
+    var alert_destination: Destination = .{ .writer = alerts };
+    var archive_destination: Destination = .{ .writer = archive };
     const feeds = zrx.system(.{
         feedProgram(zrx.lines(North, max_line), .north),
         feedProgram(zrx.lines(South, max_line), .south),
     });
-    try feeds.run(.{ io, north, south, &output });
+    try feeds.run(.{
+        io,
+        north,
+        south,
+        Alerts{ .output = &alert_destination },
+        Windows{ .output = &archive_destination },
+    });
 }
 
 const usage = "usage: offline-telemetry NORTH SOUTH OUTPUT\n";
 
 pub fn execute(io: Io, args: []const []const u8) !u8 {
+    var alerts_buffer: [256]u8 = undefined;
+    var alerts = Io.File.stdout().writerStreaming(io, &alerts_buffer);
     if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) {
-        var buffer: [128]u8 = undefined;
-        var writer = Io.File.stdout().writerStreaming(io, &buffer);
-        try writer.interface.writeAll(usage);
-        try writer.interface.flush();
+        try alerts.interface.writeAll(usage);
+        try alerts.interface.flush();
         return 0;
     }
     if (args.len != 3) return error.InvalidArguments;
@@ -128,7 +139,7 @@ pub fn execute(io: Io, args: []const []const u8) !u8 {
     var north = north_file.readerStreaming(io, &north_buffer);
     var south = south_file.readerStreaming(io, &south_buffer);
     var output = file.file.writerStreaming(io, &output_buffer);
-    try process(io, .{ .reader = &north.interface }, .{ .reader = &south.interface }, &output.interface);
+    try process(io, .{ .reader = &north.interface }, .{ .reader = &south.interface }, &output.interface, &alerts.interface);
     try file.link(io);
     return 0;
 }
