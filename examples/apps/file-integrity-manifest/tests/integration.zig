@@ -26,6 +26,7 @@ fn invoke(dir: std.Io.Dir, args: []const []const u8, expected_exit: u8, stdout: 
 }
 
 const good = "{\"index\":1,\"path\":\"abc\",\"bytes\":3,\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}";
+const duplicate = "{\"index\":4,\"path\":\"abc\",\"bytes\":3,\"sha256\":\"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\"}";
 const missing = "{\"index\":2,\"path\":\"missing\",\"error\":\"FileNotFound\"}";
 const directory = "{\"index\":3,\"path\":\".\",\"error\":\"NotRegularFile\"}";
 
@@ -53,8 +54,8 @@ test "the composition injects its directory and returns per-file errors" {
     try temp.dir.writeFile(io, .{ .sub_path = "abc", .data = "abc" });
     var bytes: [1024]u8 = undefined;
     var output: std.Io.Writer = .fixed(&bytes);
-    try std.testing.expectEqual(@as(usize, 2), try app.generate(io, .{ .dir = temp.dir }, &.{ "abc", "missing", "." }, &output));
-    try expectResults(output.buffered(), &.{ good, missing, directory });
+    try std.testing.expectEqual(@as(usize, 2), try app.generate(io, .{ .dir = temp.dir }, &.{ "abc", "missing", ".", "abc" }, &output));
+    try expectResults(output.buffered(), &.{ good, missing, directory, duplicate });
 }
 
 test "the executable publishes a manifest and returns partial success" {

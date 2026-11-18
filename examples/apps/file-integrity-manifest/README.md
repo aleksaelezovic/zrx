@@ -11,8 +11,8 @@ printf abc > example.txt
 
 Each JSONL row carries the one-based argument index and path. Success rows
 include the byte count and lowercase digest. Error rows include the Zig
-error name. Rows are in completion order. The index distinguishes repeated
-paths and lets consumers reconstruct argument order.
+error name. Concurrent workers can emit rows in any order. The index distinguishes
+repeated paths and lets consumers reconstruct argument order.
 
 ```text
 path arguments → four bounded workers (open, read in chunks, hash)
