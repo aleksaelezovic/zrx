@@ -277,23 +277,7 @@ const Flatten = struct {
     pub const name = "flatten";
 
     pub fn Out(comptime _: type, comptime In: type) type {
-        return switch (@typeInfo(In)) {
-            .array => |array| array.child,
-            .pointer => |pointer| switch (pointer.size) {
-                .slice => pointer.child,
-                .one => switch (@typeInfo(pointer.child)) {
-                    .array => |array| array.child,
-                    else => notASequence(In),
-                },
-                else => notASequence(In),
-            },
-            .@"struct" => if (isBatch(In)) In.Item else notASequence(In),
-            else => notASequence(In),
-        };
-    }
-
-    fn notASequence(comptime In: type) noreturn {
-        @compileError("flatten: items must be arrays, slices, or batches, got `" ++ @typeName(In) ++ "`");
+        return Element(In) orelse @compileError("flatten: items must be arrays, slices, or batches, got `" ++ @typeName(In) ++ "`");
     }
 
     pub fn Stage(comptime _: type, comptime In: type) type {
@@ -323,7 +307,24 @@ pub fn Batch(comptime T: type, comptime capacity: usize) type {
     };
 }
 
-fn isBatch(comptime T: type) bool {
+/// The element type of an array, a slice or a batch; null for anything else.
+pub fn Element(comptime In: type) ?type {
+    return switch (@typeInfo(In)) {
+        .array => |array| array.child,
+        .pointer => |pointer| switch (pointer.size) {
+            .slice => pointer.child,
+            .one => switch (@typeInfo(pointer.child)) {
+                .array => |array| array.child,
+                else => null,
+            },
+            else => null,
+        },
+        .@"struct" => if (isBatch(In)) In.Item else null,
+        else => null,
+    };
+}
+
+pub fn isBatch(comptime T: type) bool {
     return @typeInfo(T) == .@"struct" and @hasDecl(T, "Item") and @hasDecl(T, "Capacity") and
         @TypeOf(T.Item) == type and @TypeOf(T.Capacity) == usize and T == Batch(T.Item, T.Capacity);
 }

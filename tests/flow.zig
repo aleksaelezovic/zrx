@@ -602,6 +602,22 @@ test "a queued downstream limit wakes an idle producer inside merge" {
     try seen.expect(&.{1});
 }
 
+const Watch = enum { value, idle };
+
+fn taggedItem(tagged: zrx.Tagged(Watch, u32)) u32 {
+    return tagged.item;
+}
+
+test "a queued downstream limit wakes an idle producer inside mergeTagged" {
+    var state: MergedWait = .{};
+    var seen: Numbers = .{};
+    const source = zrx.mergeTagged(Watch, .{ .value = zrx.fromValue(@as(u32, 1)), .idle = fromProducer(u32, MergedWait.idle) });
+    const work = pipe(.{ queue(1), map(taggedItem), map(MergedWait.waitForIdle), take(1), forEach(record) });
+    try program(source, work).run(.{ io, &state, &seen });
+    try std.testing.expect(state.stopped);
+    try seen.expect(&.{1});
+}
+
 const StoppingInput = struct {
     stopping: std.Io.Event = .unset,
 

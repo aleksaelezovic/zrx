@@ -230,6 +230,112 @@ fn Merge(comptime Ss: type) type {
     };
 }
 
+/// What `mergeTagged` emits when it is given an enum: an item and the source
+/// it came from.
+pub fn Tagged(comptime Tag: type, comptime T: type) type {
+    return struct { source: Tag, item: T };
+}
+
+/// `merge`, with every item marked by the source it came from. `sources`
+/// names one source for each tag of `T`:
+///
+///     mergeTagged(Side, .{ .left = a, .right = b })
+///
+/// With an enum, every source emits the same item type and the merged source
+/// emits `Tagged(T, Item)`. With a tagged union, each source feeds the
+/// variant of its name, so the sources may emit different types, and the
+/// merged source emits `T`. An item is then as large as the largest variant.
+pub fn mergeTagged(comptime T: type, sources: anytype) Merge(Marked(T, @TypeOf(sources))) {
+    var out: Marked(T, @TypeOf(sources)) = undefined;
+    inline for (comptime tagNames(T), 0..) |tag, i| out[i] = .{ .source = @field(sources, tag) };
+    return .{ .sources = out };
+}
+
+fn tagNames(comptime T: type) []const [:0]const u8 {
+    const names = switch (@typeInfo(T)) {
+        .@"enum" => |info| info.field_names,
+        .@"union" => |info| if (info.tag_type != null) info.field_names else notTags(T),
+        else => notTags(T),
+    };
+    if (names.len == 0) @compileError("mergeTagged: `" ++ @typeName(T) ++ "` has no tags, so there is nothing to merge");
+    return names;
+}
+
+fn notTags(comptime T: type) noreturn {
+    @compileError("mergeTagged: expected an enum or a tagged union to mark the items with, got `" ++ @typeName(T) ++ "`");
+}
+
+/// The sources of a `mergeTagged`, in the order of `T`'s tags, each marking what it emits.
+fn Marked(comptime T: type, comptime Given: type) type {
+    @setEvalBranchQuota(di.quota);
+    const tags = tagNames(T);
+    if (@typeInfo(Given) != .@"struct" or di.isTuple(Given)) @compileError(
+        "mergeTagged: expected one source for each tag, named `.{ ." ++ tags[0] ++ " = source, ... }`, got `" ++ @typeName(Given) ++ "`",
+    );
+    for (@typeInfo(Given).@"struct".field_names) |name| if (!@hasField(T, name)) @compileError(
+        "mergeTagged: `." ++ name ++ "` is not a tag of `" ++ @typeName(T) ++ "`",
+    );
+    var list: [tags.len]type = undefined;
+    for (tags, 0..) |tag, i| {
+        if (!@hasField(Given, tag)) @compileError(
+            "mergeTagged: `" ++ @typeName(T) ++ "." ++ tag ++ "` has no source; add `." ++ tag ++ " = ...`",
+        );
+        const S = @FieldType(Given, tag);
+        if (!program.isSource(S)) @compileError("mergeTagged: `." ++ tag ++ "` is not a source (got `" ++ @typeName(S) ++ "`)");
+        list[i] = Mark(T, tag, S);
+    }
+    const First = @FieldType(Given, tags[0]).Item;
+    switch (@typeInfo(T)) {
+        .@"enum" => for (tags[1..]) |tag| if (@FieldType(Given, tag).Item != First) @compileError(
+            "mergeTagged: with an enum every source must emit the same item type; `." ++ tags[0] ++ "` emits `" ++ @typeName(First) ++
+                "` but `." ++ tag ++ "` emits `" ++ @typeName(@FieldType(Given, tag).Item) ++ "`. Pass a tagged union to merge different types",
+        ),
+        else => {
+            var same = true;
+            for (tags) |tag| {
+                const Emits = @FieldType(Given, tag).Item;
+                if (Emits != @FieldType(T, tag)) @compileError(
+                    "mergeTagged: `." ++ tag ++ "` emits `" ++ @typeName(Emits) ++ "` but `" ++ @typeName(T) ++ "." ++ tag ++
+                        "` holds `" ++ @typeName(@FieldType(T, tag)) ++ "`",
+                );
+                same = same and Emits == First;
+            }
+            if (same) @compileError(
+                "mergeTagged: every variant of `" ++ @typeName(T) ++ "` holds `" ++ @typeName(First) ++
+                    "`; pass an enum instead and receive `Tagged(Enum, " ++ @typeName(First) ++ ")`",
+            );
+        },
+    }
+    return @Tuple(&list);
+}
+
+/// The source `S`, with each of its items marked as coming from `tag` of `T`.
+fn Mark(comptime T: type, comptime tag: [:0]const u8, comptime S: type) type {
+    const by_enum = @typeInfo(T) == .@"enum";
+    const Out = if (by_enum) Tagged(T, S.Item) else T;
+    return struct {
+        source: S,
+
+        pub const zrx_source = {};
+        pub const zrx_stop_source = completion.sourceWantsStop(S);
+        pub const Item = Out;
+
+        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
+            return self.source.run(env, Marking(@TypeOf(down)){ .down = down });
+        }
+
+        fn Marking(comptime Down: type) type {
+            return struct {
+                down: Down,
+
+                pub fn push(marking: @This(), item: S.Item) !Flow {
+                    return marking.down.push(if (by_enum) Out{ .source = @field(T, tag), .item = item } else @unionInit(T, tag, item));
+                }
+            };
+        }
+    };
+}
+
 const Turn = struct {
     mutex: Io.Mutex,
     /// Set once the pipe wants no more or a push failed; every source then stops.

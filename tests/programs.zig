@@ -13,6 +13,7 @@ const range = zrx.range;
 const fromIterator = zrx.fromIterator;
 const fromProducer = zrx.fromProducer;
 const merge = zrx.merge;
+const mergeTagged = zrx.mergeTagged;
 const map = zrx.map;
 const fold = zrx.fold;
 const take = zrx.take;
@@ -148,6 +149,70 @@ test "a failure under merge fails the run" {
     var seen: Numbers = .{};
     const result = program(merge(.{ range(u32, 0, 100), range(u32, 0, 100) }), pipe(.{ map(failAtTwo), forEach(record) })).run(.{ io, &seen });
     try std.testing.expectError(error.Two, result);
+}
+
+// --- mergeTagged ----------------------------------------------------------
+
+const Side = enum { left, right };
+const Sided = zrx.Tagged(Side, u32);
+const SidedLog = support.Recorder(Sided);
+
+test "mergeTagged marks every item with the source it came from" {
+    var seen: SidedLog = .{};
+    const low = [_]u32{ 1, 2, 3, 4 };
+    const high = [_]u32{ 100, 200, 300 };
+    // Named out of order: the tags, not the order they are written in, decide.
+    const sources = mergeTagged(Side, .{ .right = fromSlice(&high), .left = fromSlice(&low) });
+    try program(sources, .{forEach(support.record(Sided))}).run(.{ io, &seen });
+    try std.testing.expectEqual(@as(usize, 7), seen.len);
+    var next: std.EnumArray(Side, usize) = .initFill(0);
+    for (seen.slice()) |entry| {
+        const expected = switch (entry.source) {
+            .left => &low,
+            .right => &high,
+        };
+        try std.testing.expectEqual(expected[next.get(entry.source)], entry.item);
+        next.getPtr(entry.source).* += 1;
+    }
+    try std.testing.expectEqual(low.len, next.get(.left));
+    try std.testing.expectEqual(high.len, next.get(.right));
+}
+
+const Input = union(enum) { count: u32, word: []const u8 };
+const Totals = struct { count: u32 = 0, letters: usize = 0 };
+
+fn tally(totals: Totals, input: Input) Totals {
+    return switch (input) {
+        .count => |count| .{ .count = totals.count + count, .letters = totals.letters },
+        .word => |word| .{ .count = totals.count, .letters = totals.letters + word.len },
+    };
+}
+
+fn keepTotals(out: *Totals, totals: Totals) void {
+    out.* = totals;
+}
+
+test "mergeTagged feeds each variant of a tagged union from a source of its type" {
+    var totals: Totals = .{};
+    const words = [_][]const u8{ "ab", "cde" };
+    const sources = mergeTagged(Input, .{ .count = range(u32, 1, 5), .word = fromSlice(&words) });
+    try program(sources, .{ fold(Totals{}, tally), forEach(keepTotals) }).run(.{ io, &totals });
+    try std.testing.expectEqual(Totals{ .count = 10, .letters = 5 }, totals);
+}
+
+test "mergeTagged stops every source when the pipe is done" {
+    var seen: SidedLog = .{};
+    const endless = range(u32, 0, std.math.maxInt(u32));
+    try program(mergeTagged(Side, .{ .left = endless, .right = endless }), .{ take(5), forEach(support.record(Sided)) }).run(.{ io, &seen });
+    try std.testing.expectEqual(@as(usize, 5), seen.len);
+}
+
+const Only = enum { one };
+
+test "a mergeTagged of one source runs it in place and needs no Io" {
+    var seen: support.Recorder(zrx.Tagged(Only, u32)) = .{};
+    try program(mergeTagged(Only, .{ .one = range(u32, 0, 2) }), .{forEach(support.record(zrx.Tagged(Only, u32)))}).run(.{&seen});
+    try seen.expect(&.{ .{ .source = .one, .item = 0 }, .{ .source = .one, .item = 1 } });
 }
 
 // --- system ---------------------------------------------------------------

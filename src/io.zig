@@ -53,16 +53,23 @@ fn readerOf(role: anytype) *Io.Reader {
 
 /// Ends the pipe by formatting every item to the writer keyed by `Role`:
 /// `print(Stdout, "{d}\n")`. A tuple item supplies several format arguments.
-pub fn print(comptime Role: type, comptime format: []const u8) Print(Role, format) {
+/// Each item is flushed as it is printed; `write` flushes once, at the end.
+pub fn print(comptime Role: type, comptime format: []const u8) Text("print", Role, format, .every_item) {
     return .{};
 }
 
-fn Print(comptime Role: type, comptime format: []const u8) type {
-    expectWriter("print", Role);
+/// `print`, flushed only at the end of the stream: items stay in the
+/// writer's buffer until it fills. For output nobody reads as it is produced.
+pub fn write(comptime Role: type, comptime format: []const u8) Text("write", Role, format, .at_end) {
+    return .{};
+}
+
+fn Text(comptime who: []const u8, comptime Role: type, comptime format: []const u8, comptime flush: enum { every_item, at_end }) type {
+    expectWriter(who, Role);
     return struct {
         const Op = @This();
         pub const zrx_operator = {};
-        pub const name = "print";
+        pub const name = who;
 
         pub fn Out(comptime Env: type, comptime _: type) type {
             expectProvided(name, Env, Role);
@@ -79,7 +86,7 @@ fn Print(comptime Role: type, comptime format: []const u8) type {
 
                 pub fn push(self: *@This(), item: In, _: anytype) !Flow {
                     try self.writer.print(format, if (comptime di.isTuple(In)) item else .{item});
-                    try self.writer.flush();
+                    if (flush == .every_item) try self.writer.flush();
                     return .more;
                 }
                 pub fn finish(self: *@This(), _: anytype) Io.Writer.Error!void {
@@ -121,7 +128,17 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
     };
 }
 
-pub const FileMode = enum { replace, create_new };
+pub const FileMode = enum {
+    /// Create the file, or empty it if it exists.
+    replace,
+    /// Create the file; `error.PathAlreadyExists` if something is there.
+    create_new,
+    /// Write to a temporary file in the same directory, and give it its name
+    /// only once the run has succeeded and the writer is flushed. A failed
+    /// run leaves no file. Nothing is replaced: if something is at the path
+    /// by then, the run fails with `error.PathAlreadyExists`.
+    publish,
+};
 
 pub const FileWriterOptions = struct {
     mode: FileMode = .replace,
@@ -151,12 +168,23 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
         pub fn bind(self: @This(), env: anytype, next: anytype) !void {
             comptime expectProvided("fileWriter", @TypeOf(env), Io);
             const io = di.get(env, Io);
+            var buffer: [buffer_size]u8 = undefined;
+            if (self.options.mode == .publish) {
+                var pending = try Io.Dir.cwd().createFileAtomic(io, self.path, .{});
+                defer pending.deinit(io);
+                var writer = pending.file.writer(io, &buffer);
+                try next.call(di.extend(env, roleOf(&writer.interface)));
+                try writer.interface.flush();
+                return pending.link(io);
+            }
             const file = try Io.Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
             defer file.close(io);
-            var buffer: [buffer_size]u8 = undefined;
             var writer = file.writer(io, &buffer);
-            const role: Role = if (Role == *Io.Writer) &writer.interface else .{ .writer = &writer.interface };
-            return next.call(di.extend(env, role));
+            return next.call(di.extend(env, roleOf(&writer.interface)));
+        }
+
+        fn roleOf(writer: *Io.Writer) Role {
+            return if (Role == *Io.Writer) writer else .{ .writer = writer };
         }
     };
 }
@@ -165,11 +193,20 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
 // Input
 // ---------------------------------------------------------------------------
 
-/// A line with its bytes stored inline, without the newline.
+/// A line with its bytes stored inline, without the newline. Also serves as
+/// owned text of bounded length: `Line(32).from(name)`.
 pub fn Line(comptime max_line_bytes: usize) type {
     return struct {
         bytes: [max_line_bytes]u8,
         len: usize,
+
+        /// A line holding a copy of `bytes`; `error.StreamTooLong` if there are too many.
+        pub fn from(bytes: []const u8) error{StreamTooLong}!@This() {
+            if (bytes.len > max_line_bytes) return error.StreamTooLong;
+            var line: @This() = .{ .bytes = undefined, .len = bytes.len };
+            @memcpy(line.bytes[0..line.len], bytes);
+            return line;
+        }
 
         pub fn text(self: *const @This()) []const u8 {
             return self.bytes[0..self.len];
@@ -177,6 +214,11 @@ pub fn Line(comptime max_line_bytes: usize) type {
 
         pub fn format(self: @This(), writer: *Io.Writer) Io.Writer.Error!void {
             try writer.writeAll(self.text());
+        }
+
+        /// A line is a JSON string to `std.json`.
+        pub fn jsonStringify(self: *const @This(), json: anytype) !void {
+            try json.write(self.text());
         }
     };
 }
@@ -212,9 +254,7 @@ fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) 
             buffered_line[0 .. buffered_line.len - 1]
         else
             buffered_line;
-        if (text.len > max_line_bytes) return error.StreamTooLong;
-        var line: Line(max_line_bytes) = .{ .bytes = undefined, .len = text.len };
-        @memcpy(line.bytes[0..line.len], text);
+        const line: Line(max_line_bytes) = try .from(text);
         reader.toss(buffered_line.len);
         if (try down.push(line) == .done) return;
     }

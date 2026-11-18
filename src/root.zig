@@ -21,6 +21,8 @@ pub const range = sources.range;
 pub const fromIterator = sources.fromIterator;
 pub const fromProducer = sources.fromProducer;
 pub const merge = sources.merge;
+pub const mergeTagged = sources.mergeTagged;
+pub const Tagged = sources.Tagged;
 pub const Stop = @import("completion.zig").Stop;
 
 // Per-item operators
@@ -66,6 +68,7 @@ pub const all = handlers.all;
 pub const any = handlers.any;
 pub const compose = handlers.compose;
 pub const orElse = handlers.orElse;
+pub const reduce = handlers.reduce;
 pub const field = handlers.field;
 pub const constant = handlers.constant;
 pub const eq = handlers.eq;
@@ -85,6 +88,7 @@ pub const fileWriter = io.fileWriter;
 pub const FileMode = io.FileMode;
 pub const FileWriterOptions = io.FileWriterOptions;
 pub const print = io.print;
+pub const write = io.write;
 pub const Line = io.Line;
 pub const lines = io.lines;
 pub const stdinLines = io.stdinLines;

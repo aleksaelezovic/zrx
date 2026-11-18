@@ -132,6 +132,17 @@ to this file; edit `AGENTS.md`, not copies.
   change.
   A boundary can combine its existing hooks with `Tasks` and `tasks` to
   register auxiliary members in that same scope; these share its demand node.
+- **`merge` forgets the source; `mergeTagged` is how it is kept.** An enum
+  for sources of one item type (`Tagged(Enum, Item)`), a tagged union for
+  different types. A union whose variants all hold one type is rejected in
+  favor of the enum, so there is one spelling. It is `merge` over sources
+  wrapped to mark what they push; the scope knows nothing of it. Do not
+  add a way to put operators on a source before a merge: operators live in
+  the program's pipe.
+- **Text sinks differ only in when they flush.** `print` flushes every
+  item, `write` once at the end. `fileWriter`'s `.publish` mode names the
+  file after the run has succeeded; it can fail, which a resource `release`
+  cannot, so it happens in the binding after the rest of the run returns.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
