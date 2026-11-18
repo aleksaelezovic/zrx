@@ -53,6 +53,7 @@ pub const branch = flow.branch;
 pub const route = flow.route;
 pub const when = flow.when;
 pub const otherwise = flow.otherwise;
+pub const concurrent = @import("ops/concurrent.zig").concurrent;
 
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;

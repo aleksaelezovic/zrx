@@ -21,12 +21,14 @@ defects followed (first review of PR 1):
 
 ## Terms
 
-- **Segment.** A task boundary (`queue`, `batchWithin` or `debounce`) splits
-  a pipe into segments. A segment is one task
-  running a synchronous chain: segment 0 is the source and the stages up to the
-  first boundary. Every other segment runs a boundary's worker and the
-  stages up to the next boundary. A boundary inside a sub-pipe of `branch`
-  or a terminal `route` also starts a segment.
+- **Segment.** A task boundary (`queue`, `batchWithin`, `debounce` or
+  `concurrent`) splits a pipe into segments. Segment 0 is the source and
+  the stages up to the first boundary. Each boundary has a task for the
+  segment after it, up to the next boundary. A boundary inside a sub-pipe
+  of `branch` or a terminal `route` also starts a segment. A concurrent
+  boundary also registers worker tasks in the same scope. They take turns
+  pushing into its continuation; its boundary task coordinates their
+  completion and ends that continuation.
 - **Scope.** The one supervisor, in `src/tasks.zig`, used by `program`
   (segments), `merge` (sources) and `system` (programs).
 
@@ -38,7 +40,7 @@ Each is about one program, stated at a point a caller can observe (what
 without a test does not belong in this list. Nothing is promised about a
 moment inside the run.
 
-1. **On success**, every stage with a `finish` hook has finished exactly once.
+1. **On success**, every stage instance with a `finish` hook has finished exactly once.
    *Tests: "the end of the stream travels with the data", "queued sub-pipes of
    a branch each finish once", the six "invariants" (`tests/flow.zig`).*
 2. **On an error**, `run` returns it. A segment may have finished before
@@ -61,7 +63,8 @@ moment inside the run.
 4. **Always**, every task of the program has returned before its resources
    are released. Acquired bindings release in reverse order.
    *Test: "nothing is released while a handler behind a queue is still using
-   it" (`tests/flow.zig`) and "resources are acquired in order, provided
+   it", "resources outlive every concurrent worker on failure"
+   (`tests/flow.zig`) and "resources are acquired in order, provided
    downstream, and released in reverse" (`tests/di.zig`).*
 5. **A failure does not wait.** `run` returns without waiting for a source or
    a handler that is waiting in an `Io` call: it is cancelled there, also
@@ -126,8 +129,24 @@ moment inside the run.
     longer holds shared upstream open", "a producer can stop a pending input
     wait without canceling its segment", "a queued downstream limit wakes
     an idle producer inside merge", and "a finish error still fails the run
-    after a downstream limit", and "caller cancellation still interrupts a
-    producer responding to Stop" (`tests/flow.zig`).*
+    after a downstream limit", "caller cancellation still interrupts a
+    producer responding to Stop", "concurrent worker limits wake the producer
+    before their final emissions", and "a concurrent continuation limit wakes
+    the producer while a worker is still running" (`tests/flow.zig`).*
+13. **Concurrent work sharing.** On success without early completion,
+    `concurrent(n, worker_pipe)` delivers each input to one worker.
+    Each worker has separate operator state. Output pushes into the shared
+    continuation are serialized; input ordering is not preserved. Worker
+    pipes finish before the continuation finishes. Empty input still
+    finishes all `n` worker pipes.
+    *Tests: "concurrent workers overlap and emit without waiting for input
+    order", "concurrent serializes downstream pushes while another worker
+    is ready", "concurrent shares every item once and rejoins a single
+    fold", "concurrent starts the requested number of workers", "each
+    concurrent worker owns its limits and finishes its state once on every
+    run", "empty input still finishes each concurrent worker and downstream
+    once", "one completed concurrent worker leaves input open for the
+    others", and the four concurrent "invariants" (`tests/flow.zig`).*
 
 ## Not promised
 
@@ -137,6 +156,9 @@ A review finding against one of these is answered by pointing here.
   input cooperates by waiting on `Stop` alongside that input. Other sources
   discover completion at a push. A custom operator with sub-pipes may keep
   upstream demand live until a push.
+- Selectively cancelling an already-running concurrent worker because the
+  continuation is done. Its handler returns normally; failures and caller
+  cancellation interrupt the entire group through the scope.
 - That a sub-pipe beside one that fails gets the items meant for it. A
   failure ends the run.
 - That a run fails with `error.ConcurrencyUnavailable` when a member cannot
@@ -249,6 +271,14 @@ lock, right before what it allows and after every step that can take time.
   over and by the supervising task when the run is: more than once, from
   two tasks, and it must not wait.
 - **A stage with sub-pipes** declares `has_boundary`, `Tasks` and `tasks`.
+- **A boundary with auxiliary tasks** also declares `Tasks` and `tasks`.
+  These members use the same scope and boundary demand node. The boundary's
+  `work` coordinates their completion; auxiliary tasks finish their own
+  stages, and the boundary task finishes the continuation. `concurrent`
+  registers one auxiliary member per worker and waits for their successful
+  ends. The continuation returning `.done` or the last worker reaching its
+  own input limit closes input and withdraws demand. Scope retirement closes
+  input and wakes the coordinator's wait.
 - `src/pipe.zig` knows these markers and hooks, not `queue`.
 
 ## Stopping from outside

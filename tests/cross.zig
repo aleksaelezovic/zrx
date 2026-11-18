@@ -54,6 +54,15 @@ export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     return true;
 }
 
+export fn zrx_cross_concurrent(io: *const std.Io, first: u32, end: u32) bool {
+    const app = program(zrx.range(u32, first, end), .{
+        zrx.concurrent(4, .{ zrx.map(double), zrx.fold(@as(u64, 0), add) }),
+        zrx.drain(),
+    });
+    app.run(.{io.*}) catch return false;
+    return true;
+}
+
 fn stopAware(stop: zrx.Stop, io: std.Io, out: anytype) !void {
     if (try out.push(1) == .more) try stop.wait(io);
 }

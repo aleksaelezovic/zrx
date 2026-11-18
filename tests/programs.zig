@@ -227,6 +227,12 @@ test "run has a precise error set" {
     try std.testing.expectEqual(@as(usize, 3), queued_names.len);
     try std.testing.expect(comptime has(queued_names, "Two") and has(queued_names, "Canceled") and has(queued_names, "ConcurrencyUnavailable"));
 
+    const workers = program(range(u32, 0, 2), .{ zrx.concurrent(2, .{map(failAtTwo)}), forEach(toLeft) });
+    const Concurrent = @typeInfo(@TypeOf(workers.run(deps))).error_union.error_set;
+    const concurrent_names = comptime @typeInfo(Concurrent).error_set.error_names.?;
+    try std.testing.expectEqual(@as(usize, 3), concurrent_names.len);
+    try std.testing.expect(comptime has(concurrent_names, "Two") and has(concurrent_names, "Canceled") and has(concurrent_names, "ConcurrencyUnavailable"));
+
     const Plain = @typeInfo(@TypeOf(plain.run(deps))).error_union.error_set;
     try std.testing.expectEqual(@as(usize, 0), comptime @typeInfo(Plain).error_set.error_names.?.len);
 

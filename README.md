@@ -76,8 +76,8 @@ block names are erased); the other three differ only in loop shape and are
 required to be free of calls and extra memory traffic. A separate test runs
 both variants of every fixture and requires equal results.
 
-`queue` is the one operator that costs something by design: it is a real
-bounded buffer between two tasks.
+`queue`, timed operators, and `concurrent` create task boundaries and carry
+real storage and synchronization costs.
 
 ## Use
 

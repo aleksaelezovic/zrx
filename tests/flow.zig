@@ -15,6 +15,7 @@ const tap = zrx.tap;
 const fold = zrx.fold;
 const take = zrx.take;
 const queue = zrx.queue;
+const concurrent = zrx.concurrent;
 const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
@@ -106,6 +107,319 @@ test "queues compose: two boundaries in one pipe" {
     try seen.expect(&.{2450});
 }
 
+// --- concurrent -----------------------------------------------------------
+
+const PoolOrder = struct {
+    release_first: std.Io.Event = .unset,
+
+    fn work(clock: std.Io, state: *PoolOrder, item: u32) !u32 {
+        if (item == 0) try state.release_first.wait(clock);
+        return item * 2;
+    }
+
+    fn collect(clock: std.Io, state: *PoolOrder, seen: *Numbers, item: u32) void {
+        seen.add(item);
+        if (item == 2) state.release_first.set(clock);
+    }
+};
+
+test "concurrent workers overlap and emit without waiting for input order" {
+    var state: PoolOrder = .{};
+    var seen: Numbers = .{};
+    try program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolOrder.work)}), forEach(PoolOrder.collect) }).run(.{ io, &state, &seen });
+    try seen.expect(&.{ 2, 0 });
+}
+
+const PoolSerial = struct {
+    first_entered: std.Io.Event = .unset,
+    release_first: std.Io.Event = .unset,
+    active: std.atomic.Value(bool) = .init(false),
+    overlapped: std.atomic.Value(bool) = .init(false),
+
+    fn work(clock: std.Io, state: *PoolSerial, item: u32) !u32 {
+        if (item == 1) {
+            try state.first_entered.wait(clock);
+            support.GateWait.thread.store(std.Thread.getCurrentId(), .seq_cst);
+        }
+        return item;
+    }
+
+    fn collect(clock: std.Io, state: *PoolSerial, item: u32) !void {
+        if (item == 0) {
+            state.active.store(true, .seq_cst);
+            state.first_entered.set(clock);
+            try state.release_first.wait(clock);
+            state.active.store(false, .seq_cst);
+        } else {
+            state.overlapped.store(state.active.load(.seq_cst), .seq_cst);
+            state.release_first.set(clock);
+        }
+    }
+};
+
+test "concurrent serializes downstream pushes while another worker is ready" {
+    var state: PoolSerial = .{};
+    const clock = support.GateWait.over(io, &state.release_first);
+    try program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolSerial.work)}), forEach(PoolSerial.collect) }).run(.{ clock, &state });
+    try std.testing.expect(support.GateWait.waiting.load(.seq_cst));
+    try std.testing.expect(!state.overlapped.load(.seq_cst));
+}
+
+test "concurrent shares every item once and rejoins a single fold" {
+    var seen: Numbers = .{};
+    const worker = pipe(.{ map(double), filter(isEven) });
+    try program(range(u32, 1, 101), .{ concurrent(4, worker), forEach(record) }).run(.{ io, &seen });
+    try std.testing.expectEqual(@as(usize, 100), seen.len);
+    var received: [100]bool = @splat(false);
+    for (seen.slice()) |item| {
+        try std.testing.expect(item >= 2 and item <= 200 and item % 2 == 0);
+        const index = item / 2 - 1;
+        try std.testing.expect(!received[index]);
+        received[index] = true;
+    }
+    seen.len = 0;
+    try program(range(u32, 1, 101), .{ concurrent(4, worker), fold(@as(u32, 0), add), forEach(record) }).run(.{ io, &seen });
+    try seen.expect(&.{10100});
+}
+
+fn countItem(count: u32, _: u32) u32 {
+    return count + 1;
+}
+
+test "each concurrent worker owns its limits and finishes its state once on every run" {
+    var seen: Numbers = .{};
+    var counted: PoolCount = .{};
+    const app = program(range(u32, 0, std.math.maxInt(u32)), .{
+        concurrent(4, .{ take(2), tap(PoolCount.addOne), fold(@as(u32, 0), countItem) }),
+        fold(@as(u32, 0), add),
+        forEach(record),
+    });
+    try app.run(.{ io, &seen, &counted });
+    try app.run(.{ io, &seen, &counted });
+    try seen.expect(&.{ 8, 8 });
+    try std.testing.expectEqual(@as(usize, 16), counted.count.load(.monotonic));
+}
+
+const PoolHalfway = struct {
+    first_output: std.Io.Event = .unset,
+    stopped: bool = false,
+    handled: std.atomic.Value(usize) = .init(0),
+
+    fn produce(stop: zrx.Stop, clock: std.Io, state: *PoolHalfway, out: anytype) !void {
+        if (try out.push(1) == .done) return error.PrematureStop;
+        try state.first_output.wait(clock);
+        try std.testing.expect(!stop.requested());
+        if (try out.push(2) == .done) return error.PrematureStop;
+        try stop.wait(clock);
+        state.stopped = true;
+    }
+
+    fn collect(clock: std.Io, state: *PoolHalfway, seen: *Numbers, item: u32) void {
+        seen.add(item);
+        state.first_output.set(clock);
+    }
+
+    fn took(state: *PoolHalfway, _: u32) void {
+        _ = state.handled.fetchAdd(1, .monotonic);
+    }
+};
+
+test "one completed concurrent worker leaves input open for the others" {
+    var state: PoolHalfway = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolHalfway.produce), .{
+        concurrent(2, .{ take(1), tap(PoolHalfway.took), fold(@as(u32, 0), countItem) }),
+        forEach(PoolHalfway.collect),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{ 1, 1 });
+    try std.testing.expect(state.stopped);
+    try std.testing.expectEqual(@as(usize, 2), state.handled.load(.monotonic));
+}
+
+const PoolInputEnd = struct {
+    returned: std.Io.Event = .unset,
+
+    fn produce(clock: std.Io, state: *PoolInputEnd, out: anytype) !void {
+        defer state.returned.set(clock);
+        var item: u32 = 0;
+        while (try out.push(item) == .more) : (item += 1) {}
+    }
+
+    fn awaitSource(clock: std.Io, state: *PoolInputEnd, item: u32) !u32 {
+        try state.returned.wait(clock);
+        return item;
+    }
+};
+
+test "the last concurrent input loop retires before its final emission" {
+    var state: PoolInputEnd = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolInputEnd.produce), .{
+        concurrent(1, .{ take(1), fold(@as(u32, 0), countItem), map(PoolInputEnd.awaitSource) }),
+        forEach(record),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{1});
+}
+
+const PoolStop = struct {
+    source_returned: std.Io.Event = .unset,
+    worker_waiting: std.Io.Event = .unset,
+
+    fn produce(stop: zrx.Stop, clock: std.Io, state: *PoolStop, out: anytype) !void {
+        if (try out.push(0) == .done) return error.PrematureStop;
+        if (try out.push(1) == .done) return error.PrematureStop;
+        try stop.wait(clock);
+        state.source_returned.set(clock);
+    }
+
+    fn awaitSource(clock: std.Io, state: *PoolStop, item: u32) !u32 {
+        try state.source_returned.wait(clock);
+        return item;
+    }
+
+    fn work(clock: std.Io, state: *PoolStop, item: u32) !u32 {
+        if (item == 0) {
+            state.worker_waiting.set(clock);
+            return awaitSource(clock, state, item);
+        }
+        try state.worker_waiting.wait(clock);
+        return item;
+    }
+};
+
+test "concurrent worker limits wake the producer before their final emissions" {
+    var state: PoolStop = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolStop.produce), .{
+        concurrent(2, .{ take(1), fold(@as(u32, 0), countItem), map(PoolStop.awaitSource) }),
+        fold(@as(u32, 0), add),
+        forEach(record),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{2});
+}
+
+test "a concurrent continuation limit wakes the producer while a worker is still running" {
+    var state: PoolStop = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolStop.produce), .{
+        concurrent(2, .{map(PoolStop.work)}),
+        take(1),
+        forEach(record),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{1});
+}
+
+test "empty input still finishes each concurrent worker and downstream once" {
+    var seen: Numbers = .{};
+    const clock = support.WorkersAfterWait.over(io);
+    try program(range(u32, 0, 0), .{
+        concurrent(3, .{fold(@as(u32, 7), add)}),
+        fold(@as(u32, 0), add),
+        forEach(record),
+    }).run(.{ clock, &seen });
+    try seen.expect(&.{21});
+}
+
+const PoolCount = struct {
+    count: std.atomic.Value(usize) = .init(0),
+
+    fn addOne(state: *PoolCount, _: u32) void {
+        _ = state.count.fetchAdd(1, .monotonic);
+    }
+};
+
+test "a concurrent worker pipe can terminate" {
+    var state: PoolCount = .{};
+    try program(range(u32, 0, 100), .{concurrent(4, .{forEach(PoolCount.addOne)})}).run(.{ io, &state });
+    try std.testing.expectEqual(@as(usize, 100), state.count.load(.monotonic));
+}
+
+const PoolBarrier = struct {
+    entered: std.atomic.Value(usize) = .init(0),
+    all_entered: std.Io.Event = .unset,
+
+    fn work(clock: std.Io, state: *PoolBarrier, item: u32) !u32 {
+        if (state.entered.fetchAdd(1, .acq_rel) == 3) state.all_entered.set(clock);
+        try state.all_entered.wait(clock);
+        return item;
+    }
+};
+
+test "concurrent starts the requested number of workers" {
+    var state: PoolBarrier = .{};
+    var seen: Numbers = .{};
+    const clock = support.TaskStarts.over(io);
+    try program(range(u32, 0, 100), .{ concurrent(4, .{map(PoolBarrier.work)}), fold(@as(u32, 0), add), forEach(record) }).run(.{ clock, &state, &seen });
+    try seen.expect(&.{4950});
+    try std.testing.expectEqual(@as(usize, 100), state.entered.load(.acquire));
+    // The source, the coordinating boundary, and four workers for the run.
+    try std.testing.expectEqual(@as(usize, 6), support.TaskStarts.count.load(.seq_cst));
+}
+
+const PoolWaiting = struct {
+    entered: std.atomic.Value(usize) = .init(0),
+    exited: std.atomic.Value(usize) = .init(0),
+    woke_by_itself: std.atomic.Value(bool) = .init(false),
+    all_entered: std.Io.Event = .unset,
+
+    fn work(clock: std.Io, state: *PoolWaiting, item: u32) !u32 {
+        defer _ = state.exited.fetchAdd(1, .acq_rel);
+        if (state.entered.fetchAdd(1, .acq_rel) == 3) state.all_entered.set(clock);
+        try clock.sleep(.fromSeconds(3600), .awake);
+        state.woke_by_itself.store(true, .release);
+        return item;
+    }
+
+    fn run(clock: std.Io, state: *PoolWaiting) !void {
+        try program(range(u32, 0, 4), .{ concurrent(4, .{map(work)}), drain() }).run(.{ clock, state });
+    }
+};
+
+test "caller cancellation joins every concurrent worker" {
+    var backend: std.Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer backend.deinit();
+    const clock = backend.io();
+    var state: PoolWaiting = .{};
+    var running = try clock.concurrent(PoolWaiting.run, .{ clock, &state });
+    defer _ = running.cancel(clock) catch {};
+    try state.all_entered.wait(clock);
+    try std.testing.expectError(error.Canceled, running.cancel(clock));
+    try std.testing.expectEqual(@as(usize, 4), state.exited.load(.acquire));
+    try std.testing.expect(!state.woke_by_itself.load(.acquire));
+}
+
+test "concurrent fails when worker tasks cannot be started" {
+    var backend: std.Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .limited(2) });
+    defer backend.deinit();
+    var seen: Numbers = .{};
+    const app = program(range(u32, 0, 10), .{ concurrent(4, .{map(double)}), forEach(record) });
+    try std.testing.expectError(error.ConcurrencyUnavailable, app.run(.{ backend.io(), &seen }));
+    try seen.expect(&.{});
+}
+
+fn ignoreFive(_: error{Five}, _: u32) void {}
+
+test "recover inside a concurrent worker can handle an error from its downstream push" {
+    var seen: Numbers = .{};
+    try program(range(u32, 4, 7), .{
+        concurrent(1, .{ zrx.recover(ignoreFive), map(same) }),
+        map(failAtFive),
+        forEach(record),
+    }).run(.{ io, &seen });
+    try seen.expect(&.{ 4, 6 });
+}
+
+test "a concurrent worker finish error fails the run without finishing downstream" {
+    var seen: Numbers = .{};
+    const result = program(range(u32, 0, 0), .{
+        concurrent(2, .{ fold(@as(u32, 5), add), map(failAtFive) }),
+        fold(@as(u32, 0), add),
+        forEach(record),
+    }).run(.{ io, &seen });
+    try std.testing.expectError(error.Five, result);
+    try seen.expect(&.{});
+}
+
 const StoppableSource = struct {
     waiting: std.Io.Event = .unset,
     left_finished: std.Io.Event = .unset,
@@ -152,6 +466,9 @@ test "a downstream limit wakes a producer without another item and all segments 
         pipe(.{ mark(0), zrx.batchWithin(1, .fromSeconds(1)), zrx.flatten(), end }),
         pipe(.{ mark(0), branch(.{.{ queue(1), end }}) }),
         pipe(.{ mark(0), route(.{otherwise(.{ queue(1), end })}) }),
+        pipe(.{ mark(0), concurrent(2, .{map(same)}), end }),
+        pipe(.{ mark(0), concurrent(2, .{map(same)}), queue(1), end }),
+        pipe(.{ mark(0), concurrent(1, .{end}) }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -175,6 +492,7 @@ test "a shared producer keeps running until both queued consumers are done" {
         pipe(.{branch(.{ left, right })}),
         pipe(.{route(.{ when(isEven, routed_right), otherwise(left) })}),
         pipe(.{branch(.{ pipe(.{branch(.{left})}), right })}),
+        pipe(.{branch(.{ .{concurrent(1, .{ take(1), fold(@as(u32, 0), add), forEach(StoppableSource.leftFinished) })}, right })}),
     };
     inline for (shapes, 0..) |shape, i| {
         var state: StoppableSource = .{ .wait_for_left = true };
@@ -728,6 +1046,11 @@ test "a queue works in a pipe whose handlers return anyerror" {
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
+test "concurrent supports handlers returning anyerror" {
+    const result = program(range(u32, 0, 10), .{ concurrent(3, .{map(failAnyhow)}), drain() }).run(.{io});
+    try std.testing.expectError(error.Five, result);
+}
+
 test "Io may be provided where the queue needs it" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 5), pipe(.{ queue(2), forEach(record) })).provide(.{io}).run(.{&seen});
@@ -756,6 +1079,19 @@ test "a failure after a queue ends the run while the source is waiting" {
     const result = program(source, pipe(.{ queue(2), map(failAtFive), forEach(record) })).run(.{ io, &seen, &stalled });
     try std.testing.expectError(error.Five, result);
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+test "a concurrent worker failure interrupts an idle source" {
+    var stalled: Stalled = .{};
+    var seen: Numbers = .{};
+    const source = fromProducer(u32, PushThenStall(5).run);
+    try std.testing.expectError(error.Five, program(source, .{ concurrent(3, .{map(failAtFive)}), forEach(record) }).run(.{ io, &seen, &stalled }));
+    try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
+}
+
+test "concurrent retirement wakes waits that do not observe cancellation" {
+    const clock = support.UncancelableWaits.over(io);
+    try std.testing.expectError(error.Ended, program(range(u32, 0, 1000), .{ concurrent(2, .{map(failAlways)}), drain() }).run(.{clock}));
 }
 
 test "a failure behind two queues, or in a queued sub-pipe, ends the run while the source is waiting" {
@@ -836,6 +1172,16 @@ test "nothing is released while a handler behind a queue is still using it" {
     });
     const result = program(fromProducer(u32, pushThenFail), work).provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) }).run(.{ io, &hold });
     try std.testing.expectError(error.SourceFailed, result);
+    try std.testing.expect(!hold.woke_by_itself.load(.seq_cst));
+    try std.testing.expect(!hold.released_while_held.load(.seq_cst));
+    try std.testing.expect(hold.outer_released.load(.seq_cst) and hold.inner_released.load(.seq_cst));
+}
+
+test "resources outlive every concurrent worker on failure" {
+    var hold: Hold = .{};
+    const app = program(fromProducer(u32, pushThenFail), .{concurrent(3, .{forEach(holdBoth)})})
+        .provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) });
+    try std.testing.expectError(error.SourceFailed, app.run(.{ io, &hold }));
     try std.testing.expect(!hold.woke_by_itself.load(.seq_cst));
     try std.testing.expect(!hold.released_while_held.load(.seq_cst));
     try std.testing.expect(hold.outer_released.load(.seq_cst) and hold.inner_released.load(.seq_cst));
@@ -1066,7 +1412,8 @@ const Probe = struct {
         } else {
             try result;
             try std.testing.expectEqual(shape.beside(), probe.beside.len);
-            try std.testing.expectEqual(if (ending == .done) 1 else shape.ended(), probe.ended.len);
+            const wanted = if (ending == .done) (if (@hasDecl(shape, "doneCount")) shape.doneCount() else 1) else shape.ended();
+            try std.testing.expectEqual(wanted, probe.ended.len);
         }
         inline for (.{ &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4 }) |trace| {
             if (trace.events.len > 0) {
@@ -1213,6 +1560,78 @@ test "invariants: a branch behind a queue" {
 }
 test "invariants: queued cases of a route" {
     try checkShape(Routed);
+}
+
+const ConcurrentInARow = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), concurrent(3, .{map(same)}), mark(1), concurrent(2, .{map(same)}), mark(2), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), concurrent(3, .{map(same)}), mark(1), concurrent(2, .{map(same)}), mark(2), ender(ending), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+const ConcurrentWorkers = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), concurrent(3, .{ender(ending)}), mark(1), forEach(toLeft) })) {
+        return pipe(.{ mark(0), concurrent(3, .{ender(ending)}), mark(1), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    pub fn doneCount() usize {
+        return 3;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+const ConcurrentBeside = struct {
+    fn First(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ concurrent(3, .{map(same)}), mark(1), ender(ending), forEach(toLeft) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(First(ending), undefined), .{ queue(1), mark(2), forEach(toRight) } }) })) {
+        const first: First(ending) = pipe(.{ concurrent(3, .{map(same)}), mark(1), ender(ending), forEach(toLeft) });
+        return pipe(.{ mark(0), branch(.{ first, .{ queue(1), mark(2), forEach(toRight) } }) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+const ConcurrentRouted = struct {
+    fn Even(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ concurrent(3, .{map(same)}), mark(1), ender(ending), forEach(toLeft) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), route(.{ when(isEven, @as(Even(ending), undefined)), otherwise(.{ queue(1), mark(2), forEach(toRight) }) }) })) {
+        const even: Even(ending) = pipe(.{ concurrent(3, .{map(same)}), mark(1), ender(ending), forEach(toLeft) });
+        return pipe(.{ mark(0), route(.{ when(isEven, even), otherwise(.{ queue(1), mark(2), forEach(toRight) }) }) });
+    }
+    fn ended() usize {
+        return item_count / 2;
+    }
+    fn beside() usize {
+        return item_count / 2;
+    }
+};
+
+test "invariants: consecutive concurrent boundaries" {
+    try checkShape(ConcurrentInARow);
+}
+test "invariants: concurrent worker pipes run out, stop, or fail" {
+    try checkShape(ConcurrentWorkers);
+}
+test "invariants: concurrent workers beside a queued branch" {
+    try checkShape(ConcurrentBeside);
+}
+test "invariants: concurrent workers in a terminal route case" {
+    try checkShape(ConcurrentRouted);
 }
 
 /// Timed batching between queues, with a direct sibling after it.

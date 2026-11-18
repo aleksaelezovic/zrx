@@ -30,7 +30,7 @@
 //! stage's own. Such a stage also declares:
 //!
 //!     pub const zrx_boundary = {};
-//!     pub fn work(self: *Stage, down: anytype) !void  // the task: feeds `down` until its input ends or `down` is done
+//!     pub fn work(self: *Stage, down: anytype) !void  // feeds `down` or coordinates auxiliary tasks until the segment ends
 //!     pub fn retire(self: *Stage) void                // from now on `push` answers `.done` and `work` runs out
 //!     pub fn taskIo(self: *Stage) Io                  // the `Io` its task is started and joined on
 //!
@@ -55,6 +55,10 @@
 //!     pub const has_boundary: bool                     // whether a sub-pipe has a boundary
 //!     pub fn Tasks(comptime Down: type) type           // `TasksOf` its chains
 //!     pub fn tasks(self: *Stage, down: anytype) Tasks(@TypeOf(down))
+//!
+//! A boundary may also declare `Tasks` and `tasks` for auxiliary members of
+//! the same scope. They receive its downstream handle and share its demand
+//! node. Its `work` coordinates their completion before the segment ends.
 //!
 //! Keeping it free: return `down.push(x)` directly, or compare its result and
 //! return a constant (`if (try down.push(x) == .done) return .done;`). Do not
@@ -345,7 +349,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                             .demand = if (tracks_demand) if (collector) |*c| c.addSegment() else null else {},
                         };
                         next += 1;
-                    } else if (comptime @hasDecl(stages[i], "Tasks")) {
+                    }
+                    if (comptime @hasDecl(stages[i], "Tasks")) {
                         const down: Down(@TypeOf(tail), i + 1) = .{
                             .refs = refs,
                             .tail = tail,
@@ -353,9 +358,10 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
                         };
                         const before = if (collector) |c| c.owner.consumers.raw else 0;
                         const inner = refs[i].tasks(down);
-                        if (tracks_demand and inner.len != 0) {
+                        if (tracks_demand and inner.len != 0 and !@hasDecl(stages[i], "zrx_boundary")) {
                             // An extension can use Tasks without taking part in
                             // demand tracking. Its input must still stay live.
+                            // A boundary's auxiliary tasks share its own node.
                             if (collector) |c| {
                                 if (c.owner.consumers.raw == before) c.owner.consumers.raw += 1;
                             }
@@ -392,7 +398,8 @@ fn Chain(comptime Ops: type, comptime Env: type, comptime In: type) type {
             for (stages, 0..) |S, i| {
                 if (@hasDecl(S, "zrx_boundary")) {
                     list = list ++ &[_]type{Segment(Tail, i)};
-                } else if (@hasDecl(S, "Tasks")) {
+                }
+                if (@hasDecl(S, "Tasks")) {
                     list = list ++ di.types(S.Tasks(Down(Tail, i + 1)));
                 }
             }

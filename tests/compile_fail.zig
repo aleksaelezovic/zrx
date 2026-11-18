@@ -2,6 +2,14 @@
 //! what to do instead. Each entry names a file in `compile_fail/` and the
 //! compile error it must produce (the build matches it as the end of a line).
 pub const cases = .{
+    .{ "concurrent_zero", "concurrent: worker count must be positive and fit in usize; pass a positive comptime count such as `concurrent(4, .{ ... })`" },
+    .{ "concurrent_negative", "concurrent: worker count must be positive and fit in usize; pass a positive comptime count such as `concurrent(4, .{ ... })`" },
+    .{ "concurrent_count_type", "concurrent: worker count must be an integer; pass a positive comptime count such as `concurrent(4, .{ ... })`" },
+    .{ "concurrent_not_pipe", "concurrent: expected an operator tuple `.{ ... }` or `pipe(.{ ... })`, got `ops.sink.Drain`" },
+    .{ "concurrent_without_io", "concurrent: needs `std.Io` to run its workers; pass `io` to `run(.{ io, ... })`" },
+    .{ "concurrent_worker_boundary", "concurrent: worker pipe contains a task boundary; keep it synchronous and put task boundaries outside concurrent(...)" },
+    .{ "concurrent_zero_item", "concurrent: items of type `void` carry no data to buffer" },
+    .{ "route_concurrent_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route" },
     .{ "batch_within_size", "batchWithin: size must be at least 1; pass a positive comptime size" },
     .{ "batch_within_duration", "batchWithin: duration must be positive; pass e.g. `.fromSeconds(1)`" },
     .{ "batch_within_negative", "batchWithin: duration must be positive; pass e.g. `.fromSeconds(1)`" },
