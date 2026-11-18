@@ -129,8 +129,10 @@ moment inside the run.
     longer holds shared upstream open", "a producer can stop a pending input
     wait without canceling its segment", "a queued downstream limit wakes
     an idle producer inside merge", and "a finish error still fails the run
-    after a downstream limit", and "caller cancellation still interrupts a
-    producer responding to Stop" (`tests/flow.zig`).*
+    after a downstream limit", "caller cancellation still interrupts a
+    producer responding to Stop", "concurrent worker limits wake the producer
+    before their final emissions", and "a concurrent continuation limit wakes
+    the producer while a worker is still running" (`tests/flow.zig`).*
 13. **Concurrent work sharing.** On success without early completion,
     `concurrent(n, worker_pipe)` delivers each input to one worker.
     Each worker has separate operator state. Output pushes into the shared
@@ -274,7 +276,9 @@ lock, right before what it allows and after every step that can take time.
   `work` coordinates their completion; auxiliary tasks finish their own
   stages, and the boundary task finishes the continuation. `concurrent`
   registers one auxiliary member per worker and waits for their successful
-  ends. Retirement wakes that wait as well as closing input.
+  ends. The continuation returning `.done` or the last worker reaching its
+  own input limit closes input and withdraws demand. Scope retirement closes
+  input and wakes the coordinator's wait.
 - `src/pipe.zig` knows these markers and hooks, not `queue`.
 
 ## Stopping from outside

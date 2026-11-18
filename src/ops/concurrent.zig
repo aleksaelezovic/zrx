@@ -50,8 +50,8 @@ fn Concurrent(comptime count: usize, comptime P: type) type {
                 input: Io.Queue(In),
                 chains: [count]Chain,
                 retired: [count]std.atomic.Value(bool),
-                /// Workers whose input loops have not retired.
-                active: std.atomic.Value(usize),
+                /// Workers that have yet to reach their own input limit.
+                wanting_input: std.atomic.Value(usize),
                 /// Successful worker ends still outstanding.
                 unfinished: std.atomic.Value(usize),
                 stopping: std.atomic.Value(bool),
@@ -66,7 +66,7 @@ fn Concurrent(comptime count: usize, comptime P: type) type {
                 pub fn init(self: *Self, op: *const Op, env: Env) void {
                     self.io = di.get(env, Io);
                     self.input = .init(&self.buffer);
-                    self.active = .init(count);
+                    self.wanting_input = .init(count);
                     self.unfinished = .init(count);
                     self.stopping = .init(false);
                     self.finished = .unset;
@@ -105,24 +105,21 @@ fn Concurrent(comptime count: usize, comptime P: type) type {
                 }
 
                 pub fn work(self: *Self, _: anytype) !void {
-                    // A successful last end or scope retirement releases this
-                    // wait. Only the former withdraws upstream demand here.
+                    // The last worker end or scope retirement releases this wait.
                     try self.finished.wait(self.io);
-                    if (tracks_demand) {
-                        if (self.unfinished.load(.acquire) == 0) {
-                            if (self.demand) |demand| demand.complete();
-                        }
-                    }
                 }
 
                 pub fn retire(self: *Self) void {
-                    self.stopInput();
+                    self.stopping.store(true, .release);
+                    self.input.close(self.io);
                     self.finished.set(self.io);
                 }
 
-                fn stopInput(self: *Self) void {
-                    self.stopping.store(true, .release);
+                fn inputDone(self: *Self) void {
                     self.input.close(self.io);
+                    if (tracks_demand) {
+                        if (self.demand) |demand| demand.complete();
+                    }
                 }
 
                 fn Gate(comptime Down: type) type {
@@ -136,7 +133,8 @@ fn Concurrent(comptime count: usize, comptime P: type) type {
                             defer pool.output_mutex.unlock(pool.io);
                             if (pool.stopping.load(.acquire)) return .done;
                             if (try gate.down.push(item) == .done) {
-                                pool.stopInput();
+                                pool.stopping.store(true, .release);
+                                pool.inputDone();
                                 return .done;
                             }
                             return .more;
@@ -163,14 +161,16 @@ fn Concurrent(comptime count: usize, comptime P: type) type {
                                     error.Canceled => return error.Canceled,
                                 };
                                 if (pool.stopping.load(.acquire) or pool.retired[worker.index].load(.acquire)) return;
-                                if (try pool.chains[worker.index].push(item, gate) == .done) return;
+                                if (try pool.chains[worker.index].push(item, gate) == .done) {
+                                    if (!pool.stopping.load(.acquire) and pool.wanting_input.fetchSub(1, .acq_rel) == 1)
+                                        pool.inputDone();
+                                    return;
+                                }
                             }
                         }
 
                         pub fn retire(worker: @This()) void {
-                            const pool = worker.pool;
-                            if (!pool.retired[worker.index].swap(true, .acq_rel) and pool.active.fetchSub(1, .acq_rel) == 1)
-                                pool.input.close(pool.io);
+                            worker.pool.retired[worker.index].store(true, .release);
                         }
 
                         pub fn end(worker: @This()) !void {

@@ -261,6 +261,54 @@ test "the last concurrent input loop retires before its final emission" {
     try seen.expect(&.{1});
 }
 
+const PoolStop = struct {
+    source_returned: std.Io.Event = .unset,
+    worker_waiting: std.Io.Event = .unset,
+
+    fn produce(stop: zrx.Stop, clock: std.Io, state: *PoolStop, out: anytype) !void {
+        if (try out.push(0) == .done) return error.PrematureStop;
+        if (try out.push(1) == .done) return error.PrematureStop;
+        try stop.wait(clock);
+        state.source_returned.set(clock);
+    }
+
+    fn awaitSource(clock: std.Io, state: *PoolStop, item: u32) !u32 {
+        try state.source_returned.wait(clock);
+        return item;
+    }
+
+    fn work(clock: std.Io, state: *PoolStop, item: u32) !u32 {
+        if (item == 0) {
+            state.worker_waiting.set(clock);
+            return awaitSource(clock, state, item);
+        }
+        try state.worker_waiting.wait(clock);
+        return item;
+    }
+};
+
+test "concurrent worker limits wake the producer before their final emissions" {
+    var state: PoolStop = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolStop.produce), .{
+        concurrent(2, .{ take(1), fold(@as(u32, 0), countItem), map(PoolStop.awaitSource) }),
+        fold(@as(u32, 0), add),
+        forEach(record),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{2});
+}
+
+test "a concurrent continuation limit wakes the producer while a worker is still running" {
+    var state: PoolStop = .{};
+    var seen: Numbers = .{};
+    try program(fromProducer(u32, PoolStop.produce), .{
+        concurrent(2, .{map(PoolStop.work)}),
+        take(1),
+        forEach(record),
+    }).run(.{ io, &state, &seen });
+    try seen.expect(&.{1});
+}
+
 test "empty input still finishes each concurrent worker and downstream once" {
     var seen: Numbers = .{};
     const clock = support.WorkersAfterWait.over(io);
