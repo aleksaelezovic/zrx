@@ -86,6 +86,7 @@ pub const Stderr = io.Stderr;
 pub const stdout = io.stdout;
 pub const stderr = io.stderr;
 pub const fileWriter = io.fileWriter;
+pub const fileReader = io.fileReader;
 pub const FileMode = io.FileMode;
 pub const FileWriterOptions = io.FileWriterOptions;
 pub const print = io.print;

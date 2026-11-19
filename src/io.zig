@@ -198,6 +198,39 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
 // Input
 // ---------------------------------------------------------------------------
 
+/// Opens the file at `path` and binds its reader as `Role` for the duration
+/// of a program, for `lines(Role, n)` to read. With `lines`, `buffer_size`
+/// must be at least the line limit plus one, for the newline.
+///
+/// A program over `lines(Role, n)` is the same value whether its reader is a
+/// file (this binding) or one a test supplies in its place.
+pub fn fileReader(comptime Role: type, path: []const u8, comptime buffer_size: usize) FileReader(Role, buffer_size) {
+    return .{ .path = path };
+}
+
+fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
+    expectReader("fileReader", Role);
+    if (Role != *Io.Reader and @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
+        "fileReader: use `*std.Io.Reader` or a role with a single `reader: *std.Io.Reader` field",
+    );
+    return struct {
+        path: []const u8,
+
+        pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
+
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            const io = di.get(env, Io);
+            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [buffer_size]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
+        }
+    };
+}
+
 /// A line with its bytes stored inline, without the newline. Also serves as
 /// owned text of bounded length: `Line(32).from(name)`.
 pub fn Line(comptime max_line_bytes: usize) type {
