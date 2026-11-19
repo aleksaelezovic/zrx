@@ -188,9 +188,13 @@ to this file; edit `AGENTS.md`, not copies.
   compiles freestanding). `serve` holds a synchronous sub-pipe as
   `concurrent` does and constructs it per connection with that connection's
   `Response` added to the environment; a boundary inside it is a compile
-  error. `serve` owns and closes each `Connection`. Responders write
-  unflushed and `serve` flushes when its read buffer is empty; do not flush
-  per response. Parsing stays `std.http.Server`'s. The first version is one
+  error. The listener owns an accepted `Connection` until a `serve` takes
+  it and closes what nobody took after the run's tasks have returned;
+  `serve` closes what it took. Responders write unflushed and `serve`
+  flushes before a read that may wait for the peer (a head or body that is
+  not whole in the buffer); do not flush per response. A cancellation
+  `std` recorded on the connection comes out of `serve` whatever the
+  conversation returned. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a

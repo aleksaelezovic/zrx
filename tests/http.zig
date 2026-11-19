@@ -199,6 +199,19 @@ test "status answers a code and no body" {
     try expectAnswer(empty("405 Method Not Allowed", .open), "DELETE /json HTTP/1.1\r\n\r\n");
 }
 
+test "a status without a body carries no length, and the connection goes on" {
+    const no_content = "HTTP/1.1 204 No Content\r\n\r\n";
+    const nothing = pipe(.{http.status(.no_content)});
+    var wire: Wire = undefined;
+    // A body nobody read is skipped, as it is before any other answer.
+    try converse(nothing, &.{.{ .buffer = get_sum ++ post_sum ++ get_sum }}, &wire);
+    try std.testing.expectEqualStrings(times(3, no_content), wire.text());
+    try converse(nothing, &.{.{ .buffer = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
+    try std.testing.expectEqualStrings("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n", wire.text());
+    try converse(nothing, &.{.{ .buffer = "HEAD / HTTP/1.1\r\n\r\n" }}, &wire);
+    try std.testing.expectEqualStrings(no_content, wire.text());
+}
+
 test "a handler answers through the Response dependency" {
     try expectAnswer(
         "HTTP/1.1 418 I'm a teapot\r\ncontent-length: 15\r\ncontent-type: text/plain\r\n\r\nshort and stout",
@@ -277,6 +290,24 @@ test "a write covers the requests that had arrived together" {
     try std.testing.expectEqual(2, wire.writes);
 }
 
+test "an answer does not wait for the rest of a request that arrived in part" {
+    const both = ok("text/plain", "55") ++ ok("text/plain", "75");
+    var wire: Wire = undefined;
+    // Part of the next head: the first answer is written before the rest is read.
+    try converse(api, &.{ .{ .buffer = get_sum ++ post_sum[0..20] }, .{ .buffer = post_sum[20..] } }, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(both, wire.text());
+    // The whole next head and part of its body, which the handler reads.
+    try converse(api, &.{ .{ .buffer = get_sum ++ post_sum[0 .. post_sum.len - 1] }, .{ .buffer = post_sum[post_sum.len - 1 ..] } }, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(both, wire.text());
+    // The same, with a body nobody reads: it is skipped before the answer.
+    const unread = "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20";
+    try converse(api, &.{ .{ .buffer = get_sum ++ unread[0 .. unread.len - 1] }, .{ .buffer = unread[unread.len - 1 ..] } }, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open), wire.text());
+}
+
 test "the connection ends when the peer asks to close it" {
     var wire: Wire = undefined;
     try converse(api, &.{.{ .buffer = "GET /sum?a=1 HTTP/1.1\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
@@ -327,8 +358,8 @@ test "the pipe is constructed for each connection and finished when it ends" {
     })});
     try program(fromSlice(&transports), .{http.serve(counted)}).run(.{&seen});
     try std.testing.expectEqual(Seen{ .connections = 2, .requests = 5 }, seen);
-    try std.testing.expectEqualStrings(times(3, empty("204 No Content", .open)), wires[0].text());
-    try std.testing.expectEqualStrings(times(2, empty("204 No Content", .open)), wires[1].text());
+    try std.testing.expectEqualStrings(times(3, "HTTP/1.1 204 No Content\r\n\r\n"), wires[0].text());
+    try std.testing.expectEqualStrings(times(2, "HTTP/1.1 204 No Content\r\n\r\n"), wires[1].text());
 }
 
 // ---------------------------------------------------------------------------
@@ -623,6 +654,195 @@ test "a server whose workers hold open connections can be cancelled" {
         try in.interface.readSliceAll(&answer);
     }
     try std.testing.expectError(error.Canceled, server.cancel(on));
+}
+
+const Reached = struct { handler: Io.Event = .unset };
+
+fn noteReached(reached: *Reached, _: http.Request) void {
+    reached.handler.set(io);
+}
+
+test "a server skipping a body nobody read can be cancelled" {
+    const Server = struct {
+        // One loop on the calling task, as above. Here the read that is
+        // interrupted is the one `std` makes to skip the body before the
+        // answer, whose failure it does not report.
+        const served = program(http.connections(), .{
+            recover(http.disconnected),
+            http.serve(.{
+                tap(noteReached),
+                http.status(.ok),
+            }),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(ready: *Ready, reached: *Reached) !void {
+            return served.run(.{ io, ready, reached });
+        }
+    };
+    var ready: Ready = .{};
+    var reached: Reached = .{};
+    var server = try io.concurrent(Server.run, .{ &ready, &reached });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out = stream.writer(io, &.{});
+    // Three of ten bytes of body: the rest never comes.
+    try out.interface.writeAll("POST /x HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nabc");
+    try reached.handler.wait(io);
+    // The server is in, or on its way to, the read that skips the body.
+    try std.testing.expectError(error.Canceled, server.cancel(io));
+}
+
+/// An `Io` that counts the connections accepted through it and how many of
+/// those were closed. One at a time: its state is global.
+const Sockets = struct {
+    var inner: Io = undefined;
+    var vtable: Io.VTable = undefined;
+    var handles: [8]Io.net.Socket.Handle = undefined;
+    var accepted: std.atomic.Value(usize) = .init(0);
+    var closed: std.atomic.Value(usize) = .init(0);
+    var expected: usize = 0;
+    /// Set once `expected` connections have been accepted.
+    var all_accepted: Io.Event = .unset;
+
+    fn over(under: Io, expect: usize) Io {
+        inner = under;
+        vtable = under.vtable.*;
+        vtable.netAccept = accept;
+        vtable.netClose = close;
+        accepted.store(0, .seq_cst);
+        closed.store(0, .seq_cst);
+        expected = expect;
+        all_accepted = .unset;
+        return .{ .userdata = under.userdata, .vtable = &vtable };
+    }
+
+    fn accept(userdata: ?*anyopaque, server: Io.net.Socket.Handle, options: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
+        const socket = try inner.vtable.netAccept(userdata, server, options);
+        const index = accepted.load(.seq_cst);
+        handles[index] = socket.handle;
+        accepted.store(index + 1, .seq_cst);
+        if (index + 1 == expected) all_accepted.set(inner);
+        return socket;
+    }
+
+    fn close(userdata: ?*anyopaque, sockets: []const Io.net.Socket) void {
+        for (sockets) |socket| for (handles[0..accepted.load(.seq_cst)]) |handle| {
+            if (socket.handle == handle) _ = closed.fetchAdd(1, .seq_cst);
+        };
+        inner.vtable.netClose(userdata, sockets);
+    }
+};
+
+test "cancelling a server closes the connections no worker had taken" {
+    // A request to cancel is pending while tasks are joined: a plain allocator.
+    var backend: Io.Threaded = .init(std.heap.smp_allocator, .{});
+    defer backend.deinit();
+    const on = Sockets.over(backend.io(), 3);
+    const Server = struct {
+        const served = program(http.connections(), .{
+            concurrent(1, .{
+                recover(http.disconnected),
+                http.serve(api),
+            }),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try on.concurrent(Server.run, .{ on, &ready });
+    defer server.cancel(on) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    var peers: [3]Io.net.Stream = undefined;
+    var opened: usize = 0;
+    defer for (peers[0..opened]) |peer| peer.close(io);
+    // The one worker has answered the first peer and holds its connection.
+    peers[0] = try address.connect(io, .{ .mode = .stream });
+    opened += 1;
+    var out = peers[0].writer(io, &.{});
+    try out.interface.writeAll(get_sum);
+    var in = peers[0].reader(io, &.{});
+    var answer: [ok("text/plain", "55").len]u8 = undefined;
+    try in.interface.readSliceAll(&answer);
+    // Two more are accepted and wait: one in the worker's queue, one with
+    // the source, which cannot put it there yet.
+    for (peers[1..]) |*peer| {
+        peer.* = try address.connect(io, .{ .mode = .stream });
+        opened += 1;
+    }
+    try Sockets.all_accepted.wait(io);
+
+    try std.testing.expectError(error.Canceled, server.cancel(on));
+    try std.testing.expectEqual(@as(usize, 3), Sockets.closed.load(.seq_cst));
+}
+
+test "with room for one waiting connection, every connection is still served" {
+    const Server = struct {
+        const served = program(http.connections(), .{
+            take(3),
+            concurrent(1, .{
+                recover(http.disconnected),
+                http.serve(api),
+            }),
+        }).provide(.{
+            http.listen(loopback, .{ .pending = 1 }),
+            resource(announce, null),
+        });
+
+        fn run(ready: *Ready) !void {
+            return served.run(.{ io, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{&ready});
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const closed = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55";
+    // The worker answers the first peer and stays with its open connection.
+    const first = try address.connect(io, .{ .mode = .stream });
+    var first_open = true;
+    defer if (first_open) first.close(io);
+    var out = first.writer(io, &.{});
+    try out.interface.writeAll(get_sum);
+    var in = first.reader(io, &.{});
+    var answer: [ok("text/plain", "55").len]u8 = undefined;
+    try in.interface.readSliceAll(&answer);
+
+    // Two more peers ask. The first of them fills the listener's room; the
+    // second is accepted only once that room is free again.
+    var others: [2]Io.net.Stream = undefined;
+    var opened: usize = 0;
+    defer for (others[0..opened]) |peer| peer.close(io);
+    for (&others) |*peer| {
+        peer.* = try address.connect(io, .{ .mode = .stream });
+        opened += 1;
+        var asking = peer.writer(io, &.{});
+        try asking.interface.writeAll(closing);
+    }
+    first.close(io);
+    first_open = false;
+    for (others) |peer| {
+        var answering = peer.reader(io, &.{});
+        var got: [256]u8 = undefined;
+        try std.testing.expectEqualStrings(closed, got[0..try answering.interface.readSliceShort(&got)]);
+    }
+    try server.await(io);
 }
 
 /// An `Io` whose first accept finds that the peer has already given up.

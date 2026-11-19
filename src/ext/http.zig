@@ -66,6 +66,8 @@ fn expectProvided(comptime Env: type, comptime T: type, comptime message: []cons
 /// The listener bound by `listen`, as a dependency.
 pub const Listener = struct {
     server: *Io.net.Server,
+    /// The connections accepted from it that no worker has taken yet.
+    waiting: *Waiting,
 
     /// The port it listens on: the one the system chose when asked for port 0.
     pub fn port(listener: Listener) u16 {
@@ -73,31 +75,109 @@ pub const Listener = struct {
     }
 };
 
+pub const ListenOptions = struct {
+    /// How many accepted connections may wait for a worker at once. The
+    /// listener holds them in a table of this size; while it is full,
+    /// `connections` accepts no more.
+    pending: usize = 64,
+    /// Sets SO_REUSEADDR (and SO_REUSEPORT on POSIX) on the listening socket.
+    reuse_address: bool = false,
+    /// How many connections the kernel accepts on the server's behalf.
+    kernel_backlog: u31 = Io.net.default_kernel_backlog,
+};
+
 /// Listens on `address` for the duration of a program and provides the
-/// `Listener`. Pass it to `Program.provide`. Needs `std.Io`.
-pub fn listen(address: Io.net.IpAddress, options: Io.net.IpAddress.ListenOptions) Listen {
-    return .{ .address = address, .options = options };
+/// `Listener`. Pass it to `provide` or `run`. Needs `std.Io`.
+///
+/// The listener owns every connection `connections` accepted until a
+/// `serve` takes it, and closes those nobody took once the run is over.
+pub fn listen(address: Io.net.IpAddress, comptime options: ListenOptions) Listen(options) {
+    return .{ .address = address };
 }
 
-const Listen = struct {
-    address: Io.net.IpAddress,
-    options: Io.net.IpAddress.ListenOptions,
+fn Listen(comptime options: ListenOptions) type {
+    if (options.pending == 0) @compileError("http.listen: `pending` must be at least 1; it is how many accepted connections may wait for a worker");
+    return struct {
+        address: Io.net.IpAddress,
 
-    pub const zrx_resource = {};
-    pub const Provides = Listener;
-    pub const needs: []const type = &.{Io};
+        pub const zrx_resource = {};
+        pub const Provides = Listener;
+        pub const needs: []const type = &.{Io};
 
-    pub fn bind(self: @This(), env: anytype, next: anytype) !void {
-        const io = di.get(env, Io);
-        var server = try self.address.listen(io, self.options);
-        defer server.deinit(io);
-        return next.call(Listener{ .server = &server });
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            const io = di.get(env, Io);
+            var server = try self.address.listen(io, .{ .reuse_address = options.reuse_address, .kernel_backlog = options.kernel_backlog });
+            defer server.deinit(io);
+            var slots: [options.pending]?Io.net.Stream = @splat(null);
+            var waiting: Waiting = .{ .slots = &slots };
+            // Every task of the run has returned by the time this runs.
+            defer waiting.closeAll(io);
+            return next.call(Listener{ .server = &server, .waiting = &waiting });
+        }
+    };
+}
+
+/// The connections that were accepted and that no `serve` has taken yet.
+/// A connection in a queue, or in the hands of a source whose push was
+/// cancelled, would otherwise be closed by nobody.
+const Waiting = struct {
+    mutex: Io.Mutex = .init,
+    freed: Io.Condition = .init,
+    slots: []?Io.net.Stream,
+    /// Slots that hold a connection or are promised to an accept under way.
+    used: usize = 0,
+
+    /// Waits for room for one more connection and reserves it.
+    fn reserve(waiting: *Waiting, io: Io) Io.Cancelable!void {
+        try waiting.mutex.lock(io);
+        defer waiting.mutex.unlock(io);
+        while (waiting.used == waiting.slots.len) try waiting.freed.wait(io, &waiting.mutex);
+        waiting.used += 1;
+    }
+
+    /// Gives back a reservation that no connection came for.
+    fn release(waiting: *Waiting, io: Io) void {
+        waiting.mutex.lockUncancelable(io);
+        defer waiting.mutex.unlock(io);
+        waiting.used -= 1;
+        waiting.freed.signal(io);
+    }
+
+    /// Puts an accepted connection into the room reserved for it.
+    fn hold(waiting: *Waiting, io: Io, stream: Io.net.Stream) *?Io.net.Stream {
+        waiting.mutex.lockUncancelable(io);
+        defer waiting.mutex.unlock(io);
+        for (waiting.slots) |*slot| if (slot.* == null) {
+            slot.* = stream;
+            return slot;
+        };
+        unreachable; // room was reserved
+    }
+
+    /// A `serve` has the connection now and will close it.
+    fn take(waiting: *Waiting, io: Io, slot: *?Io.net.Stream) void {
+        waiting.mutex.lockUncancelable(io);
+        defer waiting.mutex.unlock(io);
+        slot.* = null;
+        waiting.used -= 1;
+        waiting.freed.signal(io);
+    }
+
+    fn closeAll(waiting: *Waiting, io: Io) void {
+        for (waiting.slots) |slot| if (slot) |stream| stream.close(io);
     }
 };
 
-/// An accepted connection. `serve` owns it from the push on and closes it
-/// when the conversation is over, however it ended.
-pub const Connection = struct { stream: Io.net.Stream };
+/// An accepted connection. The listener owns it until a `serve` is pushed
+/// it; `serve` then closes it when the conversation is over, however it ended.
+pub const Connection = struct {
+    stream: Io.net.Stream,
+    /// Where the listener holds it until then; null for a connection that
+    /// did not come from `connections`.
+    held: ?Held = null,
+
+    const Held = struct { by: *Waiting, slot: *?Io.net.Stream };
+};
 
 /// A connection over a reader and a writer of the caller's: a test, or a
 /// stream that is not a socket. `serve` reads, writes and flushes, and
@@ -106,7 +186,8 @@ pub const Transport = struct { reader: *Io.Reader, writer: *Io.Writer };
 
 /// The connections accepted from the `Listener`, until a push answers
 /// `.done`. A connection the peer gave up before it was accepted is skipped;
-/// any other failure to accept fails the run.
+/// any other failure to accept fails the run. While as many connections wait
+/// for a worker as the listener has room for (`pending`), no more are accepted.
 pub fn connections() Connections {
     return .{};
 }
@@ -121,12 +202,20 @@ const Connections = struct {
         comptime expectProvided(Env, Io, "http.connections: needs `std.Io` to accept connections; pass `io` to `run(.{ io, ... })`");
         const io = di.get(env, Io);
         const listener = di.get(env, Listener);
+        const waiting = listener.waiting;
         while (true) {
-            const stream = listener.server.accept(io) catch |err| switch (err) {
-                error.ConnectionAborted => continue,
-                else => |e| return e,
+            try waiting.reserve(io);
+            const stream = listener.server.accept(io) catch |err| {
+                waiting.release(io);
+                switch (err) {
+                    error.ConnectionAborted => continue,
+                    else => |e| return e,
+                }
             };
-            if (try down.push(Connection{ .stream = stream }) == .done) return;
+            // From here the listener closes the connection if no `serve`
+            // gets to: also when this push fails or is answered `.done`.
+            const slot = waiting.hold(io, stream);
+            if (try down.push(Connection{ .stream = stream, .held = .{ .by = waiting, .slot = slot } }) == .done) return;
         }
     }
 };
@@ -159,6 +248,17 @@ const Exchange = struct {
         // to send, or after reading part of it, ends the connection.
         if (request.head.expect != null or !x.bodySettled()) request.head.keep_alive = false;
         request.head.expect = null;
+        if (request.head.keep_alive) try x.flushBeforeBody();
+        if (bodyless(code)) {
+            // `std` writes a length or closes the connection; a status
+            // without a body must not carry one (RFC 9110, 8.6).
+            if (request.head.keep_alive and !x.skipBody()) request.head.keep_alive = false;
+            const out = x.server.out;
+            try out.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(code), code.phrase() orelse "" });
+            if (!request.head.keep_alive) try out.writeAll("connection: close\r\n");
+            try out.writeAll("\r\n");
+            return null;
+        }
         const headers = [_]std.http.Header{.{ .name = "content-type", .value = content_type orelse "" }};
         _ = request.respondStreaming(&.{}, .{
             .content_length = length,
@@ -189,6 +289,33 @@ const Exchange = struct {
         };
     }
 
+    /// Sends what was answered so far unless the rest of this request's body
+    /// is already in the read buffer: reading or skipping it may wait for the
+    /// peer, who may be waiting for those answers.
+    fn flushBeforeBody(x: *Exchange) Io.Writer.Error!void {
+        if (x.server.reader.state != .received_head) return;
+        const head = &x.request.head;
+        if (head.transfer_encoding == .none) {
+            const length = head.content_length orelse return;
+            if (x.server.reader.in.bufferedLen() >= length) return;
+        }
+        try x.server.out.flush();
+    }
+
+    /// Reads past a body nobody asked for, as `std` does before it answers.
+    /// False when the next request cannot be found behind it.
+    fn skipBody(x: *Exchange) bool {
+        const reader = &x.server.reader;
+        if (reader.state != .received_head) return reader.state == .ready;
+        if (x.request.head.method.requestHasBody()) {
+            const body = x.request.readerExpectContinue(&.{}) catch return false;
+            _ = body.discardRemaining() catch return false;
+        } else {
+            reader.state = .ready;
+        }
+        return true;
+    }
+
     /// Whether another request may be read from this connection.
     fn reusable(x: *const Exchange) bool {
         return !x.broken and x.request.head.keep_alive and x.server.reader.state == .ready;
@@ -200,6 +327,11 @@ const Exchange = struct {
         return if (err == error.HttpChunkInvalid) error.BadRequest else error.ReadFailed;
     }
 };
+
+/// 1xx and 204 never have a body, and say so by having no length.
+fn bodyless(code: Status) bool {
+    return code.class() == .informational or code == .no_content;
+}
 
 /// A request, as the item of the pipe given to `serve`. It points into the
 /// connection: use it while its push is running, and read the head (path,
@@ -278,6 +410,7 @@ pub const Request = struct {
         if (chunked and length != null) return error.BadRequest;
         if (!chunked and length == null) return error.LengthRequired;
         if (length) |n| if (n > buffer.len) return error.PayloadTooLarge;
+        try x.flushBeforeBody();
         const reader = x.request.readerExpectContinue(&.{}) catch |err| switch (err) {
             error.HttpExpectationFailed => return error.ExpectationFailed,
             error.WriteFailed => return error.WriteFailed,
@@ -374,18 +507,20 @@ fn Serve(comptime P: type) type {
                         return .more;
                     }
                     const io = di.get(self.env, Io);
+                    if (connection.held) |held| held.by.take(io, held.slot);
                     defer connection.stream.close(io);
                     var in_buffer: [head_bytes]u8 = undefined;
                     var out_buffer: [output_bytes]u8 = undefined;
                     var reader = connection.stream.reader(io, &in_buffer);
                     var writer = connection.stream.writer(io, &out_buffer);
-                    self.converse(&reader.interface, &writer.interface) catch |err| {
-                        // `std` reports a cancelled read or write as a failed
-                        // one and records which it was.
-                        if (reader.err) |cause| if (cause == error.Canceled) return error.Canceled;
-                        if (writer.err) |cause| if (cause == error.Canceled) return error.Canceled;
-                        return err;
-                    };
+                    const outcome = self.converse(&reader.interface, &writer.interface);
+                    // `std` reports a cancelled read or write as a failed one,
+                    // or not at all when it was skipping a body for us, and
+                    // records which it was. The request is used up either
+                    // way, so it has to come out of here.
+                    if (reader.err) |cause| if (cause == error.Canceled) return error.Canceled;
+                    if (writer.err) |cause| if (cause == error.Canceled) return error.Canceled;
+                    try outcome;
                     return .more;
                 }
 
@@ -394,9 +529,10 @@ fn Serve(comptime P: type) type {
                     var chain: Chain = undefined;
                     chain.init(&self.op.pipe, di.extend(self.env, Response{ .exchange = &exchange }));
                     while (true) {
-                        // The peer waits for what was answered so far only
-                        // if it has sent nothing more.
-                        if (in.bufferedLen() == 0) try out.flush();
+                        // The peer may be waiting for what was answered so
+                        // far, unless a whole further request is already
+                        // here: part of one is no reason to make it wait.
+                        if (!headBuffered(in)) try out.flush();
                         exchange.request = exchange.server.receiveHead() catch |err| switch (err) {
                             error.HttpConnectionClosing, error.HttpRequestTruncated => break,
                             error.HttpHeadersOversize => {
@@ -420,6 +556,12 @@ fn Serve(comptime P: type) type {
             };
         }
     };
+}
+
+/// Whether a whole request head is in the read buffer, so that reading it
+/// does not wait for the peer.
+fn headBuffered(in: *Io.Reader) bool {
+    return std.mem.find(u8, in.buffered(), "\r\n\r\n") != null;
 }
 
 /// Answers what could not be read as a request.

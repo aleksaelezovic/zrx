@@ -864,12 +864,12 @@ to `serve` carries the requests of one connection.
 
 | | |
 |---|---|
-| `http.listen(address, options)` | Binding. Listens for the run and provides the `http.Listener`; `listener.port()` is the bound port. Needs `std.Io`. |
+| `http.listen(address, options)` | Binding. Listens for the run and provides the `http.Listener`; `listener.port()` is the bound port. Options: `pending` (64), `reuse_address`, `kernel_backlog`. Needs `std.Io`. |
 | `http.connections()` | Source: the connections accepted from the listener. |
 | `http.serve(sub)` | Terminal. Holds the conversation on each connection with `sub`, an operator tuple or `pipe(...)` of `http.Request` items that ends in a terminal operator. |
 | `http.text("fmt")` | Terminal, in `sub`. Answers 200 with the item formatted as `text/plain`; a tuple supplies several arguments. |
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
-| `http.status(code)` | Terminal, in `sub`. Answers `code` with an empty body. |
+| `http.status(code)` | Terminal, in `sub`. Answers `code` with an empty body; a 204 or 1xx carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
 | `http.fail` | For `recover`, in `sub`: answers a failed request with the status of its error. |
 | `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
@@ -956,14 +956,20 @@ error still does. `fail` does not answer them either: they pass through it.
 
 ### Connections and writes
 
-`serve` owns a connection from the push on and closes it when the
-conversation ends, whatever ended it. A connection that was accepted and is
-still waiting for a worker when the run ends is not closed by zrx.
+The listener owns a connection from the moment it is accepted until a
+`serve` is pushed it; `serve` then closes it when the conversation ends,
+whatever ended it. A connection that is still waiting for a worker when the
+run is over (in a queue, or with the source) is closed by the listener once
+the run's tasks have returned. The listener has room for `pending` such
+connections, 64 unless `listen` is told otherwise, and `connections` accepts
+no more while it is full.
 
-Answers are collected in a 4 KiB buffer per connection and written when the
-peer has sent nothing further: before `serve` waits for the next request,
-and when the connection ends. Requests that arrive together (pipelined) are
-therefore answered with one write.
+Answers are collected in a 4 KiB buffer per connection and written before
+`serve` reads something that may not have arrived yet (a request head, or a
+body, that is not whole in its read buffer) and when the connection ends.
+Requests that arrived together and whole (pipelined) are therefore answered
+with one write, and an answer never waits for the rest of a request that
+arrived in part.
 
 For a connection that is not a socket, or in a test, give `serve` an
 `http.Transport` instead: a reader and a writer of yours, which it flushes
