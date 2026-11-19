@@ -118,3 +118,31 @@ export fn zrx_cross_clock(io: *const std.Io, first: u32, end: u32) bool {
     clock.waitingAt(.fromSeconds(61)) catch return false;
     return true;
 }
+
+fn requestMethod(request: zrx.ext.http.Request) zrx.ext.http.Method {
+    return request.method();
+}
+
+fn unwelcome(_: zrx.ext.http.Connection) bool {
+    return false;
+}
+
+export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
+    const http = zrx.ext.http;
+    const api = pipe(.{
+        zrx.recover(http.fail),
+        zrx.route(.{
+            zrx.when(http.path("/method"), .{ zrx.map(requestMethod), http.text("{t}") }),
+            zrx.when(zrx.all(.{ http.path("/json"), http.method(.GET) }), .{ zrx.map(zrx.constant(@as(u32, 1))), http.json() }),
+            zrx.otherwise(.{http.status(.not_found)}),
+        }),
+    });
+    const server = program(http.connections(), .{
+        zrx.concurrent(2, .{zrx.route(.{
+            zrx.when(unwelcome, .{http.reject()}),
+            zrx.otherwise(.{ zrx.recover(http.disconnected), http.serve(api) }),
+        })}),
+    }).provide(.{http.listen(.{ .ip4 = .loopback(port) }, .{})});
+    server.run(.{io.*}) catch return false;
+    return true;
+}

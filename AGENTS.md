@@ -24,8 +24,9 @@ to this file; edit `AGENTS.md`, not copies.
   `src/pipe.zig` (chain), `src/di.zig` (injection) and `src/program.zig` stay
   small and know nothing about individual operators.
 - The feature set of the previous implementation is an upper bound, not a
-  backlog. HTTP, signals, retry and the standalone apps were dropped in the
-  rewrite and return only by explicit decision.
+  backlog. Signals, retry and the standalone apps were dropped in the
+  rewrite and return only by explicit decision. HTTP has returned by such a
+  decision, as the extension `zrx.ext.http` (see below).
 - Exactly Zig 0.17.0 (`.zigversion`). Reuse `std.Io`, `std.mem.Allocator` and
   std containers; no scheduler or runtime of our own.
 
@@ -183,6 +184,53 @@ to this file; edit `AGENTS.md`, not copies.
   That makes it atomic per file and not per run: say so wherever it is
   described. The first wording promised that a failed run leaves no file,
   and a review showed two published files where it did.
+- **HTTP is an extension, not core.** `src/ext/http.zig` is written against
+  the public source, operator and handler contracts, is analyzed only when
+  `zrx.ext.http` is referenced, and the core knows nothing of it (it still
+  compiles freestanding). `serve` holds a synchronous sub-pipe as
+  `concurrent` does and constructs it per connection with that connection's
+  `Response` added to the environment; a boundary inside it is a compile
+  error. The listener owns an accepted `Connection` until a `serve` or a
+  `reject` takes it and closes what nobody took after the run's tasks have
+  returned; whoever took it closes it. A `pending` slot measures "accepted
+  and not taken", and the listener cannot tell a connection that waits in a
+  queue from one a stage dropped, so `reject` is the one way to let go of a
+  connection and a dropped one keeps its slot until the run is over. That
+  is the rule the guide states; do not make the table evict, or the source
+  guess, to hide a pipe that drops. A connection is handed over once, and the
+  listener checks that its slot still holds that connection (a generation
+  per slot): a copy that comes second fails with `error.ConnectionTaken`
+  and touches neither the slot nor the socket. Do not compare sockets for
+  this; the system reuses their handles. Responders write unflushed and `serve`
+  flushes before a read that may wait for the peer (a head or body that is
+  not whole in the buffer, and any chunked body: its end is not searched
+  for); do not flush per response. Every head is
+  written by `Exchange.begin`, which is where a status is judged: an
+  interim one (1xx) is answered 500, since it would leave the peer without
+  an answer, and 204 and 304 go out without a body or a length. A cancellation
+  `std` recorded on the connection comes out of `serve` whatever the
+  conversation returned. Answers completed before a handler failed are
+  flushed, unless it failed with a cancellation. A socket on which `std`
+  recorded a failure is not read from or written to again, whether or not
+  the failure came back as an error: a second failure would replace the
+  record, and a cancellation in it would be lost. `serve` looks after
+  every request and before an answer starts. An unread body is skipped
+  only once the pipe is through with the request, never before or while
+  it is answered: the read overwrites the head, which the item being
+  answered may point into. The independent review before the merge found
+  a `content-length` counted before the skip and content written after
+  it. That is why `begin` writes every head itself and `std`'s
+  `respondStreaming`, which skips first, is not used. A read that fails
+  in the skip is returned, for a socket and a transport alike. An unread
+  chunked body is not skipped but answered with the connection closed:
+  `std`'s chunk reader overflows on a chunk size near 2^64, and that must
+  not be reachable on a route that reads no body. `serve` refuses a request whose `Host` is not in
+  order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
+  worker per open connection with no timeouts and no graceful shutdown; the
+  guide's "Not here yet" lists what was left out on purpose. What it does is
+  described in the guide's HTTP section and pinned in `tests/http.zig`: a
+  behavior goes into that section together with its test. Performance is
+  stated only in the benchmark app's README, with the measurement behind it.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
@@ -275,6 +323,11 @@ to this file; edit `AGENTS.md`, not copies.
   allocator; suspect this before the library when only Debug fails so.
 - A mutant that does not compile proves nothing: the runner must report a
   failed build as such. Twice a check here passed for that reason.
+- A mutant that survives on one machine does not show its safeguard to be
+  redundant. A check in `serve` kept `std`'s shared constant reader from
+  being written to; every test passed without it on macOS, it was removed
+  as unpinned, and the whole HTTP suite then crashed on Linux in
+  ReleaseFast. Before removing such a check, find out why it is there.
 - A change to the scope or to segments is checked by removing each safeguard
   in turn and seeing a test fail, and by repeating the `flow`, `programs`
   and `extending` suites a few hundred times in Debug and ReleaseFast under

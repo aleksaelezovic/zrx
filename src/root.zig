@@ -106,6 +106,7 @@ pub const FileBytes = io.FileBytes;
 /// Modules built on the contracts below. Each is compiled only when used.
 pub const ext = struct {
     pub const json = @import("ext/json.zig");
+    pub const http = @import("ext/http.zig");
 };
 
 // For writing operators, sources and handlers of your own.
