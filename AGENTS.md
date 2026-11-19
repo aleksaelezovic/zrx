@@ -201,7 +201,8 @@ to this file; edit `AGENTS.md`, not copies.
   and touches neither the slot nor the socket. Do not compare sockets for
   this; the system reuses their handles. Responders write unflushed and `serve`
   flushes before a read that may wait for the peer (a head or body that is
-  not whole in the buffer); do not flush per response. Every head is
+  not whole in the buffer, and any chunked body: its end is not searched
+  for); do not flush per response. Every head is
   written by `Exchange.begin`, which is where a status is judged: an
   interim one (1xx) is answered 500, since it would leave the peer without
   an answer, and 204 and 304 go out without a body or a length. A cancellation

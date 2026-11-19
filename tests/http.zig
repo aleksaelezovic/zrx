@@ -337,6 +337,30 @@ test "an answer does not wait for the rest of a request that arrived in part" {
     try std.testing.expectEqualStrings(ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open), wire.text());
 }
 
+test "a chunked body is flushed for before it is read or skipped, also when it arrived whole" {
+    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
+    const both = ok("text/plain", "55") ++ ok("text/plain", "75");
+    var wire: Wire = undefined;
+    // All of it arrived with the request before it: with a length that is
+    // one write (see above), chunked it is two.
+    try converse(api, &.{.{ .buffer = get_sum ++ chunked }}, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(both, wire.text());
+    // Part of it: the first answer is written before the rest is read.
+    try converse(api, &.{ .{ .buffer = get_sum ++ chunked[0 .. chunked.len - 5] }, .{ .buffer = chunked[chunked.len - 5 ..] } }, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(both, wire.text());
+    // The same for one nobody reads, which is skipped before the answer.
+    const unread = "POST /json HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
+    const refused = ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open);
+    try converse(api, &.{.{ .buffer = get_sum ++ unread }}, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(refused, wire.text());
+    try converse(api, &.{ .{ .buffer = get_sum ++ unread[0 .. unread.len - 5] }, .{ .buffer = unread[unread.len - 5 ..] } }, &wire);
+    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqualStrings(refused, wire.text());
+}
+
 test "the connection ends when the peer asks to close it" {
     var wire: Wire = undefined;
     try converse(api, &.{.{ .buffer = "GET /sum?a=1 HTTP/1.1\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);

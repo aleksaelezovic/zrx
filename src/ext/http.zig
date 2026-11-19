@@ -374,6 +374,11 @@ const Exchange = struct {
     /// Sends what was answered so far unless the rest of this request's body
     /// is already in the read buffer: reading or skipping it may wait for the
     /// peer, who may be waiting for those answers.
+    ///
+    /// Only a body with a length is looked for there. Where a chunked body
+    /// ends is known by parsing its chunks, which is `std`'s to do, and a
+    /// wrong guess would wait for a peer that waits for us: a chunked body
+    /// costs a write, also when all of it has arrived.
     fn flushBeforeBody(x: *Exchange) Io.Writer.Error!void {
         if (x.server.reader.state != .received_head) return;
         const head = &x.request.head;
@@ -534,7 +539,8 @@ pub const Response = struct {
 /// connection ends. Requests are read while the peer keeps the connection
 /// alive and the pipe wants more; a request the pipe did not answer is
 /// answered 500. Output is flushed when no further request is waiting in
-/// the read buffer, so pipelined requests share a write.
+/// the read buffer, so pipelined requests share a write; a chunked body is
+/// flushed for before it is read or skipped.
 ///
 /// A head that does not parse is answered 400, one larger than `head_bytes`
 /// 431, and the connection closed. A connection that breaks fails the push

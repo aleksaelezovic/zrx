@@ -999,8 +999,10 @@ Answers are collected in a 4 KiB buffer per connection and written before
 `serve` reads something that may not have arrived yet (a request head, or a
 body, that is not whole in its read buffer) and when the connection ends.
 Requests that arrived together and whole (pipelined) are therefore answered
-with one write, and an answer never waits for the rest of a request that
-arrived in part.
+with one write, as long as their bodies have a length. Where a chunked body
+ends is not looked for in the buffer: `serve` writes what it has answered
+so far before it reads or skips one, also when all of it has arrived. An
+answer never waits for the rest of a request that arrived in part.
 
 For a connection that is not a socket, or in a test, give `serve` an
 `http.Transport` instead: a reader and a writer of yours, which it flushes
