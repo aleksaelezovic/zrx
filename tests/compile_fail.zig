@@ -69,6 +69,7 @@ pub const cases = .{
     .{ "require_item_type", "require: handler `fn (u64) bool` takes `u64` but receives `u32` here" },
     .{ "require_not_handler", "require: expected a handler (a comptime-known function), got `bool`" },
     .{ "print_missing", "print: needs dependency `io.Stdout`, which is not provided here; provided: (nothing)" },
+    .{ "file_reader_role", "fileReader: `u32` is not a reader role; use `*std.Io.Reader` or a struct with a `reader: *std.Io.Reader` field" },
     .{ "print_role", "print: `u32` is not a writer role; use `*std.Io.Writer` or a struct with a `writer: *std.Io.Writer` field" },
     .{ "program_not_pipe", "program: expected an operator tuple `.{ ... }` or `pipe(.{ ... })`, got `ops.sink.ForEach((function 'ignore'))`" },
     .{ "program_not_source", "program: the first argument must be a source such as fromSlice(...), got `*const [2]u32`" },

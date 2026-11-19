@@ -622,10 +622,11 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
 | `ext.json.encode(options)` | Handler: the item as JSON text, to be formatted with `{f}`. |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
+| `fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
-`stdout`, `stderr`, and `fileWriter` are bindings: give them to `provide` or
-to `run`. The file
+`stdout`, `stderr`, `fileWriter` and `fileReader` are bindings: give them
+to `provide` or to `run`. A file
 closes when the program releases its resources. `print` flushes after each
 item and again at normal stream end: use it for output someone reads as it
 is produced. `write` leaves items in the writer's buffer and flushes at
@@ -673,6 +674,22 @@ a value holding a copy of the item. The options are
 `std.json.Stringify.Options` and are always given, `.{}` for the defaults:
 `json.encode(.{ .emit_null_optional_fields = false })` leaves out optional
 fields that are null.
+
+`fileReader` is what lets a program be one constant for production and for
+tests. The program reads `lines(Input, n)`; `main` gives it the file, and a
+test gives it a reader of its own, which replaces a default:
+
+```zig
+const app = program(lines(Input, max_line), work);
+
+// in main:
+try app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
+// in a test:
+try app.run(.{ Input{ .reader = &fixed }, ... });
+```
+
+The buffer must hold the longest line and its newline, as for any reader
+given to `lines`.
 
 Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is

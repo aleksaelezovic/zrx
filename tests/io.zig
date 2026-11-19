@@ -17,6 +17,7 @@ const write = zrx.write;
 const lines = zrx.lines;
 const fileLines = zrx.fileLines;
 const fileWriter = zrx.fileWriter;
+const fileReader = zrx.fileReader;
 const fromProducer = zrx.fromProducer;
 const queue = zrx.queue;
 const recover = zrx.recover;
@@ -327,6 +328,45 @@ test "a published file holds what a handler wrote without flushing" {
     var writer: std.Io.Writer = .fixed(&buffer);
     try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+}
+
+/// One program for every test below: where its lines come from is a binding.
+const shouted = program(lines(Input, 8), .{
+    map(shoutShort),
+    print(Log, "{f},"),
+});
+
+fn shoutShort(line: zrx.Line(8)) zrx.Line(8) {
+    var upper = line;
+    for (upper.bytes[0..upper.len]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    return upper;
+}
+
+test "fileReader binds a file for lines, given to provide or to run" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "words", .data = "red\ngreen\nblue" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/words", .{tmp.sub_path});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try shouted.run(.{ io, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    try shouted.provide(.{fileReader(Input, path, 9)}).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("RED,GREEN,BLUE,RED,GREEN,BLUE,", writer.buffered());
+}
+
+test "a reader given to run replaces a fileReader default, and its file is not opened" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var reader: std.Io.Reader = .fixed("in\nmemory");
+    const from_file = shouted.provide(.{fileReader(Input, ".zig-cache/tmp/zrx-no-such-file", 9)});
+    try from_file.run(.{ io, Input{ .reader = &reader }, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
+
+    // Left to its default, the same program fails before any item.
+    try std.testing.expectError(error.FileNotFound, from_file.run(.{ io, Log{ .writer = &writer } }));
+    try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
 }
 
 test "the line limit counts the line, not its newline" {
