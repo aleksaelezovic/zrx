@@ -36,12 +36,14 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
 
         const Self = @This();
 
-        /// Binds values and resources for the source and every stage of this program.
+        /// Gives this program defaults: bindings `run` uses unless it is
+        /// given one that provides the same type.
         pub fn provide(self: *const Self, bindings: anytype) Program(S, P, Joined(Bindings, @TypeOf(bindings))) {
             return .{ .source = self.source, .pipe = self.pipe, .bindings = self.bindings ++ bindings };
         }
 
-        /// Runs with additional caller-supplied dependencies.
+        /// Runs with the given bindings, values and resources alike, and
+        /// with the defaults they do not replace.
         pub fn run(self: *const Self, deps: anytype) !void {
             const Run = struct {
                 program: *const Self,
@@ -50,7 +52,7 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
                     return body.program.runBound(env);
                 }
             };
-            return resources.run(self.bindings, di.normalize(deps), Run{ .program = self });
+            return resources.run(self.bindings, deps, Run{ .program = self });
         }
 
         fn runBound(self: *const Self, env: anytype) !void {
@@ -108,7 +110,7 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
 
 fn Joined(comptime A: type, comptime B: type) type {
     if (!di.isTuple(B)) @compileError("program.provide: expected a tuple of bindings such as `.{ logger }`");
-    return @Tuple(di.types(A) ++ di.types(B));
+    return resources.Bindings(@Tuple(di.types(A) ++ di.types(B)));
 }
 
 /// Segment 0 of a program whose pipe has a task boundary, as a member of a
@@ -176,8 +178,20 @@ pub fn System(comptime Ps: type) type {
 
         pub const zrx_program = {};
 
+        /// Runs with the given bindings. A resource among them is acquired
+        /// once, around all the programs.
         pub fn run(self: *const @This(), deps: anytype) !void {
-            const env = di.normalize(deps);
+            const Run = struct {
+                system: *const System(Ps),
+
+                pub fn call(body: @This(), env: anytype) !void {
+                    return body.system.runBound(env);
+                }
+            };
+            return resources.run(.{}, deps, Run{ .system = self });
+        }
+
+        fn runBound(self: *const @This(), env: anytype) !void {
             const Env = @TypeOf(env);
             if (members.len == 1) return self.programs[0].run(env);
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");

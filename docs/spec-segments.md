@@ -61,11 +61,14 @@ moment inside the run.
    cancellation also comes before a failure" (`tests/flow.zig`), "cancelling
    the caller cancels every member" (`tests/programs.zig`).*
 4. **Always**, every task of the program has returned before its resources
-   are released. Acquired bindings release in reverse order.
+   are released. Resources are released in the reverse of the order they
+   were acquired in.
    *Test: "nothing is released while a handler behind a queue is still using
    it", "resources outlive every concurrent worker on failure"
-   (`tests/flow.zig`) and "resources are acquired in order, provided
-   downstream, and released in reverse" (`tests/di.zig`).*
+   (`tests/flow.zig`), "resources are acquired once what they need is
+   there, and released in reverse" and "independent resources are acquired
+   in written order; one that needs others comes after them"
+   (`tests/di.zig`).*
 5. **A failure does not wait.** `run` returns without waiting for a source or
    a handler that is waiting in an `Io` call: it is cancelled there, also
    when another task does not notice that it was asked to cancel.

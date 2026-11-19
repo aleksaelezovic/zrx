@@ -392,12 +392,15 @@ test "timed operators stop at a done downstream and infer their errors" {
     }
 }
 
-test "timed operators need concurrency and honor provided Io" {
+test "timed operators need concurrency and use the Io they are given" {
     var backend: Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
     defer backend.deinit();
     inline for (.{ zrx.batchWithin(3, .fromSeconds(60)), zrx.debounce(.fromSeconds(60)) }) |op| {
         const work = zrx.program(zrx.fromValue(@as(u32, 1)), zrx.pipe(.{ op, zrx.drain() }));
         try std.testing.expectError(error.ConcurrencyUnavailable, work.run(.{backend.io()}));
-        try work.provide(.{io}).run(.{backend.io()});
+        try work.provide(.{io}).run(.{});
+        // The `Io` given to `run` replaces the default.
+        try work.provide(.{backend.io()}).run(.{io});
+        try std.testing.expectError(error.ConcurrencyUnavailable, work.provide(.{io}).run(.{backend.io()}));
     }
 }

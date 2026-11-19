@@ -114,16 +114,17 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
     };
     return struct {
         pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
 
         pub fn bind(_: @This(), env: anytype, next: anytype) !void {
-            comptime expectProvided(@tagName(which), @TypeOf(env), Io);
             var buffer: [buffer_size]u8 = undefined;
             const file: Io.File = switch (which) {
                 .stdout => .stdout(),
                 .stderr => .stderr(),
             };
             var writer = file.writerStreaming(di.get(env, Io), &buffer);
-            return next.call(di.extend(env, Role{ .writer = &writer.interface }));
+            return next.call(Role{ .writer = &writer.interface });
         }
     };
 }
@@ -138,7 +139,7 @@ pub const FileMode = enum {
     /// the writer is flushed. A failure before publication leaves the
     /// destination untouched. If the path already exists at publication,
     /// the run returns `error.PathAlreadyExists`. With several published
-    /// files, the last one bound is named first. Any files already published
+    /// files, the last one acquired is named first. Any files already published
     /// stay in place if a later publication fails.
     publish,
 };
@@ -167,23 +168,24 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
         options: FileWriterOptions,
 
         pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
 
         pub fn bind(self: @This(), env: anytype, next: anytype) !void {
-            comptime expectProvided("fileWriter", @TypeOf(env), Io);
             const io = di.get(env, Io);
             var buffer: [buffer_size]u8 = undefined;
             if (self.options.mode == .publish) {
                 var pending = try Io.Dir.cwd().createFileAtomic(io, self.path, .{});
                 defer pending.deinit(io);
                 var writer = pending.file.writer(io, &buffer);
-                try next.call(di.extend(env, roleOf(&writer.interface)));
+                try next.call(roleOf(&writer.interface));
                 try writer.interface.flush();
                 return pending.link(io);
             }
             const file = try Io.Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
             defer file.close(io);
             var writer = file.writer(io, &buffer);
-            return next.call(di.extend(env, roleOf(&writer.interface)));
+            return next.call(roleOf(&writer.interface));
         }
 
         fn roleOf(writer: *Io.Writer) Role {

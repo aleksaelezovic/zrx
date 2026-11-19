@@ -230,6 +230,24 @@ test "a published file appears only when the run succeeds, and replaces nothing"
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
+test "a writer given to run replaces a file default, and no file is created" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const report = program(range(u32, 0, 3), .{write(Report, "{d},")}).provide(.{fileWriter(Report, path, 16, .{})});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try report.run(.{ Report{ .writer = &writer }, io });
+    try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+    try std.testing.expectEqual(@as(usize, 0), try filesIn(tmp.dir));
+
+    // A file given to `run` may come before the `Io` it needs.
+    try program(range(u32, 0, 3), .{write(Report, "{d},")}).run(.{ fileWriter(Report, path, 16, .{}), io });
+    try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
+}
+
 const Name = zrx.Line(4);
 const Pet = struct { name: Name, legs: u32 };
 
