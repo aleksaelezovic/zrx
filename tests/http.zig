@@ -194,8 +194,8 @@ test "text formats the item as the body" {
 }
 
 test "text takes a tuple item as several format arguments" {
-    try expectAnswer(ok("text/plain", "zig sent GET"), "GET /agent HTTP/1.1\r\nUser-Agent: zig\r\n\r\n");
-    try expectAnswer(ok("text/plain", "nobody sent POST"), "POST /agent HTTP/1.1\r\nContent-Length: 0\r\n\r\n");
+    try expectAnswer(ok("text/plain", "zig sent GET"), "GET /agent HTTP/1.1\r\nHost: test\r\nUser-Agent: zig\r\n\r\n");
+    try expectAnswer(ok("text/plain", "nobody sent POST"), "POST /agent HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\n\r\n");
 }
 
 test "json writes the item with std.json" {
@@ -203,7 +203,7 @@ test "json writes the item with std.json" {
 }
 
 test "status answers a code and no body" {
-    try expectAnswer(empty("405 Method Not Allowed", .open), "DELETE /json HTTP/1.1\r\n\r\n");
+    try expectAnswer(empty("405 Method Not Allowed", .open), "DELETE /json HTTP/1.1\r\nHost: test\r\n\r\n");
 }
 
 test "a status without a body carries no length, and the connection goes on" {
@@ -213,9 +213,9 @@ test "a status without a body carries no length, and the connection goes on" {
     // A body nobody read is skipped, as it is before any other answer.
     try converse(nothing, &.{.{ .buffer = get_sum ++ post_sum ++ get_sum }}, &wire);
     try std.testing.expectEqualStrings(times(3, no_content), wire.text());
-    try converse(nothing, &.{.{ .buffer = "GET / HTTP/1.1\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
+    try converse(nothing, &.{.{ .buffer = "GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
     try std.testing.expectEqualStrings("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n", wire.text());
-    try converse(nothing, &.{.{ .buffer = "HEAD / HTTP/1.1\r\n\r\n" }}, &wire);
+    try converse(nothing, &.{.{ .buffer = "HEAD / HTTP/1.1\r\nHost: test\r\n\r\n" }}, &wire);
     try std.testing.expectEqualStrings(no_content, wire.text());
 }
 
@@ -225,15 +225,21 @@ test "a 304 is written without a body and without a length, and the connection g
     try converse(.{http.status(.not_modified)}, &.{.{ .buffer = get_sum ++ post_sum ++ get_sum }}, &wire);
     try std.testing.expectEqualStrings(times(3, not_modified), wire.text());
     // Content given to `send` is left out: the answer ends with its head.
-    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /304 HTTP/1.1\r\n\r\n") }}, &wire);
+    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /304 HTTP/1.1\r\nHost: test\r\n\r\n") }}, &wire);
     try std.testing.expectEqualStrings(times(2, not_modified), wire.text());
-    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /204 HTTP/1.1\r\n\r\n") }}, &wire);
+    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /204 HTTP/1.1\r\nHost: test\r\n\r\n") }}, &wire);
     try std.testing.expectEqualStrings(times(2, "HTTP/1.1 204 No Content\r\n\r\n"), wire.text());
+}
+
+test "a 205 has a length of zero and no content, whatever send was given" {
+    var wire: Wire = undefined;
+    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /205 HTTP/1.1\r\nHost: test\r\n\r\n") }}, &wire);
+    try std.testing.expectEqualStrings(times(2, "HTTP/1.1 205 Reset Content\r\ncontent-length: 0\r\n\r\n"), wire.text());
 }
 
 test "an interim status given to send is answered 500, and the connection goes on" {
     var wire: Wire = undefined;
-    try converse(.{forEach(coded)}, &.{.{ .buffer = "GET /103 HTTP/1.1\r\n\r\n" ++ "GET /100 HTTP/1.1\r\n\r\n" ++ "GET /200 HTTP/1.1\r\n\r\n" }}, &wire);
+    try converse(.{forEach(coded)}, &.{.{ .buffer = "GET /103 HTTP/1.1\r\nHost: test\r\n\r\n" ++ "GET /100 HTTP/1.1\r\nHost: test\r\n\r\n" ++ "GET /200 HTTP/1.1\r\nHost: test\r\n\r\n" }}, &wire);
     try std.testing.expectEqualStrings(
         times(2, empty("500 Internal Server Error", .open)) ++
             "HTTP/1.1 200 OK\r\ncontent-length: 19\r\ncontent-type: text/plain\r\n\r\nnot for this status",
@@ -244,21 +250,21 @@ test "an interim status given to send is answered 500, and the connection goes o
 test "a handler answers through the Response dependency" {
     try expectAnswer(
         "HTTP/1.1 418 I'm a teapot\r\ncontent-length: 15\r\ncontent-type: text/plain\r\n\r\nshort and stout",
-        "GET /teapot HTTP/1.1\r\n\r\n",
+        "GET /teapot HTTP/1.1\r\nHost: test\r\n\r\n",
     );
 }
 
 test "a HEAD request is answered with the head alone" {
-    try expectAnswer("HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n", "HEAD /sum?a=13&b=42 HTTP/1.1\r\n\r\n");
+    try expectAnswer("HTTP/1.1 200 OK\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n", "HEAD /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\n\r\n");
 }
 
 test "a request the pipe did not answer is answered 500" {
-    try expectAnswer(empty("500 Internal Server Error", .open), "GET /dropped HTTP/1.1\r\n\r\n");
+    try expectAnswer(empty("500 Internal Server Error", .open), "GET /dropped HTTP/1.1\r\nHost: test\r\n\r\n");
 }
 
 test "a second answer writes nothing and closes the connection" {
     var wire: Wire = undefined;
-    try converse(api, &.{.{ .buffer = "GET /twice HTTP/1.1\r\n\r\n" ++ get_sum }}, &wire);
+    try converse(api, &.{.{ .buffer = "GET /twice HTTP/1.1\r\nHost: test\r\n\r\n" ++ get_sum }}, &wire);
     try std.testing.expectEqualStrings(empty("202 Accepted", .open), wire.text());
 }
 
@@ -268,20 +274,31 @@ test "a second answer writes nothing and closes the connection" {
 
 test "the body is read whether its length is given or it is chunked" {
     try expectAnswer(ok("text/plain", "75"), post_sum);
-    try expectAnswer(ok("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2\r\n1\r\n0\r\n0\r\n\r\n");
+    try expectAnswer(ok("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2\r\n1\r\n0\r\n0\r\n\r\n");
 }
 
 test "a body is awaited from a peer that expects to be told to continue" {
     var wire: Wire = undefined;
     try converse(api, &.{
-        .{ .buffer = "POST /sum HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n" },
+        .{ .buffer = "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n" },
         .{ .buffer = "20" },
     }, &wire);
     try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n" ++ ok("text/plain", "20"), wire.text());
 }
 
+test "the expectation to continue is recognized in any casing" {
+    var wire: Wire = undefined;
+    try converse(api, &.{
+        .{ .buffer = "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: 100-Continue\r\n\r\n" },
+        .{ .buffer = "20" },
+    }, &wire);
+    try std.testing.expectEqualStrings("HTTP/1.1 100 Continue\r\n\r\n" ++ ok("text/plain", "20"), wire.text());
+    // Any other expectation is still refused.
+    try expectAnswer(empty("417 Expectation Failed", .closed), "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: 200-ok\r\n\r\n20");
+}
+
 test "a query pair without a value has an empty one, and nothing is decoded" {
-    try expectAnswer(ok("text/plain", "7"), "GET /sum?flag&&a=7&b=&c=%37 HTTP/1.1\r\n\r\n");
+    try expectAnswer(ok("text/plain", "7"), "GET /sum?flag&&a=7&b=&c=%37 HTTP/1.1\r\nHost: test\r\n\r\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +355,7 @@ test "an answer does not wait for the rest of a request that arrived in part" {
 }
 
 test "a chunked body is flushed for before it is read or skipped, also when it arrived whole" {
-    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
+    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
     const both = ok("text/plain", "55") ++ ok("text/plain", "75");
     var wire: Wire = undefined;
     // All of it arrived with the request before it: with a length that is
@@ -351,7 +368,7 @@ test "a chunked body is flushed for before it is read or skipped, also when it a
     try std.testing.expectEqual(2, wire.writes);
     try std.testing.expectEqualStrings(both, wire.text());
     // The same for one nobody reads, which is skipped before the answer.
-    const unread = "POST /json HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
+    const unread = "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
     const refused = ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open);
     try converse(api, &.{.{ .buffer = get_sum ++ unread }}, &wire);
     try std.testing.expectEqual(2, wire.writes);
@@ -363,7 +380,7 @@ test "a chunked body is flushed for before it is read or skipped, also when it a
 
 test "the connection ends when the peer asks to close it" {
     var wire: Wire = undefined;
-    try converse(api, &.{.{ .buffer = "GET /sum?a=1 HTTP/1.1\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
+    try converse(api, &.{.{ .buffer = "GET /sum?a=1 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
     try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 1\r\ncontent-type: text/plain\r\n\r\n1", wire.text());
 }
 
@@ -431,7 +448,7 @@ test "fail answers each error with its status and the connection goes on" {
     };
     inline for (cases) |case| {
         var wire: Wire = undefined;
-        try converse(api, &.{.{ .buffer = "GET " ++ case[0] ++ " HTTP/1.1\r\n\r\n" ++ get_sum }}, &wire);
+        try converse(api, &.{.{ .buffer = "GET " ++ case[0] ++ " HTTP/1.1\r\nHost: test\r\n\r\n" ++ get_sum }}, &wire);
         try std.testing.expectEqualStrings(empty(case[1], .open) ++ ok("text/plain", "55"), wire.text());
     }
 }
@@ -439,15 +456,15 @@ test "fail answers each error with its status and the connection goes on" {
 test "a body that cannot be taken is refused and the connection closed" {
     const cases = .{
         // No framing on a method that has a body.
-        .{ "POST /sum HTTP/1.1\r\n\r\n", "411 Length Required" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\n\r\n", "411 Length Required" },
         // More than the handler's buffer holds, by its length and by its chunks.
-        .{ "POST /sum HTTP/1.1\r\nContent-Length: 9\r\n\r\n123456789", "413 Payload Too Large" },
-        .{ "POST /sum HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n", "413 Payload Too Large" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 9\r\n\r\n123456789", "413 Payload Too Large" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n", "413 Payload Too Large" },
         // Two framings, a chunk that is none, a body where none belongs.
-        .{ "POST /sum HTTP/1.1\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n", "400 Bad Request" },
-        .{ "POST /sum HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n", "400 Bad Request" },
-        .{ "GET /sum HTTP/1.1\r\nContent-Length: 2\r\n\r\n20", "400 Bad Request" },
-        .{ "POST /sum HTTP/1.1\r\nContent-Length: 2\r\nExpect: a-miracle\r\n\r\n20", "417 Expectation Failed" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n", "400 Bad Request" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n", "400 Bad Request" },
+        .{ "GET /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20", "400 Bad Request" },
+        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: a-miracle\r\n\r\n20", "417 Expectation Failed" },
     };
     inline for (cases) |case| {
         var wire: Wire = undefined;
@@ -459,22 +476,47 @@ test "a body that cannot be taken is refused and the connection closed" {
 test "a body nobody read is skipped, or the connection closed where it cannot be" {
     const not_allowed = empty("405 Method Not Allowed", .open);
     // A body with a length is skipped.
-    try expectAnswer(not_allowed ++ ok("text/plain", "55"), "POST /json HTTP/1.1\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
+    try expectAnswer(not_allowed ++ ok("text/plain", "55"), "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
     // One the peer is still waiting to send is not asked for.
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n");
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n");
     // One without framing, or on a method that has none, hides the next request.
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\n\r\n" ++ get_sum);
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\n\r\n" ++ get_sum);
     // One that turns out not to be a body ends the connection where it stopped.
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n" ++ get_sum);
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n" ++ get_sum);
     try expectAnswer(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 27\r\ncontent-type: application/json\r\n\r\n{\"message\":\"Hello, World!\"}",
-        "GET /json HTTP/1.1\r\nContent-Length: 2\r\n\r\n20" ++ get_sum,
+        "GET /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" ++ get_sum,
     );
 }
 
 test "without fail, a handler's error fails the run" {
     var wire: Wire = undefined;
-    try std.testing.expectError(error.NotFound, converse(.{routes}, &.{.{ .buffer = "GET /missing HTTP/1.1\r\n\r\n" }}, &wire));
+    try std.testing.expectError(error.NotFound, converse(.{routes}, &.{.{ .buffer = "GET /missing HTTP/1.1\r\nHost: test\r\n\r\n" }}, &wire));
+}
+
+test "a request that fails the run does not take back the answers before it" {
+    var wire: Wire = undefined;
+    // Both arrived together, so the first answer was still unwritten when
+    // the second request failed.
+    const result = converse(.{routes}, &.{.{ .buffer = get_sum ++ "GET /missing HTTP/1.1\r\nHost: test\r\n\r\n" }}, &wire);
+    try std.testing.expectError(error.NotFound, result);
+    try std.testing.expectEqualStrings(ok("text/plain", "55"), wire.text());
+}
+
+test "a request needs one valid Host, and an HTTP/1.0 request may have none" {
+    const refused = empty("400 Bad Request", .closed);
+    try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\n\r\n");
+    try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nHost: test\r\n\r\n");
+    try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.0\r\nHost: a\r\nhost: b\r\n\r\n");
+    inline for (.{ "two words", "a/path", "user@host", "host:port", "[::1", "[]", "[::1]x" }) |value| {
+        try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: " ++ value ++ "\r\n\r\n");
+    }
+    // What is refused is refused before any handler, and what came before it is answered.
+    try expectAnswer(ok("text/plain", "55") ++ refused, get_sum ++ "GET /sum HTTP/1.1\r\n\r\n" ++ get_sum);
+
+    inline for (.{ "example.com", "example.com:8080", "127.0.0.1:80", "[::1]", "[2001:db8::1]:8443", "", "host:" }) |value| {
+        try expectAnswer(ok("text/plain", "55"), "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: " ++ value ++ "\r\n\r\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +529,7 @@ test "a head that does not parse is answered 400 and the connection closed" {
 }
 
 test "a head that does not fit is answered 431 and the connection closed" {
-    try expectAnswer(empty("431 Request Header Fields Too Large", .closed), "GET /sum HTTP/1.1\r\nX-Padding: " ++ times(512, "x") ++ "\r\n\r\n");
+    try expectAnswer(empty("431 Request Header Fields Too Large", .closed), "GET /sum HTTP/1.1\r\nHost: test\r\nX-Padding: " ++ times(512, "x") ++ "\r\n\r\n");
 }
 
 test "a peer that leaves inside a head is not answered" {
@@ -511,8 +553,8 @@ test "a connection that breaks fails the run, or is dropped by disconnected" {
     // one that ended inside a body without an error.
     var silent = brokenAfter("", &storage[0]);
     var in_head = brokenAfter("GET /sum HT", &storage[1]);
-    var in_body = brokenAfter("POST /sum HTTP/1.1\r\nContent-Length: 2\r\n\r\n2", &storage[2]);
-    var ended: Io.Reader = .fixed("POST /sum HTTP/1.1\r\nContent-Length: 2\r\n\r\n2");
+    var in_body = brokenAfter("POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n2", &storage[2]);
+    var ended: Io.Reader = .fixed("POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n2");
     var fine: Io.Reader = .fixed(get_sum);
     const transports = [_]http.Transport{
         .{ .reader = &silent, .writer = &wires[0].writer },
@@ -557,7 +599,7 @@ test "an answer that cannot be written breaks the connection, not the run" {
 test "disconnected lets every other error fail the run" {
     var wire: Wire = undefined;
     wire.init();
-    var peer: Io.Reader = .fixed("GET /missing HTTP/1.1\r\n\r\n");
+    var peer: Io.Reader = .fixed("GET /missing HTTP/1.1\r\nHost: test\r\n\r\n");
     const connection: http.Transport = .{ .reader = &peer, .writer = &wire.writer };
     try std.testing.expectError(error.NotFound, program(fromValue(connection), .{
         recover(http.disconnected),
@@ -621,11 +663,11 @@ test "connections are accepted from the listener and served by workers" {
     var answer: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
-        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", &answer),
     );
     try std.testing.expectEqualStrings(
         ok("text/plain", "55") ++ "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n75",
-        try ask(ready.port, get_sum ++ "POST /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\nContent-Length: 2\r\n\r\n20", &answer),
+        try ask(ready.port, get_sum ++ "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\nContent-Length: 2\r\n\r\n20", &answer),
     );
     try std.testing.expectEqualStrings(empty("400 Bad Request", .closed), try ask(ready.port, "NONSENSE\r\n\r\n", &answer));
     // Three connections were taken: the source has ended and the workers with it.
@@ -893,7 +935,7 @@ test "a connection that reaches a second serve fails there and is left to the fi
     var answer: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
-        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", &answer),
     );
     try std.testing.expectError(error.ConnectionTaken, server.await(io));
     try std.testing.expectEqual(@as(usize, 1), Sockets.closed.load(.seq_cst));
@@ -932,7 +974,7 @@ test "a copy of a connection served earlier does not take the room of a later on
     defer server.cancel(io) catch {};
     try ready.listening.wait(io);
 
-    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
     var answer: [256]u8 = undefined;
     _ = try ask(ready.port, closing, &answer);
     // The second connection is accepted, and the first is pushed again in
@@ -971,7 +1013,7 @@ test "with room for one waiting connection, every connection is still served" {
     try ready.listening.wait(io);
 
     const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
-    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n";
+    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
     const closed = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55";
     // The worker answers the first peer and stays with its open connection.
     const first = try address.connect(io, .{ .mode = .stream });
@@ -1051,7 +1093,7 @@ test "a rejected connection is closed, and its room is free for the next" {
         opened += 1;
     }
     var out = peers[2].writer(io, &.{});
-    try out.interface.writeAll("GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n");
+    try out.interface.writeAll("GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n");
     // The third connection has been served: the first two made room for it.
     try server.await(io);
     try std.testing.expectEqual(@as(usize, 3), Sockets.closed.load(.seq_cst));
@@ -1096,7 +1138,7 @@ test "a connection a stage dropped is closed by the listener when the run is ove
     var answer: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
-        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", &answer),
     );
     try server.await(io);
     try std.testing.expectEqual(@as(usize, 2), Sockets.closed.load(.seq_cst));
@@ -1147,7 +1189,7 @@ test "a connection given up before it was accepted is skipped" {
     var answer: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
-        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n", &answer),
     );
     try server.await(io);
     try std.testing.expect(AbortedOnce.aborted.load(.seq_cst));

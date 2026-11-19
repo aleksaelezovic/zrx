@@ -220,6 +220,9 @@ pub const Transport = struct { reader: *Io.Reader, writer: *Io.Writer };
 /// any other failure to accept fails the run. While as many connections wait
 /// for a `serve` or a `reject` as the listener has room for (`pending`), no
 /// more are accepted.
+///
+/// It finds out that the pipe is done at a push, not while it waits to
+/// accept: limit connections before a task boundary (`take(n)`), not after.
 pub fn connections() Connections {
     return .{};
 }
@@ -342,19 +345,22 @@ const Exchange = struct {
             try out.writeAll("\r\n");
             return null;
         }
+        // A 205 has no content (RFC 9110, 15.3.6): its length is zero and
+        // nothing follows its head, whatever it was given.
+        const empty = code == .reset_content;
         const headers = [_]std.http.Header{.{ .name = "content-type", .value = content_type orelse "" }};
         _ = request.respondStreaming(&.{}, .{
-            .content_length = length,
+            .content_length = if (empty) 0 else length,
             .respond_options = .{
                 .status = code,
                 .keep_alive = request.head.keep_alive,
-                .extra_headers = if (content_type != null) &headers else &.{},
+                .extra_headers = if (content_type != null and !empty) &headers else &.{},
             },
         }) catch |err| switch (err) {
             error.HttpExpectationFailed => unreachable, // cleared above
             error.WriteFailed => return error.WriteFailed,
         };
-        return if (request.head.method == .HEAD) null else x.server.out;
+        return if (empty or request.head.method == .HEAD) null else x.server.out;
     }
 
     /// Whether the next request can be found behind this one: its body was
@@ -524,8 +530,9 @@ pub const Response = struct {
     /// a second answer writes nothing and closes the connection.
     ///
     /// `code` is the final status. A 204 or a 304 is written without a body
-    /// and without a length, whatever `content` is. An interim status (1xx)
-    /// is no answer: the request is answered 500 in its place.
+    /// and without a length, and a 205 with a length of zero, whatever
+    /// `content` is. An interim status (1xx) is no answer: the request is
+    /// answered 500 in its place.
     pub fn send(response: Response, code: Status, content_type: ?[]const u8, content: []const u8) Io.Writer.Error!void {
         const out = try response.exchange.begin(code, content_type, content.len) orelse return;
         try out.writeAll(content);
@@ -622,6 +629,9 @@ fn Serve(comptime P: type) type {
                     var exchange: Exchange = .{ .server = .init(in, out), .request = undefined, .pending = false, .broken = false };
                     var chain: Chain = undefined;
                     chain.init(&self.op.pipe, di.extend(self.env, Response{ .exchange = &exchange }));
+                    // Whatever ends the conversation early, the answers
+                    // that were completed before it are the peer's.
+                    errdefer out.flush() catch {};
                     while (true) {
                         // The peer may be waiting for what was answered so
                         // far, unless a whole further request is already
@@ -639,6 +649,16 @@ fn Serve(comptime P: type) type {
                             },
                             error.ReadFailed => return error.ReadFailed,
                         };
+                        if (!hostValid(&exchange.request)) {
+                            try refuse(out, .bad_request);
+                            break;
+                        }
+                        // The expectation is a token, compared without
+                        // regard to case (RFC 9110, 10.1.1); `std` compares
+                        // it as written.
+                        if (exchange.request.head.expect) |expectation| {
+                            if (std.ascii.eqlIgnoreCase(expectation, "100-continue")) exchange.request.head.expect = "100-continue";
+                        }
                         exchange.pending = true;
                         const wants_more = try chain.push(Request{ .exchange = &exchange }, Closed{}) == .more;
                         if (exchange.pending) _ = try exchange.begin(.internal_server_error, null, 0);
@@ -650,6 +670,41 @@ fn Serve(comptime P: type) type {
             };
         }
     };
+}
+
+/// RFC 9112, 3.2: a request has at most one `Host`, with a valid value, and
+/// an HTTP/1.1 request has exactly one. Anything else is answered 400.
+fn hostValid(request: *std.http.Server.Request) bool {
+    var found: ?[]const u8 = null;
+    var headers = request.iterateHeaders();
+    while (headers.next()) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "host")) continue;
+        if (found != null) return false;
+        found = header.value;
+    }
+    const value = found orelse return request.head.version == .@"HTTP/1.0";
+    return hostValue(value);
+}
+
+/// `uri-host [ ":" port ]`, or nothing at all, which is what a client sends
+/// for a target without an authority.
+fn hostValue(value: []const u8) bool {
+    var rest = value;
+    if (rest.len != 0 and rest[0] == '[') {
+        // An IP literal: up to its closing bracket.
+        const close = std.mem.findScalar(u8, rest, ']') orelse return false;
+        if (close == 1) return false;
+        for (rest[1..close]) |c| if (!std.ascii.isHex(c) and c != ':' and c != '.' and c != '%' and c != 'v') return false;
+        rest = rest[close + 1 ..];
+    } else {
+        const end = std.mem.findScalar(u8, rest, ':') orelse rest.len;
+        for (rest[0..end]) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "-._~%!$&'()*+,;=", c) == null) return false;
+        rest = rest[end..];
+    }
+    if (rest.len == 0) return true;
+    if (rest[0] != ':') return false;
+    for (rest[1..]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// Whether a whole request head is in the read buffer, so that reading it

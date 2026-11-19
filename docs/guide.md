@@ -904,7 +904,8 @@ fn sum(request: http.Request) !i64 {
   request has none. It owns the framing: its errors are `BadRequest` (a body
   on a method that takes none, two framings, an invalid chunk),
   `LengthRequired`, `PayloadTooLarge` (more than the buffer holds) and
-  `ExpectationFailed`. It answers `Expect: 100-continue` itself.
+  `ExpectationFailed`. It answers `Expect: 100-continue` itself, in any
+  casing of that token.
 - Reading the body overwrites the head. Read the path, query and headers
   first; call `body` at most once.
 
@@ -926,7 +927,8 @@ fn created(response: http.Response, id: u64) !void {
 A 204 and a 304 end with their head. They are written without a body and
 without a `content-length`, also when `send` is given content. (A 304 may
 carry the length of the representation it stands for; zrx does not know it
-and sends none.)
+and sends none.) A 205 has no content either: it is written with a length
+of zero, whatever `send` was given.
 
 An interim status (1xx) does not answer a request. `http.status` rejects
 one at compile time, and `send`, given one at run time, answers 500 in its
@@ -947,7 +949,8 @@ answer and lets the connection go on:
 | `error.ExpectationFailed` | 417 |
 | anything else | 500 |
 
-Without it, a handler's error fails the run like any other.
+Without it, a handler's error fails the run like any other. The answers
+that were completed before it are still written to the peer.
 
 A connection goes on after an answer when the next request can be found: the
 body was read to its end, or was not read and can be skipped. It is closed
@@ -957,7 +960,10 @@ be skipped (no framing on `POST`, a body on `GET`).
 
 A head that does not parse is answered 400, and one that does not fit the
 connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
-the connection is closed.
+the connection is closed. The same goes for a request whose `Host` is not
+in order, before any handler sees it: an HTTP/1.1 request has exactly one
+`Host`, an HTTP/1.0 request at most one, and its value is a host with an
+optional port, or empty.
 
 A connection that breaks fails its push with `error.ReadFailed` or
 `error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
@@ -1024,8 +1030,13 @@ try program(fromValue(connection), .{http.serve(api)}).run(.{});
 - Without `concurrent`, `serve` holds one conversation at a time on the
   task of the source.
 - `text` and `json` format the item twice, once to learn its length.
-- Accepting stops only when the run does. A failure to accept, other than a
-  connection its peer already gave up, fails the run.
+- `connections` finds out that the pipe is done at its next push, like any
+  source. Behind a task boundary that can be late: after
+  `queue(1), take(1), ...` has taken its one connection, the source still
+  waits to accept another before it ends. Put a limit on connections before
+  the boundary, where it ends the source at once: `take(n), concurrent(...)`.
+  A failure to accept, other than a connection its peer already gave up,
+  fails the run.
 - To stop a server, cancel the task that called `run`: it returns
   `error.Canceled`, also from a read that was waiting for a request. Open
   conversations are cut off, not completed.
