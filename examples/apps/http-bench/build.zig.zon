@@ -1,0 +1,8 @@
+.{
+    .name = .http_bench,
+    .fingerprint = 0x15a55f70213ae8c0,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{ .zrx = .{ .path = "../../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", ".zigversion", "README.md", "src", "tests", "compare.py" },
+}

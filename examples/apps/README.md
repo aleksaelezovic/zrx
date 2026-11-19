@@ -7,6 +7,11 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [Audit archive](audit-archive/README.md) | A JSONL export checked and archived in order, with a slow archive holding the reader back (`batch`, `queue`) |
+| [File integrity manifest](file-integrity-manifest/README.md) | SHA-256 of each file, four at a time, with a row for every file that could not be hashed (`concurrent`, `each`, `attempt`) |
+| [Multi-file log analyzer](multi-file-log-analyzer/README.md) | Two logs read together, failures to an alerts file and counters per log (`mergeTagged`) |
+| [Offline telemetry](offline-telemetry/README.md) | Two sensor feeds as two programs, alerts as they are seen and timed windows archived (`system`, `route`, `batchWithin`) |
+| [HTTP benchmark](http-bench/README.md) | A zrx HTTP server and the same server on `std` alone, measured against each other (`zrx.ext.http`) |
 
 ## Project boundary
 

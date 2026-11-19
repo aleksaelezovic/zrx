@@ -50,13 +50,14 @@ flowchart TD
   line breaks becomes that record's outcome. A rejection is data, not a failed run.
 - `Rules` (amount ceiling, record cap) is an injected dependency.
 - The four destinations are roles: `Input`, `Accepted`, `Diagnostics`
-  (`zrx.Stderr`) and `Console` (`zrx.Stdout`). Production provides the outputs
-  with `Program.provide` using `stdout`, `stderr`, and a `fileWriter` in
-  `.create_new` mode. Tests pass fixed readers and writers to the program.
+  (`zrx.Stderr`) and `Console` (`zrx.Stdout`). The program provides `stdout`
+  and `stderr` as defaults; a production run adds a `fileReader` for the
+  input and a `fileWriter` in `.create_new` mode for the output. Tests pass
+  fixed readers and writers to the same program, which replace the defaults.
 - The summary is written only after record output has been flushed successfully.
 
-`app.zig` is the boundary around it: it parses the command, opens the input,
-runs the program and turns the totals into an outcome.
+`app.zig` is the boundary around it: it parses the command, runs the program
+with the bindings the command names and turns the totals into an outcome.
 `main.zig` owns exit codes.
 
 ## Format and policies
@@ -117,26 +118,26 @@ src/
 ## What this port needed from zrx
 
 This app existed for the previous zrx and was rebuilt on the rewritten API
-without changing the library, to find out what is missing. Two things it
-needed were general and have since been added to zrx: `orElse`, which turns a
+without changing the library, to find out what is missing. What it needed
+that was general has since been added to zrx: `orElse`, which turns a
 handler's error into a value (a rejected record has to continue downstream,
-and `recover` can only skip), and the `.create_new` mode of `fileWriter`.
+and `recover` can only skip), the `.create_new` mode of `fileWriter`, and
+`fileReader`, with which the input is a binding like the output. Bindings
+are acquired in the order they are written, so the input is opened before
+the output is created and a missing input leaves no file behind.
 
-What is still worked around here, ordered by how much it shapes the code:
+What is still plain Zig here:
 
-1. **No source for "this file, or stdin".** `app.zig` opens the input and
-   passes its reader as a dependency. (That also lets it fail on a missing
-   input before any output file is created; a source opens later than that.)
-2. **`print` only ends a pipe.** Writing records and then aggregating became a
-   `branch` with a `filter` per destination. `print` flushes output in its own
-   hooks.
-3. **Choosing a program is plain Zig.** Help, invalid usage and processing are
-   a `switch` in `app.zig`; a pipe cannot switch to another source.
-4. **Owned bounded text.** The old `zrx.Line(n)` is gone; `records.zig`
-   defines `Text(n)`.
+1. **Choosing a program.** Help, invalid usage and processing are a `switch`
+   in `app.zig`, and so is "this file, or stdin": `lines(Input, n)` with a
+   `fileReader`, or `stdinLines(n)`, over the same pipe. A pipe cannot switch
+   to another source.
+2. **`print` ends a pipe.** Writing records and then aggregating is a
+   `branch` with a `filter` per destination.
 
 What needed nothing: the record cap (`scan` numbers, a handler enforces),
 injected rules, testing the production pipe against in-memory I/O, and the
 totals the caller needs for the exit status. A program ends with nothing or
 an error, and what it produces is an effect of its pipe: `tap(remember)`
-stores the totals through a `*Summary` dependency.
+stores the totals through a `*Summary` dependency. Bounded text for a field
+(`Text(n)` in `records.zig`) is the domain's own type.

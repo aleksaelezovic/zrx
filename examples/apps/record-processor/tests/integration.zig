@@ -324,6 +324,8 @@ test "a missing input or output directory is a fatal I/O failure" {
     defer temp.cleanup();
     try temp.dir.writeFile(io, .{ .sub_path = "input", .data = "a,Ada,1\n" });
     try simulate(temp.dir, &.{ "--input", "missing", "--output", "output" }, 2, "", "fatal: FileNotFound\n");
+    // The input is opened before the output is created: nothing is left behind.
+    try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "output", .{}));
     try simulate(temp.dir, &.{ "--input", "input", "--output", "missing/output" }, 2, "", "fatal: FileNotFound\n");
 }
 
