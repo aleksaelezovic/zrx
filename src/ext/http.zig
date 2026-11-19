@@ -629,20 +629,22 @@ fn Serve(comptime P: type) type {
                     var exchange: Exchange = .{ .server = .init(in, out), .request = undefined, .pending = false, .broken = false };
                     var chain: Chain = undefined;
                     chain.init(&self.op.pipe, di.extend(self.env, Response{ .exchange = &exchange }));
-                    return self.requests(&exchange, &chain, in, out) catch |err| {
+                    return self.requests(&exchange, &chain, in, out, transport) catch |err| {
                         // When a handler ends the conversation early, the
                         // answers completed before it are still the peer's.
                         // Not so when the connection itself failed: writing
                         // to it again could replace the failure `std`
                         // recorded, a cancellation among them, with that of
-                        // the new write.
-                        if (err != error.ReadFailed and err != error.WriteFailed and transport.usable()) out.flush() catch {};
+                        // the new write. And not when the run is being
+                        // cancelled, which is no time to wait on a peer.
+                        const lost = err == error.ReadFailed or err == error.WriteFailed or @as(anyerror, err) == error.Canceled;
+                        if (!lost and transport.usable()) out.flush() catch {};
                         return err;
                     };
                 }
 
                 /// The requests of one connection, each through `chain`.
-                fn requests(_: *const Self, exchange: *Exchange, chain: *Chain, in: *Io.Reader, out: *Io.Writer) !void {
+                fn requests(_: *const Self, exchange: *Exchange, chain: *Chain, in: *Io.Reader, out: *Io.Writer, transport: anytype) !void {
                     while (true) {
                         // The peer may be waiting for what was answered so
                         // far, unless a whole further request is already
@@ -672,7 +674,16 @@ fn Serve(comptime P: type) type {
                         }
                         exchange.pending = true;
                         const wants_more = try chain.push(Request{ .exchange = exchange }, Closed{}) == .more;
-                        if (exchange.pending) _ = try exchange.begin(.internal_server_error, null, 0);
+                        // A failure does not always come back as an error:
+                        // a handler may have taken it, and `std` keeps the
+                        // one it meets while it skips a body. The
+                        // conversation is over all the same, and nothing
+                        // more is read from or written to the connection.
+                        try transport.intact();
+                        if (exchange.pending) {
+                            _ = try exchange.begin(.internal_server_error, null, 0);
+                            try transport.intact();
+                        }
                         if (!wants_more or !exchange.reusable()) break;
                     }
                     try chain.finish(Closed{});
@@ -692,6 +703,12 @@ const Recorded = struct {
     fn usable(recorded: Recorded) bool {
         return recorded.reader.err == null and recorded.writer.err == null;
     }
+
+    /// The failure of a read or a write that nobody reported.
+    fn intact(recorded: Recorded) error{ ReadFailed, WriteFailed }!void {
+        if (recorded.reader.err != null) return error.ReadFailed;
+        if (recorded.writer.err != null) return error.WriteFailed;
+    }
 };
 
 /// A reader and a writer of the caller's: what failed is only known from
@@ -700,6 +717,8 @@ const Unrecorded = struct {
     fn usable(_: Unrecorded) bool {
         return true;
     }
+
+    fn intact(_: Unrecorded) error{ ReadFailed, WriteFailed }!void {}
 };
 
 /// RFC 9112, 3.2: a request has at most one `Host`, with a valid value, and

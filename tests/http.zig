@@ -1265,6 +1265,136 @@ test "a handler that fails after a cancelled write does not hide the cancellatio
     try std.testing.expectEqual(@as(usize, 1), WriteCancelledOnce.writes.load(.seq_cst));
 }
 
+/// Takes the failure of a write that was sent at once, and goes on as if
+/// nothing had happened.
+fn sendAndShrug(response: http.Response, _: http.Request) void {
+    const large: [2 * 4096]u8 = @splat('x');
+    response.send(.ok, "text/plain", &large) catch {};
+}
+
+test "a handler that shrugs off a cancelled write does not hide the cancellation" {
+    const Server = struct {
+        const served = program(http.connections(), .{
+            take(1),
+            recover(http.disconnected),
+            http.serve(.{forEach(sendAndShrug)}),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{ WriteCancelledOnce.over(io), &ready });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out = stream.writer(io, &.{});
+    try out.interface.writeAll(get_sum);
+    // The handler returned normally. The conversation still ends there,
+    // with what `std` recorded, and without another write.
+    try std.testing.expectError(error.Canceled, server.await(io));
+    try std.testing.expectEqual(@as(usize, 1), WriteCancelledOnce.writes.load(.seq_cst));
+}
+
+/// An `Io` whose `nth` read from a socket is cancelled, and which counts the
+/// writes to a socket that came after. One at a time: its state is global.
+const ReadCancelled = struct {
+    var inner: Io = undefined;
+    var vtable: Io.VTable = undefined;
+    var at: usize = 0;
+    var reads: std.atomic.Value(usize) = .init(0);
+    var cancelled: std.atomic.Value(bool) = .init(false);
+    var writes_after: std.atomic.Value(usize) = .init(0);
+
+    fn over(under: Io, nth: usize) Io {
+        inner = under;
+        vtable = under.vtable.*;
+        vtable.operate = operate;
+        at = nth;
+        reads.store(0, .seq_cst);
+        cancelled.store(false, .seq_cst);
+        writes_after.store(0, .seq_cst);
+        return .{ .userdata = under.userdata, .vtable = &vtable };
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        switch (operation) {
+            .net_read => if (reads.fetchAdd(1, .seq_cst) + 1 == at) {
+                cancelled.store(true, .seq_cst);
+                return error.Canceled;
+            },
+            .net_write => if (cancelled.load(.seq_cst)) {
+                _ = writes_after.fetchAdd(1, .seq_cst);
+            },
+            else => {},
+        }
+        return inner.vtable.operate(userdata, operation);
+    }
+};
+
+/// Serves one connection with `sub`, which does not read the body, to a
+/// peer that sends part of one. The first read brings the head and that
+/// part; the second is the one `std` makes to skip the rest, and it is
+/// cancelled, which `std` keeps to itself.
+fn cancelledWhileSkipping(comptime sub: anytype) !void {
+    const Server = struct {
+        const served = program(http.connections(), .{
+            take(1),
+            recover(http.disconnected),
+            http.serve(sub),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{ ReadCancelled.over(io, 2), &ready });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out = stream.writer(io, &.{});
+    try out.interface.writeAll("POST /x HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nabc");
+    try std.testing.expectError(error.Canceled, server.await(io));
+    try std.testing.expect(ReadCancelled.cancelled.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), ReadCancelled.writes_after.load(.seq_cst));
+}
+
+test "nothing is written after a cancellation that std took while it skipped a body" {
+    // Skipped before the pipe's answer, and before the 500 for a request
+    // the pipe left unanswered.
+    try cancelledWhileSkipping(.{http.status(.ok)});
+    try cancelledWhileSkipping(.{zrx.drain()});
+}
+
+/// Answers `/sum`, and is cancelled at anything else.
+fn answerThenCancel(response: http.Response, request: http.Request) !void {
+    if (!std.mem.eql(u8, request.path(), "/sum")) return error.Canceled;
+    try response.send(.ok, "text/plain", "55");
+}
+
+test "a handler that reports a cancellation ends the conversation without a write" {
+    var wire: Wire = undefined;
+    // The first answer is complete and unwritten when the second request
+    // is cancelled. A cancellation is not a failure to flush for.
+    const result = converse(.{forEach(answerThenCancel)}, &.{.{ .buffer = get_sum ++ "GET /later HTTP/1.1\r\nHost: test\r\n\r\n" }}, &wire);
+    try std.testing.expectError(error.Canceled, result);
+    try std.testing.expectEqual(@as(usize, 0), wire.writes);
+}
+
 /// An `Io` whose first accept finds that the peer has already given up.
 const AbortedOnce = struct {
     var inner: Io = undefined;

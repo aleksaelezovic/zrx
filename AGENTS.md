@@ -208,9 +208,11 @@ to this file; edit `AGENTS.md`, not copies.
   an answer, and 204 and 304 go out without a body or a length. A cancellation
   `std` recorded on the connection comes out of `serve` whatever the
   conversation returned. Answers completed before a handler failed are
-  flushed, but a connection whose read or write failed is not written to
-  again: a second failure would replace the one `std` recorded, and a
-  cancellation recorded there would be lost. `serve` refuses a request whose `Host` is not in
+  flushed, unless it failed with a cancellation. A socket on which `std`
+  recorded a failure is not read from or written to again, whether or not
+  the failure came back as an error (`serve` looks after every request):
+  a second failure would replace the record, and a cancellation in it
+  would be lost. `serve` refuses a request whose `Host` is not in
   order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is

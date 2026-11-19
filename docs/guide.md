@@ -951,8 +951,14 @@ answer and lets the connection go on:
 
 Without it, a handler's error fails the run like any other. The answers
 that were completed before it are still written to the peer, unless the
-connection itself has failed: a connection whose read or write failed is not
-written to again.
+error is a cancellation or the connection itself has failed.
+
+A socket whose read or write failed is not read from or written to again,
+also when nobody reported the failure: a handler took the error of `send`
+or `body` and went on, or `std` met it while it skipped a body. The
+conversation ends there with `error.ReadFailed` or `error.WriteFailed`, or
+with `error.Canceled` if that is what interrupted it. For an
+`http.Transport`, only the errors that come back are known.
 
 A connection goes on after an answer when the next request can be found: the
 body was read to its end, or was not read and can be skipped. It is closed
