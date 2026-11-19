@@ -144,6 +144,19 @@ test "the executable exits 1 with a complete manifest when files failed" {
     try expectManifest(temp.dir, &.{ abc_row, missing_row, directory_row });
 }
 
+test "a named pipe gets a failure row instead of holding up the manifest" {
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(io, .{ .sub_path = "abc", .data = "abc" });
+    // Nobody writes to it: opening it would wait for as long as the test does.
+    const made = try std.process.run(allocator, io, .{ .argv = &.{ "mkfifo", "pipe" }, .cwd = .{ .dir = temp.dir } });
+    defer allocator.free(made.stdout);
+    defer allocator.free(made.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, made.term);
+    try invoke(temp.dir, &.{ "manifest", "abc", "pipe" }, 1, "");
+    try expectManifest(temp.dir, &.{ abc_row, "{\"path\":\"pipe\",\"failure\":\"NotRegularFile\"}" });
+}
+
 test "the executable exits 2 and keeps an output path that exists" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();

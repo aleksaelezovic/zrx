@@ -1,6 +1,6 @@
 //! A SHA-256 manifest of the files named on the command line, as one program.
 //!
-//!     paths -> four workers: path -> its bytes -> one digest -> a row
+//!     paths -> four workers: path -> a regular file -> its bytes -> one digest -> a row
 //!                            (or the row of what went wrong)
 //!       |- every row -> JSON           -> the manifest file
 //!       '- every row -> worst outcome  -> the exit status
@@ -69,6 +69,17 @@ const Hash = struct {
     }
 };
 
+/// Only a regular file is opened. A named pipe would wait for a writer, and
+/// the whole manifest with it.
+fn regularFile(io: Io, path: []const u8) ![]const u8 {
+    const stat = try Io.Dir.cwd().statFile(io, path, .{});
+    return switch (stat.kind) {
+        .file => path,
+        .directory => error.IsDir,
+        else => error.NotRegularFile,
+    };
+}
+
 fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
     return fileBytes(path, read_bytes);
 }
@@ -89,8 +100,9 @@ fn remember(exit: *Exit, outcome: Exit) void {
 
 const digest = pipe(.{fold(Hash{}, Hash.update)});
 
-/// path -> its bytes -> one digest -> a row
+/// path -> a regular file -> its bytes -> one digest -> a row
 const hashed = pipe(.{
+    map(regularFile),
     each(bytesOf, digest),
     map(described),
 });

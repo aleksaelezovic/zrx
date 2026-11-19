@@ -23,8 +23,9 @@ All of it is in [`src/main.zig`](src/main.zig), and `main` runs it as it is:
 ```zig
 const digest = pipe(.{fold(Hash{}, Hash.update)});
 
-/// path -> its bytes -> one digest -> a row
+/// path -> a regular file -> its bytes -> one digest -> a row
 const hashed = pipe(.{
+    map(regularFile),
     each(bytesOf, digest),
     map(described),
 });
@@ -86,7 +87,7 @@ One JSON object per line, in the order the workers finish, not argument order.
 | `path` | every row | The argument as given. |
 | `bytes` | hashed files | Bytes read. |
 | `sha256` | hashed files | Lowercase hex digest. |
-| `failure` | failed files | Zig error name, such as `FileNotFound` or `IsDir`. |
+| `failure` | failed files | Zig error name, such as `FileNotFound`, `IsDir` or `NotRegularFile`. |
 
 ## Exit status
 
@@ -102,9 +103,11 @@ One JSON object per line, in the order the workers finish, not argument order.
 Not here, on purpose:
 
 - An argument index in each row. A path given twice gives two identical rows.
-- A check that a file did not change while it was read, and a check for
-  regular files. A path is opened and read to its end: a directory fails
-  with `IsDir`, and nothing tells a FIFO or a device from a file.
+- A check that a file did not change while it was read. Only a regular
+  file is opened: a directory is an `IsDir` row, and a named pipe, a device
+  or a socket a `NotRegularFile` row, since opening a pipe nobody writes to
+  would hold up the whole manifest. The kind is looked at before the file
+  is opened, so a path that is replaced in between is not caught.
 - UTF-8 validation of paths. An empty path is a `FileNotFound` row.
 - `--help`.
 
