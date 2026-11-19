@@ -955,10 +955,12 @@ error is a cancellation or the connection itself has failed.
 
 A socket whose read or write failed is not read from or written to again,
 also when nobody reported the failure: a handler took the error of `send`
-or `body` and went on, or `std` met it while it skipped a body. The
-conversation ends there with `error.ReadFailed` or `error.WriteFailed`, or
-with `error.Canceled` if that is what interrupted it. For an
-`http.Transport`, only the errors that come back are known.
+or `body` and went on, or it happened while an unread body was skipped. An
+answer is not started on it either, however large: `send` and the
+responders return the failure and write nothing. The conversation ends
+there with `error.ReadFailed` or `error.WriteFailed`, or with
+`error.Canceled` if that is what interrupted it. For an `http.Transport`,
+only the errors that come back are known.
 
 A connection goes on after an answer when the next request can be found: the
 body was read to its end, or was not read and can be skipped. It is closed

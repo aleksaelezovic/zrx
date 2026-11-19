@@ -1386,6 +1386,34 @@ fn answerThenCancel(response: http.Response, request: http.Request) !void {
     try response.send(.ok, "text/plain", "55");
 }
 
+/// More than `serve` buffers: writing it reaches the socket at once.
+const large_reply: [2 * http.output_bytes]u8 = @splat('x');
+
+fn answerLarge(response: http.Response, _: http.Request) !void {
+    try response.send(.ok, "text/plain", &large_reply);
+}
+
+/// Answers the same, whatever became of the write.
+fn answerLargeRegardless(response: http.Response, _: http.Request) void {
+    response.send(.ok, "text/plain", &large_reply) catch {};
+}
+
+/// Reads the body, and answers whatever became of the read.
+fn readThenAnswerLarge(response: http.Response, request: http.Request) !void {
+    var buffer: [64]u8 = undefined;
+    _ = request.body(&buffer) catch {};
+    try response.send(.ok, "text/plain", &large_reply);
+}
+
+test "an answer larger than the output buffer is not started after a cancelled read" {
+    // The read `std` makes to skip the body, with a handler that reports
+    // what `send` returns and with one that does not.
+    try cancelledWhileSkipping(.{forEach(answerLarge)});
+    try cancelledWhileSkipping(.{forEach(answerLargeRegardless)});
+    // The read of the body itself, which the handler shrugs off.
+    try cancelledWhileSkipping(.{forEach(readThenAnswerLarge)});
+}
+
 test "a handler that reports a cancellation ends the conversation without a write" {
     var wire: Wire = undefined;
     // The first answer is complete and unwritten when the second request

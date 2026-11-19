@@ -313,10 +313,25 @@ const Exchange = struct {
     /// Something was answered that no request asked for, so nothing valid
     /// can follow on this connection.
     broken: bool,
+    /// What `std` recorded of the socket's failures; null for a reader and
+    /// a writer of the caller's, where only an error that comes back tells.
+    socket: ?Recorded,
+
+    /// A failed connection: nothing more is read from or written to it.
+    const Lost = error{ ReadFailed, WriteFailed };
+
+    /// The failure of a read or a write that nobody reported: a handler
+    /// may have taken it, and `std` keeps the one it meets while it skips
+    /// a body.
+    fn intact(x: *const Exchange) Lost!void {
+        const socket = x.socket orelse return;
+        if (socket.reader.err != null) return error.ReadFailed;
+        if (socket.writer.err != null) return error.WriteFailed;
+    }
 
     /// Writes the response head. Returns where to write `length` bytes of
     /// body, or null when none is to be written.
-    fn begin(x: *Exchange, code: Status, content_type: ?[]const u8, length: usize) Io.Writer.Error!?*Io.Writer {
+    fn begin(x: *Exchange, code: Status, content_type: ?[]const u8, length: usize) Lost!?*Io.Writer {
         if (!x.pending) {
             x.broken = true;
             return null;
@@ -333,12 +348,21 @@ const Exchange = struct {
         // to send, or after reading part of it, ends the connection.
         if (request.head.expect != null or !x.bodySettled()) request.head.keep_alive = false;
         request.head.expect = null;
-        if (request.head.keep_alive) try x.flushBeforeBody();
+        if (request.head.keep_alive) {
+            try x.flushBeforeBody();
+            // Skipped here and not by `std` as it answers, so that the
+            // connection can be looked at in between.
+            if (!x.skipBody()) request.head.keep_alive = false;
+        }
+        // The last read of this request is behind it, whether the handler
+        // read the body or it was skipped. If the connection failed, the
+        // answer is not started: an answer larger than the output buffer
+        // would be a write that a run being cancelled has to wait for.
+        try x.intact();
         if (bodyless(code)) {
             // `std` writes a length or closes the connection. A 204 must
             // not carry one (RFC 9110, 8.6); a 304 may only carry that of
             // the representation it does not send, which is not known here.
-            if (request.head.keep_alive and !x.skipBody()) request.head.keep_alive = false;
             const out = x.server.out;
             try out.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(code), code.phrase() orelse "" });
             if (!request.head.keep_alive) try out.writeAll("connection: close\r\n");
@@ -396,7 +420,7 @@ const Exchange = struct {
         try x.server.out.flush();
     }
 
-    /// Reads past a body nobody asked for, as `std` does before it answers.
+    /// Reads past a body nobody asked for, as `std` would when it answers.
     /// False when the next request cannot be found behind it.
     fn skipBody(x: *Exchange) bool {
         const reader = &x.server.reader;
@@ -526,6 +550,8 @@ pub const Request = struct {
 pub const Response = struct {
     exchange: *Exchange,
 
+    pub const SendError = Exchange.Lost;
+
     /// Answers the request with `content`. Each request is answered once:
     /// a second answer writes nothing and closes the connection.
     ///
@@ -533,7 +559,10 @@ pub const Response = struct {
     /// and without a length, and a 205 with a length of zero, whatever
     /// `content` is. An interim status (1xx) is no answer: the request is
     /// answered 500 in its place.
-    pub fn send(response: Response, code: Status, content_type: ?[]const u8, content: []const u8) Io.Writer.Error!void {
+    ///
+    /// Fails with what became of the connection, and then nothing of the
+    /// answer was started or not all of it was written.
+    pub fn send(response: Response, code: Status, content_type: ?[]const u8, content: []const u8) SendError!void {
         const out = try response.exchange.begin(code, content_type, content.len) orelse return;
         try out.writeAll(content);
     }
@@ -604,7 +633,7 @@ fn Serve(comptime P: type) type {
 
                 pub fn push(self: *Self, connection: In, _: anytype) !Flow {
                     if (In == Transport) {
-                        try self.converse(connection.reader, connection.writer, Unrecorded{});
+                        try self.converse(connection.reader, connection.writer, null);
                         return .more;
                     }
                     const io = di.get(self.env, Io);
@@ -614,7 +643,7 @@ fn Serve(comptime P: type) type {
                     var out_buffer: [output_bytes]u8 = undefined;
                     var reader = connection.stream.reader(io, &in_buffer);
                     var writer = connection.stream.writer(io, &out_buffer);
-                    const outcome = self.converse(&reader.interface, &writer.interface, Recorded{ .reader = &reader, .writer = &writer });
+                    const outcome = self.converse(&reader.interface, &writer.interface, .{ .reader = &reader, .writer = &writer });
                     // `std` reports a cancelled read or write as a failed one,
                     // or not at all when it was skipping a body for us, and
                     // records which it was. The request is used up either
@@ -625,11 +654,11 @@ fn Serve(comptime P: type) type {
                     return .more;
                 }
 
-                fn converse(self: *const Self, in: *Io.Reader, out: *Io.Writer, transport: anytype) !void {
-                    var exchange: Exchange = .{ .server = .init(in, out), .request = undefined, .pending = false, .broken = false };
+                fn converse(self: *const Self, in: *Io.Reader, out: *Io.Writer, socket: ?Recorded) !void {
+                    var exchange: Exchange = .{ .server = .init(in, out), .request = undefined, .pending = false, .broken = false, .socket = socket };
                     var chain: Chain = undefined;
                     chain.init(&self.op.pipe, di.extend(self.env, Response{ .exchange = &exchange }));
-                    return self.requests(&exchange, &chain, in, out, transport) catch |err| {
+                    return requests(&exchange, &chain, in, out) catch |err| {
                         // When a handler ends the conversation early, the
                         // answers completed before it are still the peer's.
                         // Not so when the connection itself failed: writing
@@ -638,13 +667,14 @@ fn Serve(comptime P: type) type {
                         // the new write. And not when the run is being
                         // cancelled, which is no time to wait on a peer.
                         const lost = err == error.ReadFailed or err == error.WriteFailed or @as(anyerror, err) == error.Canceled;
-                        if (!lost and transport.usable()) out.flush() catch {};
+                        exchange.intact() catch return err;
+                        if (!lost) out.flush() catch {};
                         return err;
                     };
                 }
 
                 /// The requests of one connection, each through `chain`.
-                fn requests(_: *const Self, exchange: *Exchange, chain: *Chain, in: *Io.Reader, out: *Io.Writer, transport: anytype) !void {
+                fn requests(exchange: *Exchange, chain: *Chain, in: *Io.Reader, out: *Io.Writer) !void {
                     while (true) {
                         // The peer may be waiting for what was answered so
                         // far, unless a whole further request is already
@@ -675,15 +705,11 @@ fn Serve(comptime P: type) type {
                         exchange.pending = true;
                         const wants_more = try chain.push(Request{ .exchange = exchange }, Closed{}) == .more;
                         // A failure does not always come back as an error:
-                        // a handler may have taken it, and `std` keeps the
-                        // one it meets while it skips a body. The
-                        // conversation is over all the same, and nothing
-                        // more is read from or written to the connection.
-                        try transport.intact();
-                        if (exchange.pending) {
-                            _ = try exchange.begin(.internal_server_error, null, 0);
-                            try transport.intact();
-                        }
+                        // a handler may have taken it. The conversation is
+                        // over all the same, and nothing more is read from
+                        // or written to the connection.
+                        try exchange.intact();
+                        if (exchange.pending) _ = try exchange.begin(.internal_server_error, null, 0);
                         if (!wants_more or !exchange.reusable()) break;
                     }
                     try chain.finish(Closed{});
@@ -699,26 +725,6 @@ fn Serve(comptime P: type) type {
 const Recorded = struct {
     reader: *const Io.net.Stream.Reader,
     writer: *const Io.net.Stream.Writer,
-
-    fn usable(recorded: Recorded) bool {
-        return recorded.reader.err == null and recorded.writer.err == null;
-    }
-
-    /// The failure of a read or a write that nobody reported.
-    fn intact(recorded: Recorded) error{ ReadFailed, WriteFailed }!void {
-        if (recorded.reader.err != null) return error.ReadFailed;
-        if (recorded.writer.err != null) return error.WriteFailed;
-    }
-};
-
-/// A reader and a writer of the caller's: what failed is only known from
-/// the error that came back.
-const Unrecorded = struct {
-    fn usable(_: Unrecorded) bool {
-        return true;
-    }
-
-    fn intact(_: Unrecorded) error{ ReadFailed, WriteFailed }!void {}
 };
 
 /// RFC 9112, 3.2: a request has at most one `Host`, with a valid value, and
@@ -822,7 +828,7 @@ fn Responder(comptime who: []const u8, comptime Answer: type) type {
                     self.exchange = di.get(env, Response).exchange;
                 }
 
-                pub fn push(self: *@This(), item: In, _: anytype) Io.Writer.Error!Flow {
+                pub fn push(self: *@This(), item: In, _: anytype) Exchange.Lost!Flow {
                     try Answer.send(self.exchange, item);
                     return .more;
                 }
@@ -839,7 +845,7 @@ pub fn text(comptime format: []const u8) Responder("http.text", Text(format)) {
 
 fn Text(comptime format: []const u8) type {
     return struct {
-        fn send(x: *Exchange, item: anytype) Io.Writer.Error!void {
+        fn send(x: *Exchange, item: anytype) Exchange.Lost!void {
             const args = if (comptime di.isTuple(@TypeOf(item))) item else .{item};
             const out = try x.begin(.ok, "text/plain", std.fmt.count(format, args)) orelse return;
             try out.print(format, args);
@@ -854,7 +860,7 @@ pub fn json() Responder("http.json", Json) {
 }
 
 const Json = struct {
-    fn send(x: *Exchange, item: anytype) Io.Writer.Error!void {
+    fn send(x: *Exchange, item: anytype) Exchange.Lost!void {
         var scratch: [64]u8 = undefined;
         var counted: Io.Writer.Discarding = .init(&scratch);
         try std.json.Stringify.value(item, .{}, &counted.writer);
@@ -875,7 +881,7 @@ fn Coded(comptime code: Status) type {
         .{@backingInt(code)},
     ));
     return struct {
-        fn send(x: *Exchange, _: anytype) Io.Writer.Error!void {
+        fn send(x: *Exchange, _: anytype) Exchange.Lost!void {
             _ = try x.begin(code, null, 0);
         }
     };

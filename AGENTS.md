@@ -210,9 +210,12 @@ to this file; edit `AGENTS.md`, not copies.
   conversation returned. Answers completed before a handler failed are
   flushed, unless it failed with a cancellation. A socket on which `std`
   recorded a failure is not read from or written to again, whether or not
-  the failure came back as an error (`serve` looks after every request):
-  a second failure would replace the record, and a cancellation in it
-  would be lost. `serve` refuses a request whose `Host` is not in
+  the failure came back as an error: a second failure would replace the
+  record, and a cancellation in it would be lost. `serve` looks after
+  every request and before an answer starts. For the second it skips an
+  unread body itself instead of leaving that to `std` as it answers, which
+  left no moment to look and let an answer larger than the output buffer
+  reach the socket. `serve` refuses a request whose `Host` is not in
   order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is
