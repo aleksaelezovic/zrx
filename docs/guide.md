@@ -810,10 +810,14 @@ You can retry with a larger limit if the reader has room.
 empty and none longer than `n`. A piece is a slice into the source's own
 buffer and is valid until the push that carries it returns. Reduce the
 pieces as they pass (`fold`), or copy what must be kept: do not send a piece
-across a `queue` or keep it in a `batch`. An empty file emits nothing. A read that
-fails makes the run fail with the error the system reported, such as
-`error.InputOutput`. `zrx.FileBytes(n)` names the source's type, for a
-handler that returns one.
+across a `queue` or keep it in a `batch`. An empty file emits nothing.
+`zrx.FileBytes(n)` names the source's type, for a handler that returns one.
+
+When reading a file fails, the run fails with the error the system reported,
+such as `error.InputOutput`. That holds for `fileBytes`, `fileLines`,
+`stdinLines` and a reader bound by `fileReader`. A reader of your own given
+to `lines(Role, n)` fails the run with what it reports, which for
+`std.Io.Reader` is `error.ReadFailed`.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value

@@ -226,7 +226,8 @@ fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
             defer file.close(io);
             var buffer: [buffer_size]u8 = undefined;
             var reader = file.reader(io, &buffer);
-            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
+            const role: Role = if (Role == *Io.Reader) &reader.interface else .{ .reader = &reader.interface };
+            return next.call(role) catch |err| readCause(&reader, err);
         }
     };
 }
@@ -283,6 +284,13 @@ fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
     };
 }
 
+/// `std.Io.File.Reader` reports a failed read as `error.ReadFailed` and keeps
+/// what the system said. This gives a run that failed on `reader` that cause.
+fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.File.Reader.Error) {
+    if (@as(anyerror, err) == error.ReadFailed) if (reader.err) |cause| return cause;
+    return err;
+}
+
 fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) !void {
     while (true) {
         const buffered_line = reader.peekDelimiterInclusive('\n') catch |err| switch (err) {
@@ -317,7 +325,7 @@ fn StdinLines(comptime max_line_bytes: usize) type {
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = Io.File.stdin().readerStreaming(di.get(env, Io), &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
         }
     };
 }
@@ -344,7 +352,7 @@ fn FileLines(comptime max_line_bytes: usize) type {
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = file.reader(io, &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
         }
     };
 }
