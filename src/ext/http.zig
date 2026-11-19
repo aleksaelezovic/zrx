@@ -343,61 +343,50 @@ const Exchange = struct {
             return null;
         }
         x.pending = false;
-        const request = &x.request;
+        const head = &x.request.head;
         // Answering instead of reading the body the client is still waiting
         // to send, or after reading part of it, ends the connection.
-        if (request.head.expect != null or !x.bodySettled()) request.head.keep_alive = false;
-        request.head.expect = null;
-        if (request.head.keep_alive) {
-            try x.flushBeforeBody();
-            // Skipped here and not by `std` as it answers, which keeps a
-            // failed read to itself and goes on to write.
-            if (!try x.skipBody()) request.head.keep_alive = false;
-        }
-        // The last read of this request is behind it, whether the handler
-        // read the body or it was skipped. If the connection failed, the
-        // answer is not started: an answer larger than the output buffer
-        // would be a write that a run being cancelled has to wait for.
+        if (head.expect != null or !x.bodySettled()) head.keep_alive = false;
+        head.expect = null;
+        // If the connection failed while the handler read the body, and
+        // the handler went on, the answer is not started: one larger than
+        // the output buffer would be a write that a run being cancelled
+        // has to wait for.
         try x.intact();
-        if (bodyless(code)) {
-            // `std` writes a length or closes the connection. A 204 must
-            // not carry one (RFC 9110, 8.6); a 304 may only carry that of
-            // the representation it does not send, which is not known here.
-            const out = x.server.out;
-            try out.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(code), code.phrase() orelse "" });
-            if (!request.head.keep_alive) try out.writeAll("connection: close\r\n");
-            try out.writeAll("\r\n");
-            return null;
-        }
-        // A 205 has no content (RFC 9110, 15.3.6): its length is zero and
+        // The head is written here and not by `std`, which skips an unread
+        // body first. That read would overwrite the request's head, which
+        // the item being answered may point into.
+        const out = x.server.out;
+        try out.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(code), code.phrase() orelse "" });
+        if (!head.keep_alive) try out.writeAll("connection: close\r\n");
+        // A 204 must not carry a length (RFC 9110, 8.6); a 304 may only
+        // carry that of the representation it does not send, which is not
+        // known here. A 205 has no content (15.3.6): its length is zero and
         // nothing follows its head, whatever it was given.
         const empty = code == .reset_content;
-        const headers = [_]std.http.Header{.{ .name = "content-type", .value = content_type orelse "" }};
-        _ = request.respondStreaming(&.{}, .{
-            .content_length = if (empty) 0 else length,
-            .respond_options = .{
-                .status = code,
-                .keep_alive = request.head.keep_alive,
-                .extra_headers = if (content_type != null and !empty) &headers else &.{},
-            },
-        }) catch |err| switch (err) {
-            error.HttpExpectationFailed => unreachable, // cleared above
-            error.WriteFailed => return error.WriteFailed,
-        };
-        return if (empty or request.head.method == .HEAD) null else x.server.out;
+        if (!bodyless(code)) try out.print("content-length: {d}\r\n", .{if (empty) 0 else length});
+        const content = !bodyless(code) and !empty;
+        if (content) if (content_type) |media| try out.print("content-type: {s}\r\n", .{media});
+        try out.writeAll("\r\n");
+        return if (content and head.method != .HEAD) out else null;
     }
 
     /// Whether the next request can be found behind this one: its body was
-    /// read to the end, it has none, or `std` can skip it.
+    /// read to the end, it has none, or it has a length and can be skipped.
+    ///
+    /// An unread chunked body is not skipped. Where it ends is known by
+    /// parsing its chunks, which is `std`'s to do, and its chunk reader
+    /// overflows on a chunk size of 2^64 - 2 or more: a request to any
+    /// route could then stop a server built with safety checks.
     fn bodySettled(x: *const Exchange) bool {
         const head = &x.request.head;
-        const chunked = head.transfer_encoding != .none;
         return switch (x.server.reader.state) {
             .ready => true,
-            .received_head => if (head.method.requestHasBody())
-                chunked != (head.content_length != null)
-            else
-                !chunked and (head.content_length orelse 0) == 0,
+            .received_head => unread: {
+                if (head.transfer_encoding != .none) break :unread false;
+                const length = head.content_length orelse break :unread !head.method.requestHasBody();
+                break :unread length == 0 or head.method.requestHasBody();
+            },
             else => false,
         };
     }
@@ -420,25 +409,23 @@ const Exchange = struct {
         try x.server.out.flush();
     }
 
-    /// Reads past a body nobody asked for, as `std` would when it answers.
-    /// False when the next request cannot be found behind it. Fails when
-    /// the connection did, which is not the peer's framing: that `std`
-    /// puts on record.
-    fn skipBody(x: *Exchange) error{ReadFailed}!bool {
-        const reader = &x.server.reader;
-        if (reader.state != .received_head) return reader.state == .ready;
-        if (x.request.head.method.requestHasBody()) {
-            const body = x.request.readerExpectContinue(&.{}) catch return false;
-            _ = body.discardRemaining() catch return if (reader.body_err == null) error.ReadFailed else false;
-        } else {
-            reader.state = .ready;
-        }
+    /// Once the pipe is through with a request: reads past a body it left
+    /// unread, and says whether another request may be read from this
+    /// connection. Not before, because the read overwrites the request's
+    /// head, which items in the pipe may point into.
+    fn settle(x: *Exchange) Lost!bool {
+        if (x.broken or !x.request.head.keep_alive) return false;
+        if (x.server.reader.state != .received_head) return true;
+        try x.flushBeforeBody();
+        const body = x.request.readerExpectContinue(&.{}) catch |err| switch (err) {
+            error.HttpExpectationFailed => unreachable, // cleared by `begin`
+            error.WriteFailed => return error.WriteFailed,
+        };
+        // A body with a length, or none where the method has none: all
+        // that can fail is the read. If the peer ended the connection
+        // inside the body, the next read finds that out.
+        _ = body.discardRemaining() catch return error.ReadFailed;
         return true;
-    }
-
-    /// Whether another request may be read from this connection.
-    fn reusable(x: *const Exchange) bool {
-        return !x.broken and x.request.head.keep_alive and x.server.reader.state == .ready;
     }
 
     /// Why reading the body failed: the peer's framing, or the connection.
@@ -456,7 +443,8 @@ fn bodyless(code: Status) bool {
 
 /// A request, as the item of the pipe given to `serve`. It points into the
 /// connection: use it while its push is running, and read the head (path,
-/// query, headers) before the body, which overwrites it.
+/// query, headers) before the body, which overwrites it. Nothing else does
+/// while the push runs.
 pub const Request = struct {
     exchange: *Exchange,
 
@@ -575,11 +563,11 @@ pub const Response = struct {
 ///
 /// The pipe is constructed anew for every connection, with that
 /// connection's `Response` among its dependencies, and finished when the
-/// connection ends. Requests are read while the peer keeps the connection
+/// conversation ends without an error. Requests are read while the peer keeps the connection
 /// alive and the pipe wants more; a request the pipe did not answer is
 /// answered 500. Output is flushed when no further request is waiting in
 /// the read buffer, so pipelined requests share a write; a chunked body is
-/// flushed for before it is read or skipped.
+/// flushed for before it is read.
 ///
 /// A head that does not parse is answered 400, one larger than `head_bytes`
 /// 431, and the connection closed. A connection that breaks fails the push
@@ -704,6 +692,14 @@ fn Serve(comptime P: type) type {
                         if (exchange.request.head.expect) |expectation| {
                             if (std.ascii.eqlIgnoreCase(expectation, "100-continue")) exchange.request.head.expect = "100-continue";
                         }
+                        // An HTTP/1.0 peer is answered and the connection
+                        // closed: it would have to be told that it stays
+                        // open, and it knows no interim response, so its
+                        // expectation is ignored (RFC 9110, 10.1.1).
+                        if (exchange.request.head.version == .@"HTTP/1.0") {
+                            exchange.request.head.keep_alive = false;
+                            exchange.request.head.expect = null;
+                        }
                         exchange.pending = true;
                         const wants_more = try chain.push(Request{ .exchange = exchange }, Closed{}) == .more;
                         // A failure does not always come back as an error:
@@ -712,7 +708,7 @@ fn Serve(comptime P: type) type {
                         // or written to the connection.
                         try exchange.intact();
                         if (exchange.pending) _ = try exchange.begin(.internal_server_error, null, 0);
-                        if (!wants_more or !exchange.reusable()) break;
+                        if (!wants_more or !try exchange.settle()) break;
                     }
                     try chain.finish(Closed{});
                     try out.flush();
@@ -817,8 +813,11 @@ fn Responder(comptime who: []const u8, comptime Answer: type) type {
         pub const zrx_operator = {};
         pub const name = who;
 
-        pub fn Out(comptime Env: type, comptime _: type) type {
+        pub fn Out(comptime Env: type, comptime In: type) type {
             expectProvided(Env, Response, who ++ ": answers a request, so it belongs in the pipe given to `http.serve(...)`; no `http.Response` is provided here");
+            if (Answer.sends_item and In == Request) @compileError(
+                who ++ ": sends its item, and the item here is still the `http.Request`; put a `map(handler)` before it that returns what to send",
+            );
             return End;
         }
 
@@ -847,6 +846,8 @@ pub fn text(comptime format: []const u8) Responder("http.text", Text(format)) {
 
 fn Text(comptime format: []const u8) type {
     return struct {
+        const sends_item = true;
+
         fn send(x: *Exchange, item: anytype) Exchange.Lost!void {
             const args = if (comptime di.isTuple(@TypeOf(item))) item else .{item};
             const out = try x.begin(.ok, "text/plain", std.fmt.count(format, args)) orelse return;
@@ -862,6 +863,8 @@ pub fn json() Responder("http.json", Json) {
 }
 
 const Json = struct {
+    const sends_item = true;
+
     fn send(x: *Exchange, item: anytype) Exchange.Lost!void {
         var scratch: [64]u8 = undefined;
         var counted: Io.Writer.Discarding = .init(&scratch);
@@ -883,6 +886,8 @@ fn Coded(comptime code: Status) type {
         .{@backingInt(code)},
     ));
     return struct {
+        const sends_item = false;
+
         fn send(x: *Exchange, _: anytype) Exchange.Lost!void {
             _ = try x.begin(code, null, 0);
         }

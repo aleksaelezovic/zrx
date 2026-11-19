@@ -347,14 +347,15 @@ test "an answer does not wait for the rest of a request that arrived in part" {
     try converse(api, &.{ .{ .buffer = get_sum ++ post_sum[0 .. post_sum.len - 1] }, .{ .buffer = post_sum[post_sum.len - 1 ..] } }, &wire);
     try std.testing.expectEqual(2, wire.writes);
     try std.testing.expectEqualStrings(both, wire.text());
-    // The same, with a body nobody reads: it is skipped before the answer.
+    // The same, with a body nobody reads: it is skipped once it has been
+    // answered, and both answers are written before the rest is read.
     const unread = "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20";
     try converse(api, &.{ .{ .buffer = get_sum ++ unread[0 .. unread.len - 1] }, .{ .buffer = unread[unread.len - 1 ..] } }, &wire);
-    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqual(1, wire.writes);
     try std.testing.expectEqualStrings(ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open), wire.text());
 }
 
-test "a chunked body is flushed for before it is read or skipped, also when it arrived whole" {
+test "a chunked body is flushed for before it is read, also when it arrived whole" {
     const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
     const both = ok("text/plain", "55") ++ ok("text/plain", "75");
     var wire: Wire = undefined;
@@ -367,14 +368,15 @@ test "a chunked body is flushed for before it is read or skipped, also when it a
     try converse(api, &.{ .{ .buffer = get_sum ++ chunked[0 .. chunked.len - 5] }, .{ .buffer = chunked[chunked.len - 5 ..] } }, &wire);
     try std.testing.expectEqual(2, wire.writes);
     try std.testing.expectEqualStrings(both, wire.text());
-    // The same for one nobody reads, which is skipped before the answer.
+    // One nobody reads is not read at all: it is answered with the
+    // connection closed, and the rest of it is not waited for.
     const unread = "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
-    const refused = ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open);
+    const refused = ok("text/plain", "55") ++ empty("405 Method Not Allowed", .closed);
     try converse(api, &.{.{ .buffer = get_sum ++ unread }}, &wire);
-    try std.testing.expectEqual(2, wire.writes);
+    try std.testing.expectEqual(1, wire.writes);
     try std.testing.expectEqualStrings(refused, wire.text());
-    try converse(api, &.{ .{ .buffer = get_sum ++ unread[0 .. unread.len - 5] }, .{ .buffer = unread[unread.len - 5 ..] } }, &wire);
-    try std.testing.expectEqual(2, wire.writes);
+    try converse(api, &.{.{ .buffer = get_sum ++ unread[0 .. unread.len - 5] }}, &wire);
+    try std.testing.expectEqual(1, wire.writes);
     try std.testing.expectEqualStrings(refused, wire.text());
 }
 
@@ -385,7 +387,59 @@ test "the connection ends when the peer asks to close it" {
 }
 
 test "an HTTP/1.0 request is answered and the connection closed" {
-    try expectAnswer("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55", "GET /sum?a=13&b=42 HTTP/1.0\r\n\r\n");
+    const closed = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n";
+    try expectAnswer(closed ++ "55", "GET /sum?a=13&b=42 HTTP/1.0\r\n\r\n");
+    // Also when it asks to keep the connection: it would wait for an
+    // answer that says so, which an HTTP/1.1 answer does not.
+    try expectAnswer(closed ++ "55", "GET /sum?a=13&b=42 HTTP/1.0\r\nConnection: keep-alive\r\n\r\n" ++ get_sum);
+    // It knows no interim response: its expectation is ignored, and the
+    // body is read without a `100 Continue`.
+    try expectAnswer(closed ++ "75", "POST /sum?a=13&b=42 HTTP/1.0\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n20");
+}
+
+const Named = struct { path: []const u8 };
+
+/// An item that points into the request's head.
+fn named(request: http.Request) Named {
+    return .{ .path = request.path() };
+}
+
+fn pathOf(request: http.Request) []const u8 {
+    return request.path();
+}
+
+/// A request whose body is larger than the read buffer of `converse`, so
+/// that skipping it reads over the head, and a request behind it.
+const long_unread = "POST /no/such/path HTTP/1.1\r\nHost: test\r\nContent-Length: 600\r\n\r\n" ++ times(600, "\"") ++ get_sum;
+
+test "an item that points into the head is answered as it was, whatever body is left unread" {
+    var wire: Wire = undefined;
+    const split = long_unread.len - get_sum.len - 500;
+    const arrivals = [_]std.testing.Reader.Call{ .{ .buffer = long_unread[0..split] }, .{ .buffer = long_unread[split..] } };
+    try converse(.{ map(named), http.json() }, &arrivals, &wire);
+    try std.testing.expectEqualStrings(ok("application/json", "{\"path\":\"/no/such/path\"}") ++ ok("application/json", "{\"path\":\"/sum\"}"), wire.text());
+    try converse(.{ map(pathOf), http.text("{s}") }, &arrivals, &wire);
+    try std.testing.expectEqualStrings(ok("text/plain", "/no/such/path") ++ ok("text/plain", "/sum"), wire.text());
+}
+
+var path_after_answer: [32]u8 = undefined;
+var path_after_answer_len: usize = 0;
+
+fn notePath(request: http.Request) void {
+    path_after_answer_len = request.path().len;
+    @memcpy(path_after_answer[0..path_after_answer_len], request.path());
+}
+
+test "the head can be read after the request was answered, while its push runs" {
+    var wire: Wire = undefined;
+    const answered_then_noted = branch(.{
+        .{http.status(.ok)},
+        .{forEach(notePath)},
+    });
+    path_after_answer_len = 0;
+    try converse(.{answered_then_noted}, &.{.{ .buffer = "POST /noted HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" }}, &wire);
+    try std.testing.expectEqualStrings("/noted", path_after_answer[0..path_after_answer_len]);
+    try std.testing.expectEqualStrings(empty("200 OK", .open), wire.text());
 }
 
 test "a pipe that is done takes no further requests from its connection" {
@@ -481,8 +535,14 @@ test "a body nobody read is skipped, or the connection closed where it cannot be
     try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n");
     // One without framing, or on a method that has none, hides the next request.
     try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\n\r\n" ++ get_sum);
-    // One that turns out not to be a body ends the connection where it stopped.
+    // One the peer ended the connection in is found out once it was answered.
+    try expectAnswer(not_allowed, "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nabc");
+    // A chunked one is not skipped, whatever is in it.
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n" ++ get_sum);
     try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n" ++ get_sum);
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
+    // Not even its chunk sizes are parsed: `std` overflows on this one.
+    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nabc");
     try expectAnswer(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 27\r\ncontent-type: application/json\r\n\r\n{\"message\":\"Hello, World!\"}",
         "GET /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" ++ get_sum,
@@ -621,27 +681,27 @@ const Breaking = struct {
 };
 
 /// Serves a request whose body `sub` leaves unread and which has arrived in
-/// part, from a reader that fails when the rest is asked for.
-fn brokenWhileSkipping(comptime sub: anytype, comptime framing: []const u8) !void {
+/// part, from a reader that fails when the rest is asked for. The request
+/// was answered by then, and `answer` written for the peer who may be
+/// waiting for it.
+fn brokenWhileSkipping(comptime sub: anytype, comptime answer: []const u8) !void {
     var breaking: Breaking = undefined;
-    breaking.init("POST /x HTTP/1.1\r\nHost: test\r\n" ++ framing);
+    breaking.init("POST /x HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nabc");
     var wire: Wire = undefined;
     wire.init();
     const connection: http.Transport = .{ .reader = &breaking.reader, .writer = &wire.writer };
     try std.testing.expectError(error.ReadFailed, program(fromValue(connection), .{http.serve(sub)}).run(.{}));
     try std.testing.expectEqual(@as(usize, 2), breaking.reads);
-    try std.testing.expectEqual(@as(usize, 0), wire.writes);
+    try std.testing.expectEqual(@as(usize, 1), wire.writes);
+    try std.testing.expectEqualStrings(answer, wire.text());
 }
 
-test "a reader that fails while an unread body is skipped ends the conversation without a write" {
-    const with_length = "Content-Length: 10\r\n\r\nabc";
-    const chunked = "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n";
-    // Before an answer with content, one without, and the 500 for a request
-    // the pipe left unanswered.
-    try brokenWhileSkipping(.{http.status(.ok)}, with_length);
-    try brokenWhileSkipping(.{http.status(.ok)}, chunked);
-    try brokenWhileSkipping(.{http.status(.no_content)}, with_length);
-    try brokenWhileSkipping(.{zrx.drain()}, with_length);
+test "a reader that fails while an unread body is skipped fails the conversation" {
+    // After an answer with a length, one without, and the 500 for a
+    // request the pipe left unanswered.
+    try brokenWhileSkipping(.{http.status(.ok)}, empty("200 OK", .open));
+    try brokenWhileSkipping(.{http.status(.no_content)}, "HTTP/1.1 204 No Content\r\n\r\n");
+    try brokenWhileSkipping(.{zrx.drain()}, empty("500 Internal Server Error", .open));
 }
 
 test "an answer that cannot be written breaks the connection, not the run" {
@@ -1486,13 +1546,14 @@ const AbortedOnce = struct {
     }
 };
 
-test "a connection given up before it was accepted is skipped" {
+test "a connection given up before it was accepted is skipped, and its room is free" {
     const Server = struct {
         const served = program(http.connections(), .{
             take(1),
             http.serve(api),
         }).provide(.{
-            http.listen(loopback, .{}),
+            // Room for one: the next connection needs what the first held.
+            http.listen(loopback, .{ .pending = 1 }),
             resource(announce, null),
         });
 

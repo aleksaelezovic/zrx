@@ -22,6 +22,7 @@ pub const cases = .{
     .{ "attempt_not_handler", "attempt: expected a fallback `fn (deps..., err, item) T`, got `comptime_int`" },
     .{ "file_bytes_zero", "fileBytes: needs room for at least one byte at a time; pass a positive comptime size such as `fileBytes(path, 4096)`" },
     .{ "http_responder_outside", "http.text: answers a request, so it belongs in the pipe given to `http.serve(...)`; no `http.Response` is provided here" },
+    .{ "http_responder_request", "http.text: sends its item, and the item here is still the `http.Request`; put a `map(handler)` before it that returns what to send" },
     .{ "http_serve_boundary", "http.serve: the pipe contains a task boundary; a connection is served on one task, so put queue(...) and concurrent(...) around http.serve(...), not inside it" },
     .{ "http_serve_not_pipe", "http.serve: expected an operator tuple `.{ ... }` or `pipe(.{ ... })`, got `ops.sink.Drain`" },
     .{ "http_serve_open", "http.serve: the pipe must answer every request, but it still emits `http.Method`; end it with http.text(...), http.json(), http.status(...) or another terminal operator" },

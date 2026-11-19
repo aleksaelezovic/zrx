@@ -876,7 +876,7 @@ to `serve` carries the requests of one connection.
 | `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
 
 `serve` constructs `sub` anew for every connection and finishes it when the
-connection ends, so its stages hold per-connection state: with an inner
+conversation ends without an error, so its stages hold per-connection state: with an inner
 `take(100)`, no more than 100 requests are taken from a connection. The connection's `http.Response`
 is added to the dependencies of `sub`. That is how the responders and `fail`
 find the request to answer, and why they are rejected outside `serve`. `sub`
@@ -907,7 +907,9 @@ fn sum(request: http.Request) !i64 {
   `ExpectationFailed`. It answers `Expect: 100-continue` itself, in any
   casing of that token.
 - Reading the body overwrites the head. Read the path, query and headers
-  first; call `body` at most once.
+  first; call `body` at most once. Nothing else overwrites it while the
+  push runs: an item that points into the head, such as the path, is still
+  that when it is answered, and after.
 
 ### Answers
 
@@ -955,22 +957,24 @@ error is a cancellation or the connection itself has failed.
 
 A socket whose read or write failed is not read from or written to again,
 also when nobody reported the failure: a handler took the error of `send`
-or `body` and went on, or it happened while an unread body was skipped. An
-answer is not started on it either, however large: `send` and the
-responders return the failure and write nothing. The conversation ends
-there with `error.ReadFailed` or `error.WriteFailed`, or with
-`error.Canceled` if that is what interrupted it.
-
-An `http.Transport` has no such record. A read that fails while an unread
-body is skipped ends its conversation in the same way, with
-`error.ReadFailed` and without an answer. A failure that a handler took
-is not known to `serve`.
+or `body` and went on. An answer is not started on it either, however
+large: `send` and the responders return the failure and write nothing. The
+conversation ends there with `error.ReadFailed` or `error.WriteFailed`, or
+with `error.Canceled` if that is what interrupted it. An `http.Transport`
+has no such record: a failure that a handler took is not known to `serve`.
 
 A connection goes on after an answer when the next request can be found: the
-body was read to its end, or was not read and can be skipped. It is closed
-after an error of `body`, after an answer given while the peer still waits
-for `100 Continue`, and when a request declares a body in a way that cannot
-be skipped (no framing on `POST`, a body on `GET`).
+body was read to its end, or was not read and has a length. Such a body is
+skipped once the pipe is through with the request, and its answer is
+written first if the rest of the body has yet to arrive. A read that fails
+there ends the conversation with `error.ReadFailed`, for a socket and an
+`http.Transport` alike.
+
+The connection is closed after an error of `body`, after an answer given
+while the peer still waits for `100 Continue`, after any answer to an
+HTTP/1.0 request (whose `Expect` is ignored), and when a body was left
+unread that is not skipped: one without framing on `POST`, one on `GET`,
+and a chunked one. A chunked body is read by `body` and by nothing else.
 
 A head that does not parse is answered 400, and one that does not fit the
 connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
@@ -1022,9 +1026,9 @@ Answers are collected in a 4 KiB buffer per connection and written before
 body, that is not whole in its read buffer) and when the connection ends.
 Requests that arrived together and whole (pipelined) are therefore answered
 with one write, as long as their bodies have a length. Where a chunked body
-ends is not looked for in the buffer: `serve` writes what it has answered
-so far before it reads or skips one, also when all of it has arrived. An
-answer never waits for the rest of a request that arrived in part.
+ends is not looked for in the buffer: what was answered so far is written
+before `body` reads one, also when all of it has arrived. An answer never
+waits for the rest of a request that arrived in part.
 
 For a connection that is not a socket, or in a test, give `serve` an
 `http.Transport` instead: a reader and a writer of yours, which it flushes
@@ -1213,7 +1217,11 @@ HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
 connections, no event loop), response headers of your own, streamed bodies,
 path parameters, configurable buffer sizes, TLS and HTTP/2. Parsing is
-`std.http.Server`'s; zrx has no parser of its own.
+`std.http.Server`'s; zrx has no parser of its own. One defect of it is
+known: its chunk reader overflows on a chunk size of 2^64 - 2 or more,
+which stops a program built with safety checks. `serve` never reads a
+chunked body by itself for that reason; `request.body` does, when a
+handler calls it for a chunked request.
 
 Present in the previous implementation and not ported: signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of

@@ -212,13 +212,17 @@ to this file; edit `AGENTS.md`, not copies.
   recorded a failure is not read from or written to again, whether or not
   the failure came back as an error: a second failure would replace the
   record, and a cancellation in it would be lost. `serve` looks after
-  every request and before an answer starts. For the second it skips an
-  unread body itself instead of leaving that to `std` as it answers, which
-  left no moment to look and let an answer larger than the output buffer
-  reach the socket. A read that fails in that skip is returned, for a
-  socket and a transport alike; a failure of the peer's framing there
-  (which `std` records as `body_err`) only closes the connection after
-  the answer. `serve` refuses a request whose `Host` is not in
+  every request and before an answer starts. An unread body is skipped
+  only once the pipe is through with the request, never before or while
+  it is answered: the read overwrites the head, which the item being
+  answered may point into. The independent review before the merge found
+  a `content-length` counted before the skip and content written after
+  it. That is why `begin` writes every head itself and `std`'s
+  `respondStreaming`, which skips first, is not used. A read that fails
+  in the skip is returned, for a socket and a transport alike. An unread
+  chunked body is not skipped but answered with the connection closed:
+  `std`'s chunk reader overflows on a chunk size near 2^64, and that must
+  not be reachable on a route that reads no body. `serve` refuses a request whose `Host` is not in
   order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is
