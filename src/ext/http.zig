@@ -416,14 +416,18 @@ const Exchange = struct {
     fn settle(x: *Exchange) Lost!bool {
         if (x.broken or !x.request.head.keep_alive) return false;
         if (x.server.reader.state != .received_head) return true;
+        // A method without a body has none to skip. Do not ask `std` for
+        // its reader all the same: that is one shared constant, and
+        // discarding from it writes to it, which is a fault where
+        // constants are read-only (Linux, in ReleaseFast).
+        if (!x.request.head.method.requestHasBody()) return true;
         try x.flushBeforeBody();
         const body = x.request.readerExpectContinue(&.{}) catch |err| switch (err) {
             error.HttpExpectationFailed => unreachable, // cleared by `begin`
             error.WriteFailed => return error.WriteFailed,
         };
-        // A body with a length, or none where the method has none: all
-        // that can fail is the read. If the peer ended the connection
-        // inside the body, the next read finds that out.
+        // A body with a length: all that can fail is the read. If the peer
+        // ended the connection inside it, the next read finds that out.
         _ = body.discardRemaining() catch return error.ReadFailed;
         return true;
     }

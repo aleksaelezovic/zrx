@@ -321,6 +321,11 @@ to this file; edit `AGENTS.md`, not copies.
   allocator; suspect this before the library when only Debug fails so.
 - A mutant that does not compile proves nothing: the runner must report a
   failed build as such. Twice a check here passed for that reason.
+- A mutant that survives on one machine does not show its safeguard to be
+  redundant. A check in `serve` kept `std`'s shared constant reader from
+  being written to; every test passed without it on macOS, it was removed
+  as unpinned, and the whole HTTP suite then crashed on Linux in
+  ReleaseFast. Before removing such a check, find out why it is there.
 - A change to the scope or to segments is checked by removing each safeguard
   in turn and seeing a test fail, and by repeating the `flow`, `programs`
   and `extending` suites a few hundred times in Debug and ReleaseFast under
