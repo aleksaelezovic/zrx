@@ -48,10 +48,12 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
             return resources.run(self.bindings, deps, Run{ .program = self });
         }
 
+        pub const zrx_own: Own = .{};
+
         /// What a `system` calls for its members: `env` is an environment
         /// that is already resolved, so every element of it is a value,
         /// whatever its type looks like. The defaults still apply.
-        pub fn runResolved(self: *const Self, env: anytype) !void {
+        fn runResolved(self: *const Self, env: anytype) !void {
             return resources.run(self.bindings, resources.resolved(env), Run{ .program = self });
         }
 
@@ -199,8 +201,10 @@ pub fn System(comptime Ps: type) type {
             return resources.run(.{}, deps, Run{ .system = self });
         }
 
+        pub const zrx_own: Own = .{};
+
         /// A system inside a system: nothing is left to resolve.
-        pub fn runResolved(self: *const @This(), env: anytype) !void {
+        fn runResolved(self: *const @This(), env: anytype) !void {
             return self.runBound(env);
         }
 
@@ -233,11 +237,21 @@ fn Member(comptime P: type, comptime Env: type) type {
     };
 }
 
+/// Marks the programs and systems of this file, as the type of their
+/// `zrx_own`. The type is private to this file, so no runnable of a
+/// caller's own carries the mark, whatever it names its declarations: a
+/// `runResolved` of theirs is theirs, and so is a `zrx_own`.
+const Own = struct {};
+
+fn isOwn(comptime M: type) bool {
+    return @hasDecl(M, "zrx_own") and @TypeOf(M.zrx_own) == Own;
+}
+
 /// Hands a member the environment its system resolved. A program or system
 /// of this library takes it as resolved values. Any other runnable (a type
 /// with `zrx_program` and `run`) is given the tuple itself, as `run` always
 /// was, and never sees how this library marks one.
 fn runMember(member: anytype, env: anytype) !void {
     const M = @TypeOf(member.*);
-    return if (comptime @hasDecl(M, "runResolved")) member.runResolved(env) else member.run(env);
+    return if (comptime isOwn(M)) member.runResolved(env) else member.run(env);
 }
