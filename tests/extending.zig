@@ -143,6 +143,24 @@ test "a custom source" {
     try seen.expect(&.{ 1, 2, 4, 8, 16, 32, 1, 2 });
 }
 
+fn powersBelow(limit: u32) Powers {
+    return .{ .limit = limit };
+}
+
+test "a custom source and operator run once for every item under each" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    const work = pipe(.{
+        zrx.each(powersBelow, .{echoed(0)}),
+        map(zrx.field(.item)),
+        forEach(record),
+    });
+    try program(range(u32, 3, 5), work).run(.{ &seen, &journal });
+    try seen.expect(&.{ 1, 1, 2, 2, 0, 1, 1, 2, 2, 0 });
+    // Constructed, pushed to and finished for each item in turn.
+    try journal.expect("ippfippf");
+}
+
 // --- a composite handler ---------------------------------------------------------
 
 /// A predicate that is true when `predicate` is true for the item plus one.

@@ -57,6 +57,11 @@ pub const when = flow.when;
 pub const otherwise = flow.otherwise;
 pub const concurrent = @import("ops/concurrent.zig").concurrent;
 
+// Sub-pipes within one item
+const nested = @import("ops/nested.zig");
+pub const each = nested.each;
+pub const attempt = nested.attempt;
+
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;
 pub const debounce = timing.debounce;
@@ -95,6 +100,8 @@ pub const Line = io.Line;
 pub const lines = io.lines;
 pub const stdinLines = io.stdinLines;
 pub const fileLines = io.fileLines;
+pub const fileBytes = io.fileBytes;
+pub const FileBytes = io.FileBytes;
 
 /// Modules built on the contracts below. Each is compiled only when used.
 pub const ext = struct {

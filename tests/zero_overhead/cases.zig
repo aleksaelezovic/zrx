@@ -566,3 +566,102 @@ pub fn required(comptime with_zrx: bool, items: []const u32, rejected: *u32, out
 export fn same_require(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
     required(exported_with_zrx, ptr[0..len], rejected, out);
 }
+
+// --- each ---------------------------------------------------------------------------------------
+
+/// Some values and what their sum counts for.
+pub const Group = extern struct { ptr: [*]const u32, len: usize, weight: u32 };
+
+const Values = @TypeOf(fromSlice(@as([]const u32, &.{})));
+
+fn valuesOf(group: Group) Values {
+    return fromSlice(group.ptr[0..group.len]);
+}
+fn weighted(sum: zrx.Tagged(Group, u64)) u64 {
+    return sum.item *% sum.source.weight;
+}
+
+/// For every group, the sum of its large values times its weight.
+pub fn nested(comptime with_zrx: bool, groups: []const Group, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.each(valuesOf, .{ filter(isLarge), fold(@as(u64, 0), add) }),
+            map(weighted),
+            fold(@as(u64, 0), addWide),
+            forEach(store),
+        });
+        run(program(fromSlice(groups), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (groups) |group| {
+            var inner: u64 = 0;
+            for (group.ptr[0..group.len]) |value| {
+                if (value >= 6) inner +%= value;
+            }
+            sum +%= inner *% group.weight;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_each(ptr: [*]const Group, len: usize, out: *u64) void {
+    nested(exported_with_zrx, ptr[0..len], out);
+}
+
+// --- attempt ------------------------------------------------------------------------------------
+
+/// Small values count for half; the others are tripled.
+pub fn attempted(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| sum +%= if (value < 10) value / 2 else value *% 3;
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`: the pipeline pushes on from two places, the sub-pipe
+/// and the fallback, and the optimizer keeps the branch between them where
+/// the loop's one expression becomes a select. Three instructions more.
+export fn lean_attempt(ptr: [*]const u32, len: usize, out: *u64) void {
+    attempted(exported_with_zrx, ptr[0..len], out);
+}
+
+fn capped(value: u32) error{TooLarge}!u32 {
+    if (value > 1000) return error.TooLarge;
+    return value;
+}
+
+/// The same with a pipe after the `attempt` that can fail. Its failure is
+/// not the sub-pipe's, and telling the two apart must cost nothing.
+pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            map(capped),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        program(fromSlice(items), total).run(.{Result{ .out = out }}) catch return false;
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            const counted = if (value < 10) value / 2 else value *% 3;
+            if (counted > 1000) return false;
+            sum +%= counted;
+        }
+        out.* = sum;
+    }
+    return true;
+}
+
+/// `lean` for the same reason, with the comparison of `capped` on both paths.
+export fn lean_attempt_failing(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return attemptedCapped(exported_with_zrx, ptr[0..len], out);
+}

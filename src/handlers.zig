@@ -125,6 +125,27 @@ pub fn compose(comptime handlers: anytype) type {
     };
 }
 
+/// Whether a fallback's error parameter of type `Takes` takes every error it
+/// can be handed: all of `E`, except `Canceled`, which is never handed over.
+pub fn takesAll(comptime Takes: type, comptime E: type) bool {
+    if (@typeInfo(Takes) != .error_set) return false;
+    const takes = @typeInfo(Takes).error_set.error_names orelse return true; // anyerror
+    const names = @typeInfo(E).error_set.error_names orelse return false;
+    next: for (names) |name| {
+        if (std.mem.eql(u8, name, "Canceled")) continue;
+        for (takes) |have| if (std.mem.eql(u8, have, name)) continue :next;
+        return false;
+    }
+    return true;
+}
+
+/// Whether `E` holds a cancellation, which is not a failure to fall back from.
+pub fn canCancel(comptime E: type) bool {
+    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+    for (names) |name| if (std.mem.eql(u8, name, "Canceled")) return true;
+    return false;
+}
+
 /// `handler`, with a failure turned into a value: when `handler` returns an
 /// error, the result is `fallback(deps..., err, item)` instead. Where `recover`
 /// skips an item that failed, this keeps it, as whatever the fallback makes.
@@ -167,27 +188,6 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
         /// The fallback's data: the error, then the handler's own data.
         fn WithError(comptime Args: []const type) []const type {
             return &[_]type{Given(Args)} ++ Args;
-        }
-
-        /// Whether the fallback's error parameter takes every error it can be
-        /// handed: all the handler's, except `Canceled`, which is never handed over.
-        fn takesAll(comptime Takes: type, comptime E: type) bool {
-            if (@typeInfo(Takes) != .error_set) return false;
-            const takes = @typeInfo(Takes).error_set.error_names orelse return true; // anyerror
-            const names = @typeInfo(E).error_set.error_names orelse return false;
-            next: for (names) |name| {
-                if (std.mem.eql(u8, name, "Canceled")) continue;
-                for (takes) |have| if (std.mem.eql(u8, have, name)) continue :next;
-                return false;
-            }
-            return true;
-        }
-
-        /// Whether the handler can report a cancellation, which is not a failure to fall back from.
-        fn canCancel(comptime E: type) bool {
-            const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
-            for (names) |name| if (std.mem.eql(u8, name, "Canceled")) return true;
-            return false;
         }
 
         /// What the fallback returns, which must be what the handler would

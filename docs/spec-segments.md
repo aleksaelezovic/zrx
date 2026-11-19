@@ -41,6 +41,7 @@ without a test does not belong in this list. Nothing is promised about a
 moment inside the run.
 
 1. **On success**, every stage instance with a `finish` hook has finished exactly once.
+   The stages of an `each` sub-pipe are instances per item: see 14.
    *Tests: "the end of the stream travels with the data", "queued sub-pipes of
    a branch each finish once", the six "invariants" (`tests/flow.zig`).*
 2. **On an error**, `run` returns it. A segment may have finished before
@@ -151,6 +152,30 @@ moment inside the run.
     once", "one completed concurrent worker leaves input open for the
     others", and the four concurrent "invariants" (`tests/flow.zig`).*
 
+14. **Per-item sub-pipes.** For every item, `each(source_of, sub)`
+    constructs the stages of `sub`, runs the source made from the item into
+    them and finishes them once, before the push of that item returns. When
+    `source_of`, the source or `sub` fails for an item, that item's stages
+    are not finished, also when a `recover` or an `attempt` then handles the
+    failure. A sub-pipe that is done ends its item only; when the pipe after
+    the `each` is done, the item's source is answered `.done` and so is the
+    stage before the `each`. `attempt(sub, fallback)` emits the fallback for
+    an item `sub` fails on, except for `error.Canceled`; a failure of the
+    pipe after it, or of `sub`'s own end of stream, is what `run` returns,
+    and the fallback is not asked.
+    *Tests: "each runs a fresh sub-pipe over the source made from every
+    item", "a sub-pipe that is done ends its item, not the stream", "once the
+    pipe after each is done, the item's source stops and so does the stream",
+    "a failure in the sub-pipe fails the run, and that item's sub-pipe is not
+    finished", "attempt emits the fallback in place of an item its sub-pipe
+    fails on", "a failure of the pipe after an attempt passes through,
+    whatever its name", "a recover inside the sub-pipe does not see a failure
+    of the pipe after the attempt", "attempt falls back from failures but
+    never from a cancellation", "a failure of the sub-pipe's own end of
+    stream is not an item's", "attempt around each: an item whose source or
+    sub-pipe fails becomes one value" (`tests/nested.zig`), and the four
+    "invariants" with an `each` or an `attempt` (`tests/flow.zig`).*
+
 ## Not promised
 
 A review finding against one of these is answered by pointing here.
@@ -169,6 +194,10 @@ A review finding against one of these is answered by pointing here.
   `merge` whose pipe is done, comes first.
 - That no handler runs for a final value once a later stage is done. Stages
   between the one that emits it and the one that is done may run for it.
+  This includes the final value of an `each` sub-pipe whose item was cut
+  short because the pipe after the `each` is done.
+- That an `attempt` takes back what its sub-pipe emitted for an item before
+  it failed, or undoes what the item did to the state of its stages.
 - That nothing of a segment's end runs after a failure elsewhere. A segment
   decides to end its stream right before it does; an end that has begun is
   cancelled, not undone.
@@ -282,6 +311,9 @@ lock, right before what it allows and after every step that can take time.
   ends. The continuation returning `.done` or the last worker reaching its
   own input limit closes input and withdraws demand. Scope retirement closes
   input and wakes the coordinator's wait.
+- **A stage whose sub-pipe runs within one push** (`each`, `attempt`)
+  declares none of these: it rejects a sub-pipe with a boundary, so it has
+  no tasks to pass on.
 - `src/pipe.zig` knows these markers and hooks, not `queue`.
 
 ## Stopping from outside

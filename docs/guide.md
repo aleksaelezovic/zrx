@@ -69,7 +69,8 @@ Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
 
 Where a pipe is expected, pass an inline operator tuple or a constructed
 `pipe(...)` value. This applies to `program`, each child of `branch`, and the
-sub-pipes of `when` and `otherwise`. Both forms construct the same pipe;
+sub-pipes of `when`, `otherwise`, `concurrent`, `each` and `attempt`. Both
+forms construct the same pipe;
 `pipe(...)` is useful for named, reusable compositions. Bare operators are
 rejected; wrap even a single operator in `.{ ... }`.
 
@@ -166,6 +167,7 @@ so the `Io` must be able to run tasks concurrently; with one that cannot,
 | `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
 | `mergeTagged(T, .{ .a = x, .b = y })` | `merge`, with every item marked by the source it came from; see [below](#knowing-where-an-item-came-from). |
 | `lines(Role, n)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
+| `fileBytes(path, n)` | The bytes of a file, at most `n` at a time; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
 
@@ -238,6 +240,13 @@ Flow:
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
 | `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
 
+Within one item:
+
+| Operator | Effect |
+|---|---|
+| `each(source_of, sub)` | Runs a fresh `sub` over the source that `source_of(deps..., item)` returns, and emits what `sub` emits, paired with the item. See [each](#each). |
+| `attempt(sub, fallback)` | Runs `sub`; when it fails for an item, emits `fallback(deps..., err, item)` in its place. See [Errors](#errors). |
+
 Terminal:
 
 | Operator | Effect |
@@ -264,6 +273,67 @@ fold(0, add),
 ```
 
 An item no case takes is dropped. Each case has its own stage state.
+
+### each
+
+A program has one source. `each` gives every *item* one. For an item,
+`source_of(deps..., item)` returns a source; a fresh copy of the sub-pipe
+runs over that source to its end; what the sub-pipe emits goes on down the
+pipe. Here a path becomes its bytes, the bytes become one digest, and the
+pipe carries on with a row:
+
+```zig
+const read_bytes = 32 * 1024;
+
+/// The running digest of one file.
+const Hash = struct {
+    sha: Sha256 = .init(.{}),
+    bytes: u64 = 0,
+
+    fn update(hash: Hash, piece: []const u8) Hash { ... }
+};
+
+fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+    return fileBytes(path, read_bytes);
+}
+
+fn described(file: zrx.Tagged([]const u8, Hash)) Row { ... }
+
+const digest = pipe(.{fold(Hash{}, Hash.update)});
+
+/// path -> its bytes -> one digest -> a row
+const hashed = pipe(.{
+    each(bytesOf, digest),
+    map(described),
+});
+```
+
+- **State in the sub-pipe lasts one item.** Its stages are constructed when
+  the item arrives and finished when the item's source has ended: the `fold`
+  above emits once per file, and a `take(3)` there would limit every file to
+  three pieces. A sub-pipe that is done ends its item, and the next item
+  starts afresh. Only the pipe *after* `each` being done stops the stream.
+- **What goes on is `Tagged(Item, T)`**, a struct with the fields `source`
+  (the item the sub-pipe ran for) and `item` (what it emitted). `Item` is
+  the type `source_of` declares for its parameter, so a pipe written for
+  `[]const u8` emits the same type whether it is fed `[]const u8` or the
+  `[:0]const u8` of a command line. If that parameter is `anytype`, it is
+  the item's own type.
+- **Everything for an item happens within its push**, on the task that
+  pushed it. The sub-pipe is therefore synchronous: it cannot contain a task
+  boundary, and it must emit something (it cannot end in a terminal
+  operator). To work on several items at once, put the `each` inside
+  `concurrent`.
+- **The source is any source**: `fromSlice`, `range`, `fileBytes`, one of
+  your own. `source_of` takes dependencies like any handler and may fail. It
+  has to name the type it returns: `zrx.FileBytes(n)` for `fileBytes`, and
+  for the other built-in sources, whose types have no public name yet,
+  `@TypeOf(range(u32, 0, 0))`.
+- A failure of `source_of`, of the source or of the sub-pipe fails the run
+  like any handler error, and that item's sub-pipe is not finished. To turn
+  the failure into a value instead, wrap the `each` in
+  [`attempt`](#errors). The full statement is guarantee 14 of
+  [the segments spec](spec-segments.md#guarantees).
 
 ## Handler combinators
 
@@ -305,12 +375,42 @@ after every resource has been released. `run`'s error set is inferred from your
 handlers and the operators you used: it is `anyerror` only if a handler's is,
 and a program whose handlers cannot fail has an empty one.
 
-There are two ways to handle an error instead. To keep the item as a value of
-your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
+There are three ways to handle an error instead. To keep the item as a value
+of your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `rejected(deps..., err, item)` when `parse` fails and passes its result on.
 `require` goes the other way, from a value to an error:
 `map(require(isPlausible, error.InvalidReading))` fails an item that
 `filter(isPlausible)` would drop without a trace.
+
+When what fails is not one handler but several operators, wrap them:
+`attempt(sub, fallback)` is `orElse` for a sub-pipe. When `sub` fails for an
+item, `fallback(deps..., err, item)` is emitted in its place, with the item
+as it was at the `attempt`.
+
+```zig
+/// A file that cannot be hashed is still a row.
+fn failed(err: anyerror, path: []const u8) Row { ... }
+
+const manifest = pipe(.{
+    concurrent(4, .{attempt(hashed, failed)}),
+    forEach(save),
+});
+```
+
+- The rules are `orElse`'s. The fallback returns what the sub-pipe emits.
+  Its error parameter must take every error the sub-pipe can fail with
+  (`anyerror` always does); `error.Canceled` is never handed to it. What it
+  handles is no longer in `run`'s error set.
+- What the sub-pipe had already emitted for the item is not taken back, and
+  its stages keep whatever state the item gave them.
+- A failure of the pipe *after* the `attempt` is not the sub-pipe's. It
+  fails the run as it would without the `attempt`, the fallback is not
+  asked, and a `recover` inside the sub-pipe does not see it.
+- The sub-pipe keeps its state for the whole stream, like a case of a
+  `route`. A failure at its end of the stream does not belong to an item and
+  fails the run.
+- The sub-pipe cannot contain a task boundary: a failure beyond one happens
+  on another task.
 
 To drop the item, put `recover(handler)` before the operators that may
 fail. When one of them fails for an item, the handler receives the error and
@@ -438,7 +538,8 @@ branch(.{
   `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a task boundary (the
   pipe after the route would be pushed to from two tasks). Put the boundary
-  after the route.
+  after the route. The sub-pipes of `each` and `attempt` cannot either: what
+  they do for an item is over when the push of that item returns.
 - When the stages after a boundary are done, the segment before it finds out
   at its next push. A producer that asks for `zrx.Stop` can also observe that
   its consumers have finished while it waits for input.
@@ -624,6 +725,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
+| `fileBytes(path, n)` | Source: the bytes of a file, in pieces of at most `n`. |
 
 `stdout`, `stderr`, `fileWriter` and `fileReader` are bindings: give them
 to `provide` or to `run`. A file
@@ -704,6 +806,15 @@ arrays for both. For `lines(Role, n)`, use a reader buffer of at least
 `error.StreamTooLong`, the reader stays at the start of the rejected line.
 You can retry with a larger limit if the reader has room.
 
+`fileBytes(path, n)` emits `[]const u8`: pieces of the file in order, none
+empty and none longer than `n`. A piece is a slice into the source's own
+buffer and is valid until the push that carries it returns. Reduce the
+pieces as they pass (`fold`), or copy what must be kept: do not send a piece
+across a `queue` or keep it in a `batch`. An empty file emits nothing. A read that
+fails makes the run fail with the error the system reported, such as
+`error.InputOutput`. `zrx.FileBytes(n)` names the source's type, for a
+handler that returns one.
+
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
@@ -720,6 +831,9 @@ A run goes through these steps:
    from `fold` and `batch` are pushed downstream here.
 4. After the tasks have joined, release acquired resources in reverse
    order, including after a failed run or a partial acquisition.
+
+The stages of an `each` sub-pipe go through steps 2 and 3 once for every
+item, within the push of that item.
 
 ## Writing your own
 
@@ -825,8 +939,9 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Sixteen are `same`; `take`, `batch`
-and the handler combinators are `lean`, each with the reason next to it.
+Every synchronous operator has a fixture. Seventeen are `same`; `take`, `batch`,
+the handler combinators and `attempt` are `lean`, each with the reason next
+to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it
@@ -848,6 +963,10 @@ Two things make it work, and are worth knowing when writing an operator:
 
 Stopping a source from outside, so that a signal or a timeout ends a run
 gracefully, is proposed in [the segments spec](spec-segments.md).
+
+A resource acquired for one item (opened before the item's sub-pipe and
+released after it) is not here. `each` covers the case where the item
+becomes a stream.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

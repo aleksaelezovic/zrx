@@ -348,3 +348,41 @@ fn FileLines(comptime max_line_bytes: usize) type {
         }
     };
 }
+
+/// The bytes of the file at `path`, at most `max_bytes` at a time, opened
+/// when the source runs and closed when it ends. An item is a slice into
+/// the source's own buffer: it is valid until the push that carries it
+/// returns, so a stage that keeps bytes copies them. A failed read fails
+/// the run with the error the system reported. Needs `std.Io`.
+pub fn fileBytes(path: []const u8, comptime max_bytes: usize) FileBytes(max_bytes) {
+    return .{ .path = path };
+}
+
+/// The type of `fileBytes(path, max_bytes)`, for a handler that returns one.
+pub fn FileBytes(comptime max_bytes: usize) type {
+    if (max_bytes == 0) @compileError("fileBytes: needs room for at least one byte at a time; pass a positive comptime size such as `fileBytes(path, 4096)`");
+    return struct {
+        path: []const u8,
+
+        pub const zrx_source = {};
+        pub const Item = []const u8;
+
+        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
+            comptime expectProvided("fileBytes", @TypeOf(env), Io);
+            const io = di.get(env, Io);
+            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [max_bytes]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            while (true) {
+                const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+                    error.EndOfStream => return,
+                    // The reader keeps what went wrong to itself.
+                    error.ReadFailed => return reader.err orelse err,
+                };
+                if (try down.push(bytes) == .done) return;
+                reader.interface.toss(bytes.len);
+            }
+        }
+    };
+}
