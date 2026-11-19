@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [record-processor, audit-archive]
+        app: [record-processor, audit-archive, file-integrity-manifest]
     defaults:
       run:
         shell: bash

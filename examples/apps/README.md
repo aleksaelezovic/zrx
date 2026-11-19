@@ -8,6 +8,7 @@ library's root build.
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
 | [Audit archive](audit-archive/README.md) | A JSONL export checked and archived in order, with a slow archive holding the reader back (`batch`, `queue`) |
+| [File integrity manifest](file-integrity-manifest/README.md) | SHA-256 of each file, four at a time, with a row for every file that could not be hashed (`concurrent`, `each`, `attempt`) |
 
 ## Project boundary
 
