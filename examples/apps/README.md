@@ -10,6 +10,7 @@ library's root build.
 | [Audit archive](audit-archive/README.md) | A JSONL export checked and archived in order, with a slow archive holding the reader back (`batch`, `queue`) |
 | [File integrity manifest](file-integrity-manifest/README.md) | SHA-256 of each file, four at a time, with a row for every file that could not be hashed (`concurrent`, `each`, `attempt`) |
 | [Multi-file log analyzer](multi-file-log-analyzer/README.md) | Two logs read together, failures to an alerts file and counters per log (`mergeTagged`) |
+| [Offline telemetry](offline-telemetry/README.md) | Two sensor feeds as two programs, alerts as they are seen and timed windows archived (`system`, `route`, `batchWithin`) |
 
 ## Project boundary
 
