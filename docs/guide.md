@@ -531,6 +531,55 @@ the producer. Debounce holds one pending item plus any item already being
 delivered. Retained slices and pointers need backing storage that lives
 through their use, as with `batch` and `queue`.
 
+#### Testing timed operators
+
+A test should not wait 60 seconds for a batch, nor guess how long is long
+enough. `zrx.testing.Clock` wraps a `std.Io` and keeps its `.awake` clock
+still until the test moves it. The operators take time from the program's
+`Io`, so pass `clock.io()` to `run`:
+
+```zig
+fn collectWindows(timed: std.Io, input: *Input, windows: *Windows) !void {
+    try program(fromProducer(u32, Input.produce), pipe(.{
+        batchWithin(8, .fromMilliseconds(200)),
+        forEach(Windows.collect),
+    })).run(.{ timed, input, windows });
+}
+
+test "three readings make one window while the source is open" {
+    const io = std.testing.io;
+    var clock: zrx.testing.Clock = .init(io);
+    // ... `input` feeds the source one item at a time, `windows` is a queue
+    var run = try io.concurrent(collectWindows, .{ clock.io(), &input, &windows });
+    defer _ = run.cancel(io) catch {};
+
+    for ([_]u32{ 7, 8, 9 }) |reading| try input.send(reading);
+    try clock.waitingAt(.fromMilliseconds(200));
+    clock.advanceTo(.fromMilliseconds(200));
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, (try windows.seen.getOne(io)).slice());
+}
+```
+
+Times are durations since `Clock.init`. `waitingAt(t)` returns once a task
+is in a timed wait whose deadline is `t`: for `batchWithin` that is the
+first item of a batch plus its age, for `debounce` the latest item plus the
+quiet period. That is the event to wait on, in place of a sleep, before
+moving the clock or asserting that nothing has been emitted. `advanceTo(t)`
+sets the time, never backwards, and wakes the waits to look again. The whole
+test, with `Input` and `Windows`, is in
+[`tests/timing.zig`](../tests/timing.zig).
+
+The clock is a value the test owns: declare one per test, keep it in place,
+and let it outlive the run. It covers reads of `.awake` and timed waits on
+`.awake` made through `clock.io()`, and nothing else:
+
+- `io.sleep`, the other clocks (`.real`, `.boot`) and `std.time` run on real
+  time, as does a handler that uses another `Io`.
+- A timed wait is woken only through `clock.io()`. A test that sets an event
+  some handler waits on with a timeout must set it through the clock's `Io`.
+- It does not make a source deterministic. The test still decides when items
+  arrive, as `input.send` does above.
+
 ## Input and output
 
 Readers and writers are dependencies. A *role* is the type one is keyed by:

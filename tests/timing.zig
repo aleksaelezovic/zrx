@@ -4,101 +4,7 @@ const zrx = @import("zrx");
 const Io = std.Io;
 const io = std.testing.io;
 
-/// Only timed futex waits use the manual clock. A waiter registers before
-/// checking the futex value, so a concurrent signal cannot be lost. Ordinary
-/// waits, task startup and cancellation use the testing Io.
-const Clock = struct {
-    var inner: Io = undefined;
-    var vtable: Io.VTable = undefined;
-    var time: std.atomic.Value(i64) = .init(0);
-    var mutex: Io.Mutex = .init;
-    var changed: Io.Event = .unset;
-    var waiters: ?*Waiter = null;
-
-    const Waiter = struct {
-        ptr: *const u32,
-        deadline: i96,
-        ready: Io.Event = .unset,
-        next: ?*Waiter,
-    };
-
-    fn start() Io {
-        inner = io;
-        vtable = inner.vtable.*;
-        vtable.now = now;
-        vtable.futexWait = wait;
-        vtable.futexWake = wake;
-        time.store(0, .seq_cst);
-        mutex = .init;
-        changed = .unset;
-        std.debug.assert(waiters == null);
-        return .{ .userdata = inner.userdata, .vtable = &vtable };
-    }
-
-    fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
-        if (clock == .awake) return .fromNanoseconds(time.load(.seq_cst));
-        return inner.vtable.now(userdata, clock);
-    }
-
-    fn wait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
-        const deadline = switch (timeout) {
-            .deadline => |at| if (at.clock == .awake) at.raw.nanoseconds else return inner.vtable.futexWait(userdata, ptr, expected, timeout),
-            else => return inner.vtable.futexWait(userdata, ptr, expected, timeout),
-        };
-        var waiter: Waiter = .{ .ptr = ptr, .deadline = deadline, .next = null };
-        mutex.lockUncancelable(inner);
-        if (@atomicLoad(u32, ptr, .acquire) != expected or time.load(.seq_cst) >= deadline) {
-            mutex.unlock(inner);
-            return;
-        }
-        waiter.next = waiters;
-        waiters = &waiter;
-        changed.set(inner);
-        mutex.unlock(inner);
-        defer {
-            mutex.lockUncancelable(inner);
-            defer mutex.unlock(inner);
-            var link = &waiters;
-            while (link.*.? != &waiter) link = &link.*.?.next;
-            link.* = waiter.next;
-        }
-        try waiter.ready.wait(inner);
-    }
-
-    fn wake(userdata: ?*anyopaque, ptr: *const u32, count: u32) void {
-        mutex.lockUncancelable(inner);
-        var it = waiters;
-        while (it) |waiter| : (it = waiter.next) {
-            if (waiter.ptr == ptr) waiter.ready.set(inner);
-        }
-        mutex.unlock(inner);
-        inner.vtable.futexWake(userdata, ptr, count);
-    }
-
-    fn advance(seconds: i64) void {
-        mutex.lockUncancelable(inner);
-        defer mutex.unlock(inner);
-        time.store(seconds * std.time.ns_per_s, .seq_cst);
-        var it = waiters;
-        while (it) |waiter| : (it = waiter.next) waiter.ready.set(inner);
-    }
-
-    fn waitingAt(seconds: i64) !void {
-        while (true) {
-            changed.reset();
-            mutex.lockUncancelable(inner);
-            var it = waiters;
-            while (it) |waiter| : (it = waiter.next) {
-                if (waiter.deadline == @as(i96, seconds) * std.time.ns_per_s and !waiter.ready.isSet()) {
-                    mutex.unlock(inner);
-                    return;
-                }
-            }
-            mutex.unlock(inner);
-            try changed.wait(inner);
-        }
-    }
-};
+const Clock = zrx.testing.Clock;
 
 const Input = struct {
     const Action = union(enum) { item: u32, end, fail };
@@ -171,17 +77,89 @@ fn Run(comptime op: anytype) type {
     };
 }
 
+/// What a test outside this repository can write: see "Testing timed
+/// operators" in the guide, which shows this test.
+const Window = zrx.Batch(u32, 8);
+
+const Windows = struct {
+    slots: [2]Window = undefined,
+    seen: Io.Queue(Window) = undefined,
+
+    fn init(self: *Windows) void {
+        self.seen = .init(&self.slots);
+    }
+
+    fn collect(self: *Windows, window: Window) !void {
+        try self.seen.putOne(io, window);
+    }
+};
+
+fn collectWindows(timed: Io, input: *Input, windows: *Windows) !void {
+    try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{
+        zrx.batchWithin(8, .fromMilliseconds(200)),
+        zrx.forEach(Windows.collect),
+    })).run(.{ timed, input, windows });
+}
+
+test "zrx.testing.Clock lets a test assert the exact batch of a source that is still open" {
+    var clock: zrx.testing.Clock = .init(io);
+    var input: Input = .{};
+    input.init();
+    var windows: Windows = .{};
+    windows.init();
+    var run = try io.concurrent(collectWindows, .{ clock.io(), &input, &windows });
+    defer _ = run.cancel(io) catch {};
+
+    for ([_]u32{ 7, 8, 9 }) |reading| try input.send(reading);
+    try clock.waitingAt(.fromMilliseconds(200));
+    clock.advanceTo(.fromMilliseconds(200));
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, (try windows.seen.getOne(io)).slice());
+
+    // The source is open: its next item starts a window at the new time.
+    try input.send(10);
+    try clock.waitingAt(.fromMilliseconds(400));
+    try input.actions.putOne(io, .end);
+    try run.await(io);
+    try std.testing.expectEqualSlices(u32, &.{10}, (try windows.seen.getOne(io)).slice());
+}
+
+test "zrx.testing.Clock times a wait given as a duration from the time it has" {
+    var clock: zrx.testing.Clock = .init(io);
+    clock.advanceTo(.fromSeconds(3));
+    var event: Io.Event = .unset;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+    var waiting = try io.concurrent(Io.Event.waitTimeout, .{ &event, clock.io(), timeout });
+    defer _ = waiting.cancel(io) catch {};
+    try clock.waitingAt(.fromSeconds(8));
+    clock.advanceTo(.fromSeconds(8));
+    try std.testing.expectError(error.Timeout, waiting.await(io));
+}
+
+test "zrx.testing.Clock returns at once from a wait that is already over" {
+    var clock: zrx.testing.Clock = .init(io);
+    const timed = clock.io();
+    clock.advanceTo(.fromSeconds(2));
+    const past: Io.Timeout = .{ .deadline = Io.Timestamp.zero.addDuration(.fromSeconds(1)).withClock(.awake) };
+    const later: Io.Timeout = .{ .deadline = Io.Timestamp.zero.addDuration(.fromSeconds(3)).withClock(.awake) };
+    var word: u32 = 1;
+    // The deadline has passed. A wait that started now would miss the
+    // advance that was meant to end it.
+    try timed.futexWaitTimeout(u32, &word, 1, past);
+    // The value has changed. Its wake came before this wait and is not repeated.
+    try timed.futexWaitTimeout(u32, &word, 0, later);
+}
+
 test "batchWithin emits 900 of 1000 while the source is idle" {
-    const clock = Clock.start();
+    var clock: Clock = .init(io);
     var input: Input = .{};
     input.init();
     var output: Output = .{};
     output.init();
-    var run = try io.concurrent(Run(zrx.batchWithin(1000, .fromSeconds(60))).run, .{ clock, &input, &output });
+    var run = try io.concurrent(Run(zrx.batchWithin(1000, .fromSeconds(60))).run, .{ clock.io(), &input, &output });
     defer _ = run.cancel(io) catch {};
     for (0..900) |index| try input.send(@intCast(index));
-    try Clock.waitingAt(60);
-    Clock.advance(60);
+    try clock.waitingAt(.fromSeconds(60));
+    clock.advanceTo(.fromSeconds(60));
     try output.expect(900, 0, 899);
     try input.actions.putOne(io, .end);
     try run.await(io);
@@ -190,55 +168,55 @@ test "batchWithin emits 900 of 1000 while the source is idle" {
 }
 
 test "batchWithin keeps the first deadline and starts a new one after emission" {
-    const clock = Clock.start();
+    var clock: Clock = .init(io);
     var input: Input = .{};
     input.init();
     var output: Output = .{};
     output.init();
-    var run = try io.concurrent(Run(zrx.batchWithin(3, .fromSeconds(60))).run, .{ clock, &input, &output });
+    var run = try io.concurrent(Run(zrx.batchWithin(3, .fromSeconds(60))).run, .{ clock.io(), &input, &output });
     defer _ = run.cancel(io) catch {};
     // An empty batch has no deadline. Its first item arrives at t=100.
-    Clock.advance(100);
+    clock.advanceTo(.fromSeconds(100));
     try input.send(1);
-    try Clock.waitingAt(160);
-    Clock.advance(130);
+    try clock.waitingAt(.fromSeconds(160));
+    clock.advanceTo(.fromSeconds(130));
     try input.send(2);
-    try Clock.waitingAt(160);
-    Clock.advance(160);
+    try clock.waitingAt(.fromSeconds(160));
+    clock.advanceTo(.fromSeconds(160));
     try output.expect(2, 1, 2);
     try input.send(3);
     try input.send(4);
     try input.send(5);
     try output.expect(3, 3, 5);
-    Clock.advance(180);
+    clock.advanceTo(.fromSeconds(180));
     try input.send(6);
-    try Clock.waitingAt(240);
+    try clock.waitingAt(.fromSeconds(240));
     try input.actions.putOne(io, .end);
     try run.await(io);
     try output.expect(1, 6, 6);
 }
 
 test "debounce restarts its deadline and emits the latest item during source silence" {
-    const clock = Clock.start();
+    var clock: Clock = .init(io);
     var input: Input = .{};
     input.init();
     var output: Output = .{};
     output.init();
-    var run = try io.concurrent(Run(zrx.debounce(.fromSeconds(10))).run, .{ clock, &input, &output });
+    var run = try io.concurrent(Run(zrx.debounce(.fromSeconds(10))).run, .{ clock.io(), &input, &output });
     defer _ = run.cancel(io) catch {};
     try input.send(1);
-    try Clock.waitingAt(10);
-    Clock.advance(5);
+    try clock.waitingAt(.fromSeconds(10));
+    clock.advanceTo(.fromSeconds(5));
     try input.send(2);
-    try Clock.waitingAt(15);
-    Clock.advance(10);
-    try Clock.waitingAt(15);
+    try clock.waitingAt(.fromSeconds(15));
+    clock.advanceTo(.fromSeconds(10));
+    try clock.waitingAt(.fromSeconds(15));
     var extra: [1]Result = undefined;
     try std.testing.expectEqual(@as(usize, 0), try output.results.get(io, &extra, 0));
-    Clock.advance(15);
+    clock.advanceTo(.fromSeconds(15));
     try output.expect(1, 2, 2);
     try input.send(3);
-    try Clock.waitingAt(25);
+    try clock.waitingAt(.fromSeconds(25));
     try input.actions.putOne(io, .end);
     try run.await(io);
     try output.expect(1, 3, 3);
@@ -248,15 +226,15 @@ test "debounce restarts its deadline and emits the latest item during source sil
 test "timed operators propagate source failure and caller cancellation while waiting" {
     inline for (.{ zrx.batchWithin(3, .fromSeconds(60)), zrx.debounce(.fromSeconds(60)) }) |op| {
         inline for (.{ false, true }) |cancel| {
-            const clock = Clock.start();
+            var clock: Clock = .init(io);
             var input: Input = .{};
             input.init();
             var output: Output = .{};
             output.init();
-            var run = try io.concurrent(Run(op).run, .{ clock, &input, &output });
+            var run = try io.concurrent(Run(op).run, .{ clock.io(), &input, &output });
             defer _ = run.cancel(io) catch {};
             try input.send(1);
-            try Clock.waitingAt(60);
+            try clock.waitingAt(.fromSeconds(60));
             if (cancel) {
                 try std.testing.expectError(error.Canceled, run.cancel(io));
             } else {
@@ -268,26 +246,26 @@ test "timed operators propagate source failure and caller cancellation while wai
 }
 
 test "debounce coalesces input while downstream is busy" {
-    const clock = Clock.start();
+    var clock: Clock = .init(io);
     var input: Input = .{};
     input.init();
     var hold: Output.Hold = .{};
     var output: Output = .{ .hold = &hold };
     output.init();
-    var run = try io.concurrent(Run(zrx.debounce(.fromSeconds(10))).run, .{ clock, &input, &output });
+    var run = try io.concurrent(Run(zrx.debounce(.fromSeconds(10))).run, .{ clock.io(), &input, &output });
     defer _ = run.cancel(io) catch {};
     try input.send(1);
-    try Clock.waitingAt(10);
-    Clock.advance(10);
+    try clock.waitingAt(.fromSeconds(10));
+    clock.advanceTo(.fromSeconds(10));
     try hold.entered.wait(io);
     try output.expect(1, 1, 1);
-    Clock.advance(11);
+    clock.advanceTo(.fromSeconds(11));
     try input.send(2);
-    Clock.advance(12);
+    clock.advanceTo(.fromSeconds(12));
     try input.send(3);
-    Clock.advance(13);
+    clock.advanceTo(.fromSeconds(13));
     try input.send(4);
-    Clock.advance(23);
+    clock.advanceTo(.fromSeconds(23));
     hold.released.set(io);
     try output.expect(1, 4, 4);
     try input.actions.putOne(io, .end);
@@ -297,13 +275,13 @@ test "debounce coalesces input while downstream is busy" {
 }
 
 test "batchWithin preserves pending batches while downstream is busy" {
-    const clock = Clock.start();
+    var clock: Clock = .init(io);
     var input: Input = .{};
     input.init();
     var hold: Output.Hold = .{};
     var output: Output = .{ .hold = &hold };
     output.init();
-    var run = try io.concurrent(Run(zrx.batchWithin(2, .fromSeconds(60))).run, .{ clock, &input, &output });
+    var run = try io.concurrent(Run(zrx.batchWithin(2, .fromSeconds(60))).run, .{ clock.io(), &input, &output });
     defer _ = run.cancel(io) catch {};
     try input.send(1);
     try input.send(2);
@@ -315,11 +293,11 @@ test "batchWithin preserves pending batches while downstream is busy" {
     input.accepted.reset();
     try input.actions.putOne(io, .{ .item = 5 });
     try std.testing.expect(!input.accepted.isSet());
-    Clock.advance(100);
+    clock.advanceTo(.fromSeconds(100));
     hold.released.set(io);
     try input.accepted.wait(io);
     try output.expect(2, 3, 4);
-    try Clock.waitingAt(160);
+    try clock.waitingAt(.fromSeconds(160));
     try input.actions.putOne(io, .end);
     try run.await(io);
     try output.expect(1, 5, 5);
@@ -327,10 +305,10 @@ test "batchWithin preserves pending batches while downstream is busy" {
 
 test "timed operators emit nothing for empty input" {
     inline for (.{ zrx.batchWithin(3, .fromSeconds(60)), zrx.debounce(.fromSeconds(60)) }) |op| {
-        const clock = Clock.start();
+        var clock: Clock = .init(io);
         var output: Output = .{};
         output.init();
-        try zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock, &output });
+        try zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock.io(), &output });
         var extra: [1]Result = undefined;
         try std.testing.expectEqual(@as(usize, 0), try output.results.get(io, &extra, 0));
     }
@@ -366,14 +344,14 @@ fn RejectRun(comptime op: anytype) type {
 
 test "a timed worker failure interrupts an idle source" {
     inline for (.{ zrx.batchWithin(3, .fromSeconds(60)), zrx.debounce(.fromSeconds(60)) }) |op| {
-        const clock = Clock.start();
+        var clock: Clock = .init(io);
         var input: Input = .{};
         input.init();
-        var run = try io.concurrent(RejectRun(op).run, .{ clock, &input });
+        var run = try io.concurrent(RejectRun(op).run, .{ clock.io(), &input });
         defer _ = run.cancel(io) catch {};
         try input.send(1);
-        try Clock.waitingAt(60);
-        Clock.advance(60);
+        try clock.waitingAt(.fromSeconds(60));
+        clock.advanceTo(.fromSeconds(60));
         try std.testing.expectError(error.Rejected, run.await(io));
     }
 }

@@ -105,3 +105,6 @@ pub const Flow = @import("pipe.zig").Flow;
 pub const End = @import("pipe.zig").End;
 pub const di = @import("di.zig");
 pub const operator = @import("pipe.zig");
+
+// For testing programs: a clock the test moves.
+pub const testing = @import("testing.zig");

@@ -83,3 +83,18 @@ export fn zrx_cross_completion(io: *const std.Io) bool {
     work.run(.{io.*}) catch return false;
     return true;
 }
+
+/// The manual clock forwards every entry of `std.Io.VTable`, whose types
+/// differ per target.
+export fn zrx_cross_clock(io: *const std.Io, first: u32, end: u32) bool {
+    var clock: zrx.testing.Clock = .init(io.*);
+    clock.advanceTo(.fromSeconds(1));
+    const batches = program(zrx.range(u32, first, end), pipe(.{
+        zrx.batchWithin(1000, .fromSeconds(60)),
+        zrx.flatten(),
+        zrx.drain(),
+    }));
+    batches.run(.{clock.io()}) catch return false;
+    clock.waitingAt(.fromSeconds(61)) catch return false;
+    return true;
+}
