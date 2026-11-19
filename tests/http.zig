@@ -699,14 +699,18 @@ test "a server skipping a body nobody read can be cancelled" {
     try std.testing.expectError(error.Canceled, server.cancel(io));
 }
 
-/// An `Io` that counts the connections accepted through it and how many of
-/// those were closed. One at a time: its state is global.
+/// An `Io` that keeps track of the connections accepted through it: how many
+/// were closed, and how many closes found one that was closed already. One
+/// at a time: its state is global.
 const Sockets = struct {
     var inner: Io = undefined;
     var vtable: Io.VTable = undefined;
+    var busy: std.atomic.Value(bool) = .init(false);
     var handles: [8]Io.net.Socket.Handle = undefined;
-    var accepted: std.atomic.Value(usize) = .init(0);
+    var open: [8]bool = undefined;
+    var accepted: usize = 0;
     var closed: std.atomic.Value(usize) = .init(0);
+    var closed_twice: std.atomic.Value(usize) = .init(0);
     var expected: usize = 0;
     /// Set once `expected` connections have been accepted.
     var all_accepted: Io.Event = .unset;
@@ -716,27 +720,50 @@ const Sockets = struct {
         vtable = under.vtable.*;
         vtable.netAccept = accept;
         vtable.netClose = close;
-        accepted.store(0, .seq_cst);
+        accepted = 0;
         closed.store(0, .seq_cst);
+        closed_twice.store(0, .seq_cst);
         expected = expect;
         all_accepted = .unset;
         return .{ .userdata = under.userdata, .vtable = &vtable };
     }
 
+    fn lock() void {
+        while (busy.swap(true, .seq_cst)) std.atomic.spinLoopHint();
+    }
+
     fn accept(userdata: ?*anyopaque, server: Io.net.Socket.Handle, options: Io.net.Server.AcceptOptions) Io.net.Server.AcceptError!Io.net.Socket {
         const socket = try inner.vtable.netAccept(userdata, server, options);
-        const index = accepted.load(.seq_cst);
-        handles[index] = socket.handle;
-        accepted.store(index + 1, .seq_cst);
-        if (index + 1 == expected) all_accepted.set(inner);
+        lock();
+        handles[accepted] = socket.handle;
+        open[accepted] = true;
+        accepted += 1;
+        const last = accepted == expected;
+        busy.store(false, .seq_cst);
+        if (last) all_accepted.set(inner);
         return socket;
     }
 
     fn close(userdata: ?*anyopaque, sockets: []const Io.net.Socket) void {
-        for (sockets) |socket| for (handles[0..accepted.load(.seq_cst)]) |handle| {
-            if (socket.handle == handle) _ = closed.fetchAdd(1, .seq_cst);
-        };
+        for (sockets) |socket| noteClosed(socket.handle);
         inner.vtable.netClose(userdata, sockets);
+    }
+
+    /// The system gives a closed connection's handle to a later one, so a
+    /// handle names the connection that has it open.
+    fn noteClosed(handle: Io.net.Socket.Handle) void {
+        lock();
+        defer busy.store(false, .seq_cst);
+        var known = false;
+        for (handles[0..accepted], open[0..accepted]) |accepted_handle, *is_open| {
+            if (accepted_handle != handle) continue;
+            known = true;
+            if (!is_open.*) continue;
+            is_open.* = false;
+            _ = closed.fetchAdd(1, .seq_cst);
+            return;
+        }
+        if (known) _ = closed_twice.fetchAdd(1, .seq_cst);
     }
 };
 
@@ -787,6 +814,85 @@ test "cancelling a server closes the connections no worker had taken" {
 
     try std.testing.expectError(error.Canceled, server.cancel(on));
     try std.testing.expectEqual(@as(usize, 3), Sockets.closed.load(.seq_cst));
+}
+
+test "a connection that reaches a second serve fails there and is left to the first" {
+    const on = Sockets.over(io, 1);
+    const Server = struct {
+        const served = program(http.connections(), .{branch(.{
+            .{http.serve(api)},
+            .{http.serve(api)},
+        })}).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{ on, &ready });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    // One conversation, held by the first `serve`, which then closes it.
+    var answer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+    );
+    try std.testing.expectError(error.ConnectionTaken, server.await(io));
+    try std.testing.expectEqual(@as(usize, 1), Sockets.closed.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), Sockets.closed_twice.load(.seq_cst));
+}
+
+const Kept = struct { connection: ?http.Connection = null };
+
+/// Passes on the connection that came before this one, in its place.
+fn previous(kept: *Kept, connection: http.Connection) http.Connection {
+    defer kept.connection = connection;
+    return kept.connection orelse connection;
+}
+
+test "a copy of a connection served earlier does not take the room of a later one" {
+    const on = Sockets.over(io, 2);
+    const Server = struct {
+        // Room for one: the second connection waits where the first did.
+        const served = program(http.connections(), .{
+            take(2),
+            map(previous),
+            recover(http.disconnected),
+            http.serve(api),
+        }).provide(.{
+            http.listen(loopback, .{ .pending = 1 }),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready, kept: *Kept) !void {
+            return served.run(.{ with, ready, kept });
+        }
+    };
+    var ready: Ready = .{};
+    var kept: Kept = .{};
+    var server = try io.concurrent(Server.run, .{ on, &ready, &kept });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const closing = "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n";
+    var answer: [256]u8 = undefined;
+    _ = try ask(ready.port, closing, &answer);
+    // The second connection is accepted, and the first is pushed again in
+    // its place. Were that taken for the second, its request would be answered.
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const second = try address.connect(io, .{ .mode = .stream });
+    defer second.close(io);
+    var out = second.writer(io, &.{});
+    try out.interface.writeAll(closing);
+    try std.testing.expectError(error.ConnectionTaken, server.await(io));
+    // The first was closed by its `serve`, the second by the listener.
+    try std.testing.expectEqual(@as(usize, 2), Sockets.closed.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), Sockets.closed_twice.load(.seq_cst));
 }
 
 test "with room for one waiting connection, every connection is still served" {

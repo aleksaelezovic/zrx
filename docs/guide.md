@@ -964,6 +964,11 @@ the run's tasks have returned. The listener has room for `pending` such
 connections, 64 unless `listen` is told otherwise, and `connections` accepts
 no more while it is full.
 
+A connection is handed over once. A copy of it that reaches a second
+`serve` (a `branch` into two of them) fails that push with
+`error.ConnectionTaken`, which fails the run like any other error, and the
+socket stays with the `serve` that took it.
+
 Answers are collected in a 4 KiB buffer per connection and written before
 `serve` reads something that may not have arrived yet (a request head, or a
 body, that is not whole in its read buffer) and when the connection ends.

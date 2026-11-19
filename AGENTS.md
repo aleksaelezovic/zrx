@@ -190,7 +190,11 @@ to this file; edit `AGENTS.md`, not copies.
   `Response` added to the environment; a boundary inside it is a compile
   error. The listener owns an accepted `Connection` until a `serve` takes
   it and closes what nobody took after the run's tasks have returned;
-  `serve` closes what it took. Responders write unflushed and `serve`
+  `serve` closes what it took. A connection is handed over once, and the
+  listener checks that its slot still holds that connection (a generation
+  per slot): a copy that comes second fails with `error.ConnectionTaken`
+  and touches neither the slot nor the socket. Do not compare sockets for
+  this; the system reuses their handles. Responders write unflushed and `serve`
   flushes before a read that may wait for the peer (a head or body that is
   not whole in the buffer); do not flush per response. A cancellation
   `std` recorded on the connection comes out of `serve` whatever the

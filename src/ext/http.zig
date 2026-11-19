@@ -108,7 +108,7 @@ fn Listen(comptime options: ListenOptions) type {
             const io = di.get(env, Io);
             var server = try self.address.listen(io, .{ .reuse_address = options.reuse_address, .kernel_backlog = options.kernel_backlog });
             defer server.deinit(io);
-            var slots: [options.pending]?Io.net.Stream = @splat(null);
+            var slots: [options.pending]Waiting.Slot = @splat(.{});
             var waiting: Waiting = .{ .slots = &slots };
             // Every task of the run has returned by the time this runs.
             defer waiting.closeAll(io);
@@ -123,9 +123,16 @@ fn Listen(comptime options: ListenOptions) type {
 const Waiting = struct {
     mutex: Io.Mutex = .init,
     freed: Io.Condition = .init,
-    slots: []?Io.net.Stream,
+    slots: []Slot,
     /// Slots that hold a connection or are promised to an accept under way.
     used: usize = 0,
+
+    const Slot = struct {
+        stream: ?Io.net.Stream = null,
+        /// Counts the connections this slot has held, so that the one it
+        /// holds can be told from a copy of an earlier one.
+        generation: u64 = 0,
+    };
 
     /// Waits for room for one more connection and reserves it.
     fn reserve(waiting: *Waiting, io: Io) Io.Cancelable!void {
@@ -144,39 +151,55 @@ const Waiting = struct {
     }
 
     /// Puts an accepted connection into the room reserved for it.
-    fn hold(waiting: *Waiting, io: Io, stream: Io.net.Stream) *?Io.net.Stream {
+    fn hold(waiting: *Waiting, io: Io, stream: Io.net.Stream) Connection.Held {
         waiting.mutex.lockUncancelable(io);
         defer waiting.mutex.unlock(io);
-        for (waiting.slots) |*slot| if (slot.* == null) {
-            slot.* = stream;
-            return slot;
+        for (waiting.slots) |*slot| if (slot.stream == null) {
+            slot.stream = stream;
+            slot.generation += 1;
+            return .{ .by = waiting, .slot = slot, .generation = slot.generation };
         };
         unreachable; // room was reserved
     }
 
-    /// A `serve` has the connection now and will close it.
-    fn take(waiting: *Waiting, io: Io, slot: *?Io.net.Stream) void {
+    /// Hands the connection to the caller, who closes it from here on, and
+    /// frees its room. False when the room no longer holds that connection:
+    /// a copy of it was taken before, and the room may hold another by now.
+    fn take(waiting: *Waiting, io: Io, held: Connection.Held) bool {
         waiting.mutex.lockUncancelable(io);
         defer waiting.mutex.unlock(io);
-        slot.* = null;
+        const slot = held.slot;
+        if (slot.stream == null or slot.generation != held.generation) return false;
+        slot.stream = null;
         waiting.used -= 1;
         waiting.freed.signal(io);
+        return true;
     }
 
     fn closeAll(waiting: *Waiting, io: Io) void {
-        for (waiting.slots) |slot| if (slot) |stream| stream.close(io);
+        for (waiting.slots) |slot| if (slot.stream) |stream| stream.close(io);
     }
 };
 
 /// An accepted connection. The listener owns it until a `serve` is pushed
 /// it; `serve` then closes it when the conversation is over, however it ended.
+///
+/// It is handed over once. A copy that reaches a `serve` after the
+/// connection was taken (a `branch` into two of them) fails that push with
+/// `error.ConnectionTaken`, and the socket is left to whoever took it.
 pub const Connection = struct {
     stream: Io.net.Stream,
-    /// Where the listener holds it until then; null for a connection that
-    /// did not come from `connections`.
+    /// Where the listener holds it until then. Null for a stream of your
+    /// own, which nothing keeps track of: push it to one `serve`.
     held: ?Held = null,
 
-    const Held = struct { by: *Waiting, slot: *?Io.net.Stream };
+    const Held = struct { by: *Waiting, slot: *Waiting.Slot, generation: u64 };
+
+    /// Makes the caller the one who closes the connection.
+    fn claim(connection: Connection, io: Io) error{ConnectionTaken}!void {
+        const held = connection.held orelse return;
+        if (!held.by.take(io, held)) return error.ConnectionTaken;
+    }
 };
 
 /// A connection over a reader and a writer of the caller's: a test, or a
@@ -214,8 +237,8 @@ const Connections = struct {
             };
             // From here the listener closes the connection if no `serve`
             // gets to: also when this push fails or is answered `.done`.
-            const slot = waiting.hold(io, stream);
-            if (try down.push(Connection{ .stream = stream, .held = .{ .by = waiting, .slot = slot } }) == .done) return;
+            const held = waiting.hold(io, stream);
+            if (try down.push(Connection{ .stream = stream, .held = held }) == .done) return;
         }
     }
 };
@@ -507,7 +530,7 @@ fn Serve(comptime P: type) type {
                         return .more;
                     }
                     const io = di.get(self.env, Io);
-                    if (connection.held) |held| held.by.take(io, held.slot);
+                    try connection.claim(io);
                     defer connection.stream.close(io);
                     var in_buffer: [head_bytes]u8 = undefined;
                     var out_buffer: [output_bytes]u8 = undefined;
