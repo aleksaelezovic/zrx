@@ -193,3 +193,13 @@ test "fellBack" {
         try std.testing.expectEqual(without, with);
     }
 }
+
+test "required" {
+    for (inputs) |items| {
+        var with: struct { u32, u64 } = .{ 0, 0 };
+        var without: struct { u32, u64 } = .{ 0, 0 };
+        cases.required(true, items, &with[0], &with[1]);
+        cases.required(false, items, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+    }
+}

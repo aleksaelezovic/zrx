@@ -16,6 +16,15 @@ fn Fallible(comptime R: type) bool {
     return @typeInfo(R) == .error_union;
 }
 
+/// For a combinator that works on one item: `does` says what it does with
+/// it, `usage` shows where it belongs.
+fn expectOneItem(comptime who: []const u8, comptime does: []const u8, comptime usage: []const u8, comptime arity: usize) void {
+    if (arity != 1) @compileError(std.fmt.comptimePrint(
+        "{s}: {s} one item, but receives {d} values here; use it where a handler takes a single item, as in {s}",
+        .{ who, does, arity, usage },
+    ));
+}
+
 /// A predicate that is true when `predicate` is false.
 pub fn not(comptime predicate: anytype) type {
     return struct {
@@ -200,6 +209,50 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
     };
 }
 
+/// The item when `predicate` is true for it, the error `err` when it is not:
+/// `map(require(isPlausible, error.InvalidReading))`. Where `filter` drops
+/// such an item without a word, this fails it, for `orElse` or `recover` to
+/// handle or for the run to end with. The reverse of `orElse`.
+pub fn require(comptime predicate: anytype, comptime err: anytype) type {
+    if (@typeInfo(@TypeOf(err)) != .error_set) @compileError(
+        "require: the second argument must be an error such as `error.Invalid`, got `" ++ @typeName(@TypeOf(err)) ++ "`",
+    );
+    // Checks the predicate's shape where the combinator is written, not where it is used.
+    _ = di.requires("require", predicate, 1);
+    return struct {
+        pub const zrx_handler = {};
+
+        pub fn requires(comptime arity: usize) []const type {
+            expectOne(arity);
+            return di.requires("require", predicate, 1);
+        }
+
+        pub fn call(env: anytype, args: anytype) Required(@TypeOf(env), di.types(@TypeOf(args))) {
+            const result = di.invoke(predicate, env, args);
+            const holds = if (comptime Fallible(@TypeOf(result))) try result else result;
+            // Two returns, not one that selects: selecting between the item
+            // and a constant error leaves the result in a stack slot.
+            if (!holds) return err;
+            return args[0];
+        }
+
+        fn expectOne(comptime arity: usize) void {
+            expectOneItem("require", "checks", "map(require(predicate, error.Invalid))", arity);
+        }
+
+        /// `error{Named}!Item`, with the predicate's own errors when it can fail.
+        fn Required(comptime Env: type, comptime Args: []const type) type {
+            @setEvalBranchQuota(di.quota);
+            expectOne(Args.len);
+            di.check("require", predicate, Env, Args);
+            const R = di.Result("require", predicate, Args);
+            sequence.expectReturn("require", "predicate", R, bool);
+            const Named = @TypeOf(err);
+            return (if (Fallible(R)) Named || @typeInfo(R).error_union.error_set else Named)!Args[0];
+        }
+    };
+}
+
 /// Folds the elements of an array, slice or batch item into one value:
 /// `map(reduce(Window{}, Window.add))`. The result is `seed` for an empty
 /// item. Where `fold` reduces a stream, this reduces one item.
@@ -212,7 +265,7 @@ pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
         pub const zrx_handler = {};
 
         pub fn requires(comptime arity: usize) []const type {
-            expectOneItem(arity);
+            expectOne(arity);
             return di.requires("reduce", reducer, 2);
         }
 
@@ -226,16 +279,13 @@ pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
             return state;
         }
 
-        fn expectOneItem(comptime arity: usize) void {
-            if (arity != 1) @compileError(std.fmt.comptimePrint(
-                "reduce: folds the elements of one item, but receives {d} values here; use it where a handler takes a single item, as in map(reduce(seed, f))",
-                .{arity},
-            ));
+        fn expectOne(comptime arity: usize) void {
+            expectOneItem("reduce", "folds the elements of", "map(reduce(seed, f))", arity);
         }
 
         fn Reduced(comptime Env: type, comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
-            expectOneItem(Args.len);
+            expectOne(Args.len);
             const Element = sequence.Element(Args[0]) orelse
                 @compileError("reduce: items must be arrays, slices, or batches, got `" ++ @typeName(Args[0]) ++ "`");
             di.check("reduce", reducer, Env, &.{ State, Element });

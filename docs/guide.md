@@ -248,6 +248,7 @@ they are built from.
 | `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
 | `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
+| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. |
 | `reduce(seed, f)` | Folds the elements of an array, slice or batch item with `f(deps..., state, element)`; `seed` for an empty one. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
@@ -279,6 +280,9 @@ and a program whose handlers cannot fail has an empty one.
 There are two ways to handle an error instead. To keep the item as a value of
 your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `rejected(deps..., err, item)` when `parse` fails and passes its result on.
+`require` goes the other way, from a value to an error:
+`map(require(isPlausible, error.InvalidReading))` fails an item that
+`filter(isPlausible)` would drop without a trace.
 
 To drop the item, put `recover(handler)` before the operators that may
 fail. When one of them fails for an item, the handler receives the error and
@@ -693,7 +697,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Fourteen are `same`; `take`, `batch`
+Every synchronous operator has a fixture. Fifteen are `same`; `take`, `batch`
 and the handler combinators are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there

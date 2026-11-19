@@ -68,6 +68,7 @@ pub const all = handlers.all;
 pub const any = handlers.any;
 pub const compose = handlers.compose;
 pub const orElse = handlers.orElse;
+pub const require = handlers.require;
 pub const reduce = handlers.reduce;
 pub const field = handlers.field;
 pub const constant = handlers.constant;

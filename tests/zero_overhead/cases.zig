@@ -503,3 +503,28 @@ pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
 export fn same_or_else(ptr: [*]const u32, len: usize, out: *u64) void {
     fellBack(exported_with_zrx, ptr[0..len], out);
 }
+
+// --- require ------------------------------------------------------------------------------------
+
+/// Large values summed, the others counted. The error is the one `recovered`
+/// already has, on purpose: the integer behind an error shifts when the file
+/// gains a name, and with it the form the optimizer gives the comparison in
+/// `same_recover`.
+pub fn required(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ recover(countRejected), map(zrx.require(zrx.ge(100), error.TooSmall)), tap(accumulate), drain() });
+        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        for (items) |value| {
+            if (value < 100) {
+                rejected.* +%= 1;
+            } else {
+                out.* +%= value;
+            }
+        }
+    }
+}
+
+export fn same_require(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
+    required(exported_with_zrx, ptr[0..len], rejected, out);
+}
