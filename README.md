@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
 | Concept | What it is |
 |---|---|
 | **handler** | A plain function. Its leading parameters are dependencies, found by type; its last parameter is the data. |
-| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`, `provide(db)`. |
+| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`. |
 | **pipe** | Operators composed left to right. A pipe is itself an operator, so pipes nest. |
 | **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
 | **system** | Several programs run together with the same dependencies. |

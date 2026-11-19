@@ -257,6 +257,50 @@ test "systems nest, and a system of one needs no Io" {
     try seen.expect(&.{3});
 }
 
+const Depot = struct { id: u32 };
+const Opened = struct {
+    shared: std.atomic.Value(u32) = .init(0),
+    closed: std.atomic.Value(u32) = .init(0),
+    own: std.atomic.Value(u32) = .init(0),
+};
+
+fn openShared(opened: *Opened) Depot {
+    return .{ .id = 10 + opened.shared.fetchAdd(1, .seq_cst) };
+}
+fn closeShared(opened: *Opened, _: Depot) void {
+    _ = opened.closed.fetchAdd(1, .seq_cst);
+}
+fn openOwn(opened: *Opened) Depot {
+    _ = opened.own.fetchAdd(1, .seq_cst);
+    return .{ .id = 99 };
+}
+fn depotToLeft(depot: Depot, sink: Left, _: u32) void {
+    sink.seen.add(depot.id);
+}
+fn depotToRight(depot: Depot, sink: Right, _: u32) void {
+    sink.seen.add(depot.id);
+}
+
+test "what a system is given replaces program defaults, and a resource among it is acquired once" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var opened: Opened = .{};
+    const a = program(fromValue(@as(u32, 1)), .{forEach(depotToLeft)}).provide(.{zrx.resource(openOwn, null)});
+    const b = program(fromValue(@as(u32, 2)), .{forEach(depotToRight)}).provide(.{zrx.resource(openOwn, null)});
+
+    // By itself, a program acquires its default.
+    try a.run(.{ Left{ .seen = &left }, &opened });
+    try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
+
+    // In the system, both use the one depot the system was given.
+    try system(.{ a, b }).run(.{ zrx.resource(openShared, closeShared), io, &opened, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{ 99, 10 });
+    try right.expect(&.{10});
+    try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
+    try std.testing.expectEqual(@as(u32, 1), opened.shared.load(.seq_cst));
+    try std.testing.expectEqual(@as(u32, 1), opened.closed.load(.seq_cst));
+}
+
 fn patiently(clock: std.Io, out: anytype) !void {
     var value: u32 = 0;
     while (value < 200) : (value += 1) {

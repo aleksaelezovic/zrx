@@ -138,6 +138,16 @@ test "withResource" {
     }
 }
 
+test "withBindings" {
+    for (inputs) |items| {
+        var with: struct { u32, u32, u64 } = .{ 3, 7, 99 };
+        var without: struct { u32, u32, u64 } = .{ 3, 7, 98 };
+        cases.withBindings(true, items, 5, &with[0], &with[1], &with[2]);
+        cases.withBindings(false, items, 5, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
 test "printed" {
     for (inputs) |items| {
         var with_bytes: [256]u8 = undefined;

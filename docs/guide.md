@@ -28,15 +28,17 @@ fn scale(factor: Scale, value: u32) u32 { ... }
 //       ^ dependency   ^ data
 ```
 
-Dependencies come from two places:
-
-- the tuple passed to `run`: `app.run(.{ io, Scale{ .by = 2 } })`;
-- the tuple on `program(...).provide(.{ ... })`, available to the source and every stage.
+Dependencies come from the *bindings* a program is run with:
+`app.run(.{ io, Scale{ .by = 2 } })`. A program can be given some of them in
+advance with `provide`; see [Programs and systems](#programs-and-systems).
+The source and every stage see the same ones.
 
 Rules:
 
-- The key is the type. Two values of the same type cannot both be passed to
-  `run`; wrap one in a struct to name its role (`const Audit = struct { log: *Log };`).
+- The key is the type, and a type has one provider. Two values of the same
+  type cannot both be passed to `run`; wrap one in a struct to name its role
+  (`const Audit = struct { log: *Log };`).
+- The order bindings are written in does not matter.
 - A dependency is copied into each handler that asks for it when the program
   starts. Share mutable state through a pointer type (`*Counter`).
 - `std.Io` and `std.mem.Allocator` are ordinary dependencies. Operators that
@@ -104,23 +106,49 @@ const report = program(source, .{
 try report.run(.{io});
 ```
 
-`provide` adds bindings to the program description. Each run applies them
-left to right, starting with the values passed to `run`. A binding shadows
-an earlier binding of the same type. The final environment is shared by the
-source and all stages, including branch and route cases.
+`provide` gives a program *defaults*: bindings that `run` uses unless it is
+given one that provides the same type. It is not a second kind of
+dependency: `p.provide(a).run(b)` is `p.run(a ++ b)`, where a binding in `b`
+replaces a default of its type. Among the defaults, and among what `run` is
+given, a type has one provider; a second one is a compile error. The
+resulting environment is shared by the source and all stages, including
+branch and route cases.
 
-`resource(acquire, release)` is a binding that calls `acquire(deps...)` once
-per run. Later bindings can use its result as a dependency. On exit, acquired
-resources are released in reverse order after the program's tasks have
-joined. `release(deps..., value)` uses the dependencies in scope at acquisition
-and returns `void`. Use `null` for a computed binding that needs no release.
+A binding is a value, which provides its own type, or a *resource*.
+`resource(acquire, release)` calls `acquire(deps...)` once per run and
+provides what it returns. `release(deps..., value)` returns `void`. Use
+`null` for a computed binding that needs no release. `stdout`, `stderr` and
+`fileWriter` are resources that need `std.Io`.
+
+Bindings may be written in any order, in `provide` or in `run`:
+
+```zig
+const app = program(source, work).provide(.{
+    resource(openSession, closeSession), // needs a Connection
+    resource(connect, disconnect), // needs a Config
+});
+try app.run(.{ io, config });
+```
+
+What every resource provides and needs is known at compile time, and that
+decides the order. A run starts with the values, then acquires a resource
+once everything it needs is there. Of the resources that are ready, it takes
+the one written first; defaults count as written before what `run` is
+given. A resource that needs a type nothing provides, and resources that
+need each other, are compile errors. Acquired resources are released in the
+reverse order, after the program's tasks have joined.
+
+A default that `run` replaces is not acquired. A test can run the `report`
+program above with `Report{ .writer = &writer }` in the tuple, and no file
+is created.
 
 ```zig
 try system(.{ ingest, report }).run(.{ io, &mailbox });
 ```
 
-`system` runs its programs together with the same dependencies and returns when
-all have finished. The first failure cancels the others and is returned; a
+`system` runs its programs together with the same bindings and returns when
+all have finished. What it is given replaces a default of the same type in
+each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and is returned; a
 program that had ended before that has released its resources. A system is itself runnable,
 so systems nest. With more than one program, each runs as a task of its own,
 so the `Io` must be able to run tasks concurrently; with one that cannot,
@@ -596,7 +624,8 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
-Pass `stdout`, `stderr`, and `fileWriter` to `Program.provide`. The file
+`stdout`, `stderr`, and `fileWriter` are bindings: give them to `provide` or
+to `run`. The file
 closes when the program releases its resources. `print` flushes after each
 item and again at normal stream end: use it for output someone reads as it
 is produced. `write` leaves items in the writer's buffer and flushes at
@@ -616,7 +645,8 @@ caller must serialize those writes.
   `error.PathAlreadyExists`.
 
 Each file is published atomically. With several published files, the last
-one bound is named first, following resource release order. If naming one
+one acquired is named first, following resource release order: of the files
+in one tuple, the one written last. If naming one
 fails, `run` returns that error and the files published earlier stay in place.
 
 ```zig
@@ -665,7 +695,8 @@ they are called on. Keep the whole value when storing or queueing it.
 
 A run goes through these steps:
 
-1. Apply bindings and acquire program resources in declaration order.
+1. Build the environment from the bindings: the values, then each resource
+   once what it needs is there.
 2. Construct stages and run the source. With queues, each segment runs on
    its own task.
 3. On normal input end, finish each segment in stream order. Final values
@@ -752,7 +783,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Fifteen are `same`; `take`, `batch`
+Every synchronous operator has a fixture. Sixteen are `same`; `take`, `batch`
 and the handler combinators are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there

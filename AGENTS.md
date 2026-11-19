@@ -48,9 +48,19 @@ to this file; edit `AGENTS.md`, not copies.
 - **Dependencies are resolved once.** The environment is a tuple keyed by exact
   type. A stage copies what its handler asked for at `init`; nothing is looked
   up per item. `std.Io` and the allocator are ordinary dependencies.
-  `Program.provide` applies bindings in order before constructing the stages.
-  A binding shadows an earlier value of the same type. The source and all
-  stages use the resulting environment.
+  The source and all stages use one environment.
+- **`provide` and `run` are one concept.** `run` takes bindings: values and
+  resources alike. `provide` only gives a program defaults for them, so
+  `p.provide(a).run(b)` is `p.run(a ++ b)`; a binding given to `run` replaces
+  a default that provides the same type, and a replaced resource is not
+  acquired. Within either tuple a type has one provider. The order bindings
+  are written in decides nothing but ties: a resource declares `Provides`
+  and `needs`, and `src/resources.zig` orders acquisition at compile time
+  (values, then again and again the first resource in written order whose
+  needs are there). Nothing of the graph exists at run time. There is no
+  shadowing and no left-to-right application: that made `provide` and `run`
+  two things that behaved differently, and a resource given to `run` a
+  confusing compile error.
 - **Handlers** are comptime-known functions: leading parameters are
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that

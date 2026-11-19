@@ -411,6 +411,44 @@ export fn same_resource(ptr: [*]const u32, len: usize, opened: *u32, closed: *u3
     withResource(exported_with_zrx, ptr[0..len], opened, closed, out);
 }
 
+// --- bindings in any order ----------------------------------------------------------------------
+
+const Rate = struct { by: u32 };
+
+fn rateOf(session: Session) Rate {
+    return .{ .by = session.bias +% 1 };
+}
+fn never(ledger: Ledger) Scale {
+    ledger.closed.* = 0;
+    return .{ .by = 0 };
+}
+fn scaledAtRate(factor: Scale, rate: Rate, value: u32) u32 {
+    return value *% factor.by +% rate.by;
+}
+
+/// The rate needs the session, which needs the ledger: written the other way
+/// round, in `provide` and in `run`. The default scale is replaced and never
+/// acquired. The order is worked out at compile time and leaves nothing behind.
+pub fn withBindings(comptime with_zrx: bool, items: []const u32, by: u32, opened: *u32, closed: *u32, out: *u64) void {
+    const ledger: Ledger = .{ .opened = opened, .closed = closed };
+    if (with_zrx) {
+        const total = pipe(.{ map(scaledAtRate), fold(@as(u64, 0), add), forEach(store) });
+        const app = program(fromSlice(items), total).provide(.{ zrx.resource(rateOf, null), zrx.resource(never, null) });
+        run(app, .{ zrx.resource(open, close), Scale{ .by = by }, Result{ .out = out }, ledger });
+    } else {
+        const session = open(ledger);
+        defer close(ledger, session);
+        const rate = session.bias +% 1;
+        var sum: u64 = 0;
+        for (items) |value| sum +%= value *% by +% rate;
+        out.* = sum;
+    }
+}
+
+export fn same_bindings(ptr: [*]const u32, len: usize, by: u32, opened: *u32, closed: *u32, out: *u64) void {
+    withBindings(exported_with_zrx, ptr[0..len], by, opened, closed, out);
+}
+
 // --- print --------------------------------------------------------------------------------------
 
 /// Formatting is a call into `std.Io.Writer` in both variants; what must match
