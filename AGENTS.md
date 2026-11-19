@@ -153,6 +153,13 @@ to this file; edit `AGENTS.md`, not copies.
   operator tuple or `pipe(...)` value. Each child of `branch`, and the
   sub-pipes of `when` and `otherwise`, accept those same two forms, never a
   bare operator. Every branch must terminate; route cases may rejoin.
+- **A run ends with nothing or an error.** `run` returns `void` or an
+  error, by design. Whatever a program produces (output, a summary, a count
+  that decides an exit status) is an effect of a stage in its pipe: a sink,
+  or a handler that writes through a dependency, such as `tap(remember)`
+  into a `*Summary`. That is the intended form and not a workaround. Do not
+  list "a program has no result" as a gap, and do not add a way to return a
+  value from `run`.
 
 ## Zero overhead
 
