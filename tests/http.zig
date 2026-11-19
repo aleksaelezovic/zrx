@@ -168,6 +168,11 @@ inline fn ok(comptime content_type: []const u8, comptime body: []const u8) []con
     return std.fmt.comptimePrint("HTTP/1.1 200 OK\r\ncontent-length: {d}\r\ncontent-type: {s}\r\n\r\n{s}", .{ body.len, content_type, body });
 }
 
+/// A 200 after which the connection is closed.
+inline fn okClosed(comptime content_type: []const u8, comptime body: []const u8) []const u8 {
+    return std.fmt.comptimePrint("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: {d}\r\ncontent-type: {s}\r\n\r\n{s}", .{ body.len, content_type, body });
+}
+
 /// An empty answer after which the connection goes on, or is closed.
 inline fn empty(comptime code: []const u8, comptime then: enum { open, closed }) []const u8 {
     return "HTTP/1.1 " ++ code ++ "\r\n" ++ (if (then == .closed) "connection: close\r\n" else "") ++ "content-length: 0\r\n\r\n";
@@ -274,7 +279,15 @@ test "a second answer writes nothing and closes the connection" {
 
 test "the body is read whether its length is given or it is chunked" {
     try expectAnswer(ok("text/plain", "75"), post_sum);
-    try expectAnswer(ok("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2\r\n1\r\n0\r\n0\r\n\r\n");
+    try expectAnswer(okClosed("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2\r\n1\r\n0\r\n0\r\n\r\n");
+}
+
+test "the connection is closed after a chunked body, and nothing behind it is read as a request" {
+    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try expectAnswer(okClosed("text/plain", "75"), chunked ++ "2\r\n20\r\n0\r\n\r\n" ++ get_sum);
+    // `std` reads this size as a last chunk; another parser reads 44 bytes
+    // of body, and then what follows here is no request to it.
+    try expectAnswer(okClosed("text/plain", "55"), chunked ++ "+2c\r\n\r\n" ++ get_sum);
 }
 
 test "a body is awaited from a peer that expects to be told to continue" {
@@ -357,7 +370,7 @@ test "an answer does not wait for the rest of a request that arrived in part" {
 
 test "a chunked body is flushed for before it is read, also when it arrived whole" {
     const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
-    const both = ok("text/plain", "55") ++ ok("text/plain", "75");
+    const both = ok("text/plain", "55") ++ okClosed("text/plain", "75");
     var wire: Wire = undefined;
     // All of it arrived with the request before it: with a length that is
     // one write (see above), chunked it is two.
@@ -381,9 +394,12 @@ test "a chunked body is flushed for before it is read, also when it arrived whol
 }
 
 test "the connection ends when the peer asks to close it" {
-    var wire: Wire = undefined;
-    try converse(api, &.{.{ .buffer = "GET /sum?a=1 HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n" ++ get_sum }}, &wire);
-    try std.testing.expectEqualStrings("HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 1\r\ncontent-type: text/plain\r\n\r\n1", wire.text());
+    // Alone, in any casing, or as one option of several.
+    inline for (.{ "close", "Close", "close, TE", "TE ,  CLOSE", "keep-alive\r\nConnection: close" }) |options| {
+        try expectAnswer(okClosed("text/plain", "1"), "GET /sum?a=1 HTTP/1.1\r\nHost: test\r\nConnection: " ++ options ++ "\r\n\r\n" ++ get_sum);
+    }
+    // An option that only contains the word is another option.
+    try expectAnswer(ok("text/plain", "1") ++ ok("text/plain", "55"), "GET /sum?a=1 HTTP/1.1\r\nHost: test\r\nConnection: closed, x-close\r\n\r\n" ++ get_sum);
 }
 
 test "an HTTP/1.0 request is answered and the connection closed" {
@@ -586,6 +602,42 @@ test "a request needs one valid Host, and an HTTP/1.0 request may have none" {
 test "a head that does not parse is answered 400 and the connection closed" {
     try expectAnswer(empty("400 Bad Request", .closed), "NONSENSE\r\n\r\n" ++ get_sum);
     try expectAnswer(ok("text/plain", "55") ++ empty("400 Bad Request", .closed), get_sum ++ "GET /sum SPDY/9\r\n\r\n" ++ get_sum);
+}
+
+test "a head that a proxy in front could read differently is refused" {
+    const bad = empty("400 Bad Request", .closed);
+    const smuggled = "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nX: y\r\n\r\n";
+    const heads = .{
+        // A name is a token: nothing stands between it and the colon.
+        "GET /sum HTTP/1.1\r\nHost: test\r\nContent-Length : 42\r\n\r\n" ++ smuggled,
+        "GET /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding : chunked\r\n\r\n2c\r\n" ++ smuggled ++ "\r\n0\r\n\r\n",
+        "GET /sum HTTP/1.1\r\nHost: test\r\nX Y: 1\r\n\r\n",
+        // A line without a colon is no field.
+        "GET /sum HTTP/1.1\r\nHost: test\r\nContent-Length 42\r\n\r\n",
+        "GET /sum HTTP/1.1\r\nHost: test\r\nflag\r\n\r\n",
+        // A value holds no line end of half a kind, and no NUL.
+        "GET /sum HTTP/1.1\r\nHost: test\r\nX: a\nContent-Length: 44\r\n\r\n" ++ smuggled,
+        "GET /sum HTTP/1.1\r\nHost: test\r\nX: a\rContent-Length: 44\r\n\r\n" ++ smuggled,
+        "GET /sum HTTP/1.1\r\nHost: test\r\nX: a\x00b\r\n\r\n",
+        // A length is digits.
+        "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: +2\r\n\r\n20",
+        "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 0_2\r\n\r\n20",
+        "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length:\r\n\r\n",
+        // A target holds no space and no control character.
+        "GET /sum and more HTTP/1.1\r\nHost: test\r\n\r\n",
+        "GET /sum\x00x HTTP/1.1\r\nHost: test\r\n\r\n",
+        "GET /sum\tx HTTP/1.1\r\nHost: test\r\n\r\n",
+        "GET /sum\x7fx HTTP/1.1\r\nHost: test\r\n\r\n",
+    };
+    inline for (heads) |head| try expectAnswer(bad, head);
+    // What is allowed around a value stays allowed, and so does an empty one.
+    try expectAnswer(ok("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nX-Empty:\r\nContent-Length: \t2 \r\n\r\n20");
+}
+
+test "a transfer coding other than chunked is refused" {
+    inline for (.{ "gzip", "identity", "none", "gzip, chunked", "chunked, chunked", "xchunked", "Chunked", "" }) |coding| {
+        try expectAnswer(empty("400 Bad Request", .closed), "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: " ++ coding ++ "\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
+    }
 }
 
 test "a head that does not fit is answered 431 and the connection closed" {

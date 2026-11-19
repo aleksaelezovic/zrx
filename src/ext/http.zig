@@ -522,6 +522,10 @@ pub const Request = struct {
         }
         if (chunked and length != null) return error.BadRequest;
         if (!chunked and length == null) return error.LengthRequired;
+        // Where a chunked body ends is `std`'s reading of its chunk sizes,
+        // which takes more than hexadecimal digits. What follows such a
+        // body is therefore not read as a request.
+        if (chunked) fields.keep_alive = false;
         if (length) |n| if (n > buffer.len) return error.PayloadTooLarge;
         try x.flushBeforeBody();
         const reader = x.request.readerExpectContinue(&.{}) catch |err| switch (err) {
@@ -686,7 +690,7 @@ fn Serve(comptime P: type) type {
                             },
                             error.ReadFailed => return error.ReadFailed,
                         };
-                        if (!hostValid(&exchange.request)) {
+                        if (!admitted(&exchange.request)) {
                             try refuse(out, .bad_request);
                             break;
                         }
@@ -729,18 +733,58 @@ const Recorded = struct {
     writer: *const Io.net.Stream.Writer,
 };
 
-/// RFC 9112, 3.2: a request has at most one `Host`, with a valid value, and
-/// an HTTP/1.1 request has exactly one. Anything else is answered 400.
-fn hostValid(request: *std.http.Server.Request) bool {
-    var found: ?[]const u8 = null;
-    var headers = request.iterateHeaders();
-    while (headers.next()) |header| {
-        if (!std.ascii.eqlIgnoreCase(header.name, "host")) continue;
-        if (found != null) return false;
-        found = header.value;
+/// What `std` parsed leniently is judged here, before any handler sees the
+/// request: a head that a proxy in front could read differently must not be
+/// served, or the two disagree on where the next request begins. False
+/// for a request to refuse, which is answered 400.
+///
+/// - A field is `name ":" value`, and its name is a token: nothing stands
+///   between it and the colon (RFC 9112, 5.1).
+/// - A value, and the target, hold no CR, LF or NUL (RFC 9110, 5.5); the
+///   target holds no space or other control character either.
+/// - `Content-Length` is digits (RFC 9110, 8.6); `std` takes a sign and
+///   underscores, and refuses an empty one itself.
+/// - `Transfer-Encoding` is `chunked` as `std` knows it, in lower case, and
+///   nothing else: that is all that is read here.
+/// - There is at most one `Host`, with a valid value, and an HTTP/1.1
+///   request has exactly one (RFC 9112, 3.2).
+///
+/// And one thing is set right: `close` among several connection options
+/// ends the connection (RFC 9112, 9.6), where `std` compares the whole value.
+fn admitted(request: *std.http.Server.Request) bool {
+    for (request.head.target) |c| if (c <= ' ' or c == 0x7f) return false;
+    var host: ?[]const u8 = null;
+    var lines = std.mem.splitSequence(u8, request.head_buffer, "\r\n");
+    _ = lines.first(); // the request line, which `std` took apart
+    while (lines.next()) |line| {
+        if (line.len == 0) break;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return false;
+        const name = line[0..colon];
+        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        if (!token(name)) return false;
+        for (value) |c| if (c == '\r' or c == '\n' or c == 0) return false;
+        if (std.ascii.eqlIgnoreCase(name, "host")) {
+            if (host != null) return false;
+            host = value;
+        } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
+            for (value) |c| if (!std.ascii.isDigit(c)) return false;
+        } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
+            if (!std.mem.eql(u8, value, "chunked")) return false;
+        } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
+            var options = std.mem.splitScalar(u8, value, ',');
+            while (options.next()) |option| {
+                if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, option, " \t"), "close")) request.head.keep_alive = false;
+            }
+        }
     }
-    const value = found orelse return request.head.version == .@"HTTP/1.0";
+    const value = host orelse return request.head.version == .@"HTTP/1.0";
     return hostValue(value);
+}
+
+/// `*tchar` (RFC 9110, 5.6.2). An empty name is refused by `std`.
+fn token(name: []const u8) bool {
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "!#$%&'*+-.^_`|~", c) == null) return false;
+    return true;
 }
 
 /// `uri-host [ ":" port ]` (RFC 3986, 3.2.2), or nothing at all, which is

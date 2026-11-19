@@ -225,7 +225,13 @@ to this file; edit `AGENTS.md`, not copies.
   chunked body is not skipped but answered with the connection closed:
   `std`'s chunk reader overflows on a chunk size near 2^64, and that must
   not be reachable on a route that reads no body. `serve` refuses a request whose `Host` is not in
-  order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
+  order before any handler sees it, and one whose head a proxy in front
+  could read differently (`admitted`): `std` parses leniently, and a
+  disagreement on where a request ends is request smuggling. That check
+  holds only what `std` lets through; two rules that duplicated refusals
+  of its parser were removed when no test could tell them apart. Chunk
+  sizes cannot be checked from outside `std`, so a connection is not
+  reused after a chunked body. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a

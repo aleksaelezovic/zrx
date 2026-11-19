@@ -972,9 +972,13 @@ there ends the conversation with `error.ReadFailed`, for a socket and an
 
 The connection is closed after an error of `body`, after an answer given
 while the peer still waits for `100 Continue`, after any answer to an
-HTTP/1.0 request (whose `Expect` is ignored), and when a body was left
+HTTP/1.0 request (whose `Expect` is ignored), when the peer asks for it
+with `close` among its `Connection` options, and when a body was left
 unread that is not skipped: one without framing on `POST`, one on `GET`,
-and a chunked one. A chunked body is read by `body` and by nothing else.
+and a chunked one. A chunked body is read by `body` and by nothing else,
+and the connection is closed after it too: where such a body ends is
+`std`'s reading of its chunk sizes, which accepts more than hexadecimal
+digits, so what follows it is not read as a request.
 
 A head that does not parse is answered 400, and one that does not fit the
 connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
@@ -984,6 +988,17 @@ in order, before any handler sees it: an HTTP/1.1 request has exactly one
 optional port, or empty. The host is a name, in which a `%` introduces two
 hexadecimal digits, or an IP address, which in brackets is an IPv6 address
 without a zone.
+
+`serve` also refuses, with 400 and before any handler sees it, a head
+that a proxy in front of it could read differently, since the two would
+then disagree on where the next request begins:
+
+- a field name that is not a token, such as one with a space before its
+  colon, and a line without a colon;
+- a CR, LF or NUL inside a field value, and a space or control character
+  in the target;
+- a `Content-Length` that is not digits only;
+- a `Transfer-Encoding` other than exactly `chunked`.
 
 A connection that breaks fails its push with `error.ReadFailed` or
 `error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
