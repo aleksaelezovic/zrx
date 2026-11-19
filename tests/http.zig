@@ -106,7 +106,7 @@ const routes = route(.{
 });
 
 const api = pipe(.{
-    recover(http.fail),
+    recover(anyerror, .{http.fail()}),
     routes,
 });
 
@@ -685,7 +685,7 @@ test "a connection that breaks fails the run, or is dropped by disconnected" {
         .{ .reader = &fine, .writer = &wires[4].writer },
     };
     try program(fromSlice(&transports), .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{zrx.drain()}),
         http.serve(api),
     }).run(.{});
     for (wires[0..4]) |*wire| try std.testing.expectEqualStrings("", wire.text());
@@ -776,7 +776,7 @@ test "an answer that cannot be written breaks the connection, not the run" {
         .{ .reader = &second, .writer = &wire.writer },
     };
     try program(fromSlice(&transports), .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{zrx.drain()}),
         http.serve(api),
     }).run(.{});
     try std.testing.expectEqualStrings(ok("text/plain", "55"), wire.text());
@@ -792,7 +792,7 @@ test "disconnected lets every other error fail the run" {
     var peer: Io.Reader = .fixed("GET /missing HTTP/1.1\r\nHost: test\r\n\r\n");
     const connection: http.Transport = .{ .reader = &peer, .writer = &wire.writer };
     try std.testing.expectError(error.NotFound, program(fromValue(connection), .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{zrx.drain()}),
         http.serve(.{routes}),
     }).run(.{}));
 }
@@ -833,7 +833,7 @@ test "connections are accepted from the listener and served by workers" {
         const served = program(http.connections(), .{
             take(3),
             concurrent(2, .{
-                recover(http.disconnected),
+                recover(http.Disconnected, .{zrx.drain()}),
                 http.serve(api),
             }),
         }).provide(.{
@@ -869,7 +869,7 @@ test "a server waiting for a request can be cancelled" {
         // One loop on the calling task: the cancellation has to come out of
         // the read it interrupts, where `std` reports it as a failed read.
         const served = program(http.connections(), .{
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(api),
         }).provide(.{
             http.listen(loopback, .{}),
@@ -907,7 +907,7 @@ test "a server whose workers hold open connections can be cancelled" {
     const Server = struct {
         const served = program(http.connections(), .{
             concurrent(2, .{
-                recover(http.disconnected),
+                recover(http.Disconnected, .{zrx.drain()}),
                 http.serve(api),
             }),
         }).provide(.{
@@ -953,7 +953,7 @@ test "a server skipping a body nobody read can be cancelled" {
         // interrupted is the one that skips the body once the request
         // was answered.
         const served = program(http.connections(), .{
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(.{
                 tap(noteReached),
                 http.status(.ok),
@@ -1060,7 +1060,7 @@ test "cancelling a server closes the connections no worker had taken" {
     const Server = struct {
         const served = program(http.connections(), .{
             concurrent(1, .{
-                recover(http.disconnected),
+                recover(http.Disconnected, .{zrx.drain()}),
                 http.serve(api),
             }),
         }).provide(.{
@@ -1147,7 +1147,7 @@ test "a copy of a connection served earlier does not take the room of a later on
         const served = program(http.connections(), .{
             take(2),
             map(previous),
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(api),
         }).provide(.{
             http.listen(loopback, .{ .pending = 1 }),
@@ -1185,7 +1185,7 @@ test "with room for one waiting connection, every connection is still served" {
         const served = program(http.connections(), .{
             take(3),
             concurrent(1, .{
-                recover(http.disconnected),
+                recover(http.Disconnected, .{zrx.drain()}),
                 http.serve(api),
             }),
         }).provide(.{
@@ -1365,7 +1365,7 @@ test "a write that was cancelled comes out as a cancellation, whatever follows o
         // dropped: were the cancellation taken for one, the run would end well.
         const served = program(http.connections(), .{
             take(1),
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(api),
         }).provide(.{
             http.listen(loopback, .{}),
@@ -1440,7 +1440,7 @@ test "a handler that shrugs off a cancelled write does not hide the cancellation
     const Server = struct {
         const served = program(http.connections(), .{
             take(1),
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(.{forEach(sendAndShrug)}),
         }).provide(.{
             http.listen(loopback, .{}),
@@ -1511,7 +1511,7 @@ fn cancelledWhileSkipping(comptime sub: anytype) !void {
     const Server = struct {
         const served = program(http.connections(), .{
             take(1),
-            recover(http.disconnected),
+            recover(http.Disconnected, .{zrx.drain()}),
             http.serve(sub),
         }).provide(.{
             http.listen(loopback, .{}),

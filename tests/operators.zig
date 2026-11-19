@@ -18,6 +18,7 @@ const takeWhile = zrx.takeWhile;
 const flatten = zrx.flatten;
 const batch = zrx.batch;
 const recover = zrx.recover;
+const Failed = zrx.Failed;
 const forEach = zrx.forEach;
 const drain = zrx.drain;
 
@@ -188,48 +189,154 @@ test "a handler error fails the run and stops the stream" {
 }
 
 const Rejected = struct { seen: *Numbers };
-fn reject(log: Rejected, _: anyerror, value: u32) void {
-    log.seen.add(value);
+fn reject(log: Rejected, failed: anytype) void {
+    log.seen.add(failed.item);
 }
+const rejections = pipe(.{forEach(reject)});
 
-test "recover skips the items its guarded operators fail on" {
+test "recover sends the items its guarded operators fail on down its path" {
     var seen: Numbers = .{};
     var rejected: Numbers = .{};
-    try program(range(u32, 0, 6), pipe(.{ recover(reject), map(evenOnly), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    try program(range(u32, 0, 6), pipe(.{ recover(anyerror, rejections), map(evenOnly), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
     try seen.expect(&.{ 0, 2, 4 });
     try rejected.expect(&.{ 1, 3, 5 });
 }
 
-fn rejectOdd(log: Rejected, err: error{Odd}, value: u32) void {
-    std.debug.assert(err == error.Odd);
-    log.seen.add(value);
+fn rejectOdd(log: Rejected, failed: Failed(error{Odd}, u32)) void {
+    std.debug.assert(failed.err == error.Odd);
+    log.seen.add(failed.item);
 }
 
 test "recover with an error set lets other errors through" {
     var seen: Numbers = .{};
     var rejected: Numbers = .{};
     const values = [_]u32{ 2, 3, 4, 500, 6 };
-    const result = program(fromSlice(&values), pipe(.{ recover(rejectOdd), map(evenOnly), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    const result = program(fromSlice(&values), pipe(.{ recover(error{Odd}, .{forEach(rejectOdd)}), map(evenOnly), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
     try std.testing.expectError(error.TooBig, result);
     try seen.expect(&.{ 2, 4 });
     try rejected.expect(&.{3});
 }
 
-fn escalate(_: anyerror, value: u32) error{Fatal}!void {
-    if (value == 3) return error.Fatal;
+/// The errors a run can still return, from the type of its result: their
+/// names, each followed by a space.
+fn remaining(comptime Result: type) []const u8 {
+    comptime var text: []const u8 = "";
+    inline for (@typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names.?) |error_name| text = text ++ error_name ++ " ";
+    return text;
 }
 
-test "a recover handler can fail the run itself" {
+test "what an error path takes is no longer among the errors of the run" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 6), pipe(.{ recover(escalate), map(evenOnly), forEach(record) })).run(.{&seen});
+    var rejected: Numbers = .{};
+    const deps = .{ &seen, Rejected{ .seen = &rejected } };
+    const some = program(range(u32, 0, 6), pipe(.{ recover(error{Odd}, .{forEach(rejectOdd)}), map(evenOnly), forEach(record) }));
+    try std.testing.expectEqualStrings("TooBig ", comptime remaining(@TypeOf(some.run(deps))));
+
+    const every = program(range(u32, 0, 6), pipe(.{ recover(anyerror, rejections), map(evenOnly), forEach(record) }));
+    try std.testing.expectEqualStrings("", comptime remaining(@TypeOf(every.run(deps))));
+}
+
+fn escalate(failed: Failed(anyerror, u32)) error{Fatal}!void {
+    if (failed.item == 3) return error.Fatal;
+}
+
+test "an error path can fail the run itself" {
+    var seen: Numbers = .{};
+    const result = program(range(u32, 0, 6), pipe(.{ recover(anyerror, .{forEach(escalate)}), map(evenOnly), forEach(record) })).run(.{&seen});
     try std.testing.expectError(error.Fatal, result);
     try seen.expect(&.{ 0, 2 });
+}
+
+fn failedItem(failed: Failed(anyerror, u32)) u32 {
+    return failed.item;
+}
+fn countOne(so_far: u32, _: u32) u32 {
+    return so_far + 1;
+}
+fn noteCount(log: Rejected, total: u32) void {
+    log.seen.add(total);
+}
+
+test "an error path has stages, state and an end of the stream of its own" {
+    var seen: Numbers = .{};
+    var rejected: Numbers = .{};
+    const counted = pipe(.{ map(failedItem), filter(below10), fold(@as(u32, 0), countOne), forEach(noteCount) });
+    const values = [_]u32{ 2, 3, 4, 500, 7, 6 };
+    try program(fromSlice(&values), pipe(.{ recover(anyerror, counted), map(evenOnly), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    try seen.expect(&.{ 2, 4, 6 });
+    // One value, at the end: the failures below ten.
+    try rejected.expect(&.{2});
+}
+
+test "an error path that wants no more ends the stream" {
+    var seen: Numbers = .{};
+    var rejected: Numbers = .{};
+    const first = pipe(.{ take(1), forEach(reject) });
+    // The stream ends as it ends anywhere: the run succeeds, and the fold
+    // after the recover still emits what it had.
+    try program(range(u32, 0, 10), pipe(.{ recover(anyerror, first), map(evenOnly), filter(isPositive), fold(@as(u32, 0), add), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    try rejected.expect(&.{1});
+    try seen.expect(&.{0});
+
+    seen = .{};
+    rejected = .{};
+    const two = pipe(.{ take(2), forEach(reject) });
+    try program(range(u32, 0, 10), pipe(.{ recover(anyerror, two), map(evenOnly), fold(@as(u32, 0), add), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    try rejected.expect(&.{ 1, 3 });
+    try seen.expect(&.{2});
+}
+
+fn isPositive(value: u32) bool {
+    return value > 0;
+}
+
+fn interrupted(value: u32) error{ Canceled, Odd }!u32 {
+    if (value == 2) return error.Canceled;
+    if (value % 2 == 1) return error.Odd;
+    return value;
+}
+
+test "a cancellation is never handed to an error path" {
+    inline for (.{ anyerror, error{ Canceled, Odd } }) |Taken| {
+        var seen: Numbers = .{};
+        var rejected: Numbers = .{};
+        const result = program(range(u32, 0, 6), pipe(.{ recover(Taken, rejections), map(interrupted), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+        try std.testing.expectError(error.Canceled, result);
+        try seen.expect(&.{0});
+        try rejected.expect(&.{1});
+    }
+}
+
+/// Fails with anything: nothing is known about its errors where it is guarded.
+fn loose(value: u32) anyerror!u32 {
+    return switch (value) {
+        1 => error.Odd,
+        3 => error.TooBig,
+        5 => error.Canceled,
+        else => value,
+    };
+}
+
+test "recover selects what it takes also where any error is possible" {
+    var seen: Numbers = .{};
+    var rejected: Numbers = .{};
+    const some = program(range(u32, 0, 8), pipe(.{ recover(error{Odd}, rejections), map(loose), forEach(record) }));
+    try std.testing.expectError(error.TooBig, some.run(.{ &seen, Rejected{ .seen = &rejected } }));
+    try seen.expect(&.{ 0, 2 });
+    try rejected.expect(&.{1});
+
+    seen = .{};
+    rejected = .{};
+    const every = program(range(u32, 0, 8), pipe(.{ recover(anyerror, rejections), map(loose), forEach(record) }));
+    try std.testing.expectError(error.Canceled, every.run(.{ &seen, Rejected{ .seen = &rejected } }));
+    try seen.expect(&.{ 0, 2, 4 });
+    try rejected.expect(&.{ 1, 3 });
 }
 
 test "recover only guards what comes after it" {
     var seen: Numbers = .{};
     var rejected: Numbers = .{};
-    const result = program(range(u32, 0, 6), pipe(.{ map(evenOnly), recover(reject), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
+    const result = program(range(u32, 0, 6), pipe(.{ map(evenOnly), recover(anyerror, rejections), forEach(record) })).run(.{ &seen, Rejected{ .seen = &rejected } });
     try std.testing.expectError(error.Odd, result);
     try rejected.expect(&.{});
 }
@@ -242,13 +349,13 @@ test "a final value from before a recover is an item like any other" {
     var rejected: Numbers = .{};
     // The fold stands before the recover: what it emits when the stream ends
     // passes through the recover, which guards what fails for it.
-    try program(range(u32, 0, 4), pipe(.{ fold(@as(u32, 0), add), recover(reject), forEach(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
+    try program(range(u32, 0, 4), pipe(.{ fold(@as(u32, 0), add), recover(anyerror, rejections), forEach(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
     try rejected.expect(&.{6});
 }
 
 test "an error of a later stage's own end of stream is not an item error" {
     var rejected: Numbers = .{};
-    const result = program(range(u32, 0, 3), pipe(.{ recover(reject), fold(@as(u32, 0), add), forEach(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
+    const result = program(range(u32, 0, 3), pipe(.{ recover(anyerror, rejections), fold(@as(u32, 0), add), forEach(failOnFinish) })).run(.{Rejected{ .seen = &rejected }});
     try std.testing.expectError(error.Late, result);
     try rejected.expect(&.{});
 }

@@ -43,7 +43,9 @@ moment inside the run.
 1. **On success**, every stage instance with a `finish` hook has finished exactly once.
    The stages of an `each` sub-pipe are instances per item: see 14.
    *Tests: "the end of the stream travels with the data", "queued sub-pipes of
-   a branch each finish once", the six "invariants" (`tests/flow.zig`).*
+   a branch each finish once", the six "invariants" (`tests/flow.zig`), "an
+   error path has stages, state and an end of the stream of its own"
+   (`tests/operators.zig`).*
 2. **On an error**, `run` returns it. A segment may have finished before
    another segment failed. `print` reports writer flush errors during item
    handling and at stream end.

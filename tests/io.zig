@@ -672,8 +672,8 @@ const Skipped = struct {
     count: std.atomic.Value(usize) = .init(0),
 };
 
-/// An ordinary `recover` handler: note the item and go on.
-fn skip(skipped: *Skipped, _: anyerror, _: u32) void {
+/// The end of an ordinary error path: note the failure and go on.
+fn skip(skipped: *Skipped, _: zrx.Failed(anyerror, u32)) void {
     _ = skipped.count.fetchAdd(1, .seq_cst);
 }
 
@@ -697,7 +697,7 @@ test "a failure ends the run although the segment it interrupts is printing unde
     // segment has no request left, and still comes to an end.
     const work = pipe(.{
         queue(2),
-        recover(skip),
+        recover(anyerror, .{forEach(skip)}),
         print(Report, "{d}\n"),
     });
     const result = program(fromProducer(u32, pushThenFailOnceWriting), work).provide(.{fileWriter(Report, path, 1, .{})}).run(.{ support.WriteHeld.over(io), &skipped });

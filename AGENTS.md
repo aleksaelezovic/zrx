@@ -71,13 +71,23 @@ to this file; edit `AGENTS.md`, not copies.
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
   forward their children's requirements. No closures, no runtime function pointers.
-- **Errors are Zig errors.** A handler error fails the run after teardown.
-  `recover(handler)` guards the operators after it per item; its error
-  parameter type selects what it handles; `error.Canceled` is never handled.
-  A final value from a stage before the `recover` is an item like any other;
-  errors of a later stage's own finish, or beyond a `queue`, are
-  not item errors. No error lane,
-  no rollback.
+- **Errors are Zig errors; one that is taken becomes an item.** A handler
+  error fails the run after teardown. `recover(E, path)` guards the
+  operators after it per item: a failure with an error in `E` leaves the
+  pipe and goes down `path` as a `Failed(E, Item)`. The path is a
+  terminated sub-pipe that the stage holds as one value, as `branch` holds
+  its own, and that is finished where the `recover` is. `error.Canceled`
+  is never taken. A path that answers `.done` ends the stream, so the
+  stage remembers nothing; a path that fails fails the run. Errors the
+  path does not take are returned by name, so `run`'s error set holds
+  only those. A final value from a stage before the `recover` is an item
+  like any other; errors of a later stage's own finish, or beyond a
+  `queue`, are not item errors. The error still comes back up the call
+  stack to the `recover` as a Zig error: nothing is carried through the
+  chain beside the items, and nothing is rolled back. `recover` took a
+  handler before; that is a path of `forEach(handler)`, and there is no
+  second spelling. A path cannot contain a task boundary: that would make
+  `recover` one more shape for the scope to be tested with.
 - **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and

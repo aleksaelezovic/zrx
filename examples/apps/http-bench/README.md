@@ -29,7 +29,7 @@ pipes and one handler.
 ```zig
 /// What is done with a request.
 pub const api = pipe(.{
-    recover(http.fail),
+    recover(anyerror, .{http.fail()}),
     route(.{
         when(all(.{ isBaseline, readsOrPosts }), sums),
         when(all(.{ isJson, http.method(.GET) }), greets),
@@ -41,7 +41,7 @@ pub const api = pipe(.{
 /// What is done with a connection: one of `workers` holds its conversation.
 pub const server = program(http.connections(), .{
     concurrent(workers, .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{drain()}),
         http.serve(api),
     }),
 });
@@ -70,10 +70,10 @@ flowchart TD
 - The program's pipe carries connections; `api` carries the requests of one
   connection. `sums` and `greets` are the two answers, each a `map` and a
   responder.
-- `recover(http.fail)` turns an error of `sum` (a body that is too large,
-  has no length, or stands on a `GET`) into its status.
-  `recover(http.disconnected)` drops a connection that broke and lets the
-  server go on.
+- `recover(anyerror, .{http.fail()})` turns an error of `sum` (a body that
+  is too large, has no length, or stands on a `GET`) into its status.
+  `recover(http.Disconnected, .{drain()})` drops a connection that broke
+  and lets the server go on.
 - The listener is a resource given to `run`, so the system acquires it once
   for both programs. `announcement` is a program of one item: the bound
   port, printed. That is how `serve 0` tells its caller which port the
@@ -256,7 +256,7 @@ it shapes the app:
    values is a loop in the handler `sum`.
 
 What needed nothing: routing by path and method, the statuses of a refused
-body (`http.fail`), a lost peer (`http.disconnected`), testing the
+body (`http.fail`), a lost peer (`http.Disconnected`), testing the
 production `api` pipe against in-memory I/O (`http.Transport`), and
 announcing the port, which is a second program in the system that shares
 the listener.

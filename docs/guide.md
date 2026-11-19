@@ -228,7 +228,7 @@ Per item:
 | `takeWhile(p)` | `fn (deps..., T) bool` | Items until `p` is first false, then stops the source. |
 | `flatten()` | | Each element of array, slice, or batch items. |
 | `batch(n)` | | Inline `Batch(T, n)` values (the last may contain fewer items). |
-| `recover(h)` | `fn (deps..., E, T) void` | Handles errors of the operators after it. |
+| `recover(E, path)` | | A failure of the operators after it, with an error in `E`, goes down `path` as a `Failed(E, T)`. |
 
 Flow:
 
@@ -413,27 +413,47 @@ const manifest = pipe(.{
 - The sub-pipe cannot contain a task boundary: a failure beyond one happens
   on another task.
 
-To drop the item, put `recover(handler)` before the operators that may
-fail. When one of them fails for an item, the handler receives the error and
-the item as it was at the `recover`. Returning normally skips the item;
-returning an error fails the run.
+To take the item out of the pipe, put `recover(E, path)` before the
+operators that may fail. When one of them fails for an item with an error in
+`E`, the item leaves the pipe and a `Failed(E, Item)` goes down `path`
+instead: `.err` is the error and `.item` the item as it was at the
+`recover`. The path is a terminated pipe like any other, with stages, state
+and an end of the stream of its own.
 
 ```zig
-fn reject(log: Log, err: ParseError, line: []const u8) void { ... }
+const Rejected = zrx.Failed(ParseError, []const u8);
+
+fn described(rejected: Rejected) Rejection { ... }
+
+/// Where a line that did not parse goes instead.
+const rejections = pipe(.{
+    map(described),
+    print(zrx.Stderr, "{f}\n"),
+});
 
 pipe(.{
-    recover(reject),
+    recover(ParseError, rejections),
     map(parse),
     map(validate),
     forEach(save),
 })
 ```
 
-- The handler's error parameter selects what it handles: an error set handles
-  its members and lets everything else through; `anyerror` handles everything.
-- `error.Canceled` is never given to a handler. A write that was interrupted
+What the path does with a failure decides how it ends:
+
+| The path | The stream |
+|---|---|
+| takes the failure | goes on without the item. |
+| wants no more (a `take(1)` at its start: report the first failure) | ends as it ends anywhere, and the run succeeds. See "Stopping early". |
+| fails (a handler in it returns an error, its own or `failed.err`) | fails the run with that error. |
+
+- `E` selects what the path takes: an error set takes its members and lets
+  everything else through; `anyerror` takes everything. What the path takes
+  is no longer in `run`'s error set.
+- `error.Canceled` is never sent down a path. A write that was interrupted
   because the run is being cancelled is: `std.Io.Writer` reports it as
   `error.WriteFailed` like any failed write.
+- The path cannot contain a task boundary.
 - A `recover` guards what comes *after* it, up to the next task boundary
   (`queue`, `batchWithin` or `debounce`). Errors on the far side happen in
   another task and fail the run.
@@ -835,7 +855,7 @@ compiled only when a program uses it.
 const http = zrx.ext.http;
 
 const api = pipe(.{
-    recover(http.fail),
+    recover(anyerror, .{http.fail()}),
     route(.{
         when(http.path("/sum"), .{
             map(sum),
@@ -851,7 +871,7 @@ const api = pipe(.{
 
 const server = program(http.connections(), .{
     concurrent(64, .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{drain()}),
         http.serve(api),
     }),
 }).provide(.{http.listen(address, .{ .reuse_address = true })});
@@ -872,8 +892,8 @@ to `serve` carries the requests of one connection.
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
 | `http.status(code)` | Terminal, in `sub`. Answers the final status `code` with an empty body; a 204 or 304 carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
-| `http.fail` | For `recover`, in `sub`: answers a failed request with the status of its error. |
-| `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
+| `http.fail()` | Terminal, in an error path in `sub`: answers a failed request with the status of its error. |
+| `http.Disconnected` | The errors a connection that broke fails with. `recover(http.Disconnected, .{drain()})` before `serve` drops such a connection. |
 
 `serve` constructs `sub` anew for every connection and finishes it when the
 conversation ends without an error, so its stages hold per-connection state: with an inner
@@ -938,8 +958,8 @@ place. `100 Continue` is sent by `request.body`, as above.
 
 ### Failures
 
-`recover(http.fail)` at the start of `sub` turns a handler's error into an
-answer and lets the connection go on:
+`recover(anyerror, .{http.fail()})` at the start of `sub` turns a handler's
+error into an answer and lets the connection go on:
 
 | Error | Status |
 |---|---|
@@ -1005,8 +1025,8 @@ safety checks. A client has to send a `Content-Length`. (A coding whose
 name `std` does not know is a head that does not parse: 400.)
 
 A connection that breaks fails its push with `error.ReadFailed` or
-`error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
-exactly these two, so one lost peer does not end the server and every other
+`error.WriteFailed`. `recover(http.Disconnected, .{drain()})` before `serve`
+takes exactly these two, so one lost peer does not end the server and every other
 error still does. `fail` does not answer them either: they pass through it.
 
 ### Connections and writes
@@ -1023,7 +1043,7 @@ Every connection has to end in a `serve` or a `reject`. On its way there it
 may wait at a boundary (`queue`, `concurrent`) and pass through stages that
 hand on every item they are given (`route`, `tap`, `take`). A stage that
 drops a connection or keeps it back (`filter`, `batch`, any other terminal,
-a `recover` handling the failure of a stage the connection had not yet
+a `recover` taking the failure of a stage the connection had not yet
 left for `serve`) does not close it and does not free its place: it stays
 open and counts as waiting until the run is over. So do not filter connections. Route the ones you will not serve to
 `reject`, which frees the place:

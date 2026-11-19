@@ -387,8 +387,8 @@ test "a failure of the pipe after an attempt passes through, whatever its name" 
 }
 
 const Rejected = struct { seen: *Numbers };
-fn reject(log: Rejected, _: anyerror, value: u32) void {
-    log.seen.add(value);
+fn reject(log: Rejected, failed: anytype) void {
+    log.seen.add(failed.item);
 }
 fn failAlways(_: u32) error{Ended}!u32 {
     return error.Ended;
@@ -400,7 +400,10 @@ test "a recover inside the sub-pipe does not see a failure of the pipe after the
     var fallbacks: Fallbacks = .{};
     const work = pipe(.{
         attempt(.{
-            recover(reject),
+            // It would take the failure after the attempt, if it saw it. It
+            // leaves `TooBig` to the fallback: a sub-pipe that cannot fail
+            // has nothing to attempt.
+            recover(error{ Odd, Ended }, .{forEach(reject)}),
             map(evenOnly),
         }, plusHundred),
         map(failAlways),

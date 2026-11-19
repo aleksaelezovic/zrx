@@ -399,12 +399,10 @@ test "concurrent fails when worker tasks cannot be started" {
     try seen.expect(&.{});
 }
 
-fn ignoreFive(_: error{Five}, _: u32) void {}
-
-test "recover inside a concurrent worker can handle an error from its downstream push" {
+test "recover inside a concurrent worker can take an error from its downstream push" {
     var seen: Numbers = .{};
     try program(range(u32, 4, 7), .{
-        concurrent(1, .{ zrx.recover(ignoreFive), map(same) }),
+        concurrent(1, .{ zrx.recover(error{Five}, .{drain()}), map(same) }),
         map(failAtFive),
         forEach(record),
     }).run(.{ io, &seen });

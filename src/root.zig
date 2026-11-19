@@ -38,7 +38,6 @@ pub const takeWhile = transform.takeWhile;
 pub const flatten = transform.flatten;
 pub const batch = transform.batch;
 pub const Batch = transform.Batch;
-pub const recover = transform.recover;
 
 // Terminal operators
 const sink = @import("ops/sink.zig");
@@ -61,6 +60,8 @@ pub const concurrent = @import("ops/concurrent.zig").concurrent;
 const nested = @import("ops/nested.zig");
 pub const each = nested.each;
 pub const attempt = nested.attempt;
+pub const recover = nested.recover;
+pub const Failed = nested.Failed;
 
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;

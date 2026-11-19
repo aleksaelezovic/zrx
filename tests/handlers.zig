@@ -227,14 +227,14 @@ test "require works inside compose and under orElse" {
 }
 
 const Rejected = struct { odd: u32 = 0 };
-fn countOdd(rejected: *Rejected, _: error{Odd}, _: u32) void {
+fn countOdd(rejected: *Rejected, _: zrx.Failed(error{Odd}, u32)) void {
     rejected.odd += 1;
 }
 
 test "an item that require fails can be skipped with recover" {
     var seen: Numbers = .{};
     var rejected: Rejected = .{};
-    const evens = pipe(.{ zrx.recover(countOdd), map(require(isEven, error.Odd)), forEach(record) });
+    const evens = pipe(.{ zrx.recover(error{Odd}, .{forEach(countOdd)}), map(require(isEven, error.Odd)), forEach(record) });
     try program(range(u32, 0, 5), evens).run(.{ &seen, &rejected });
     try seen.expect(&.{ 0, 2, 4 });
     try std.testing.expectEqual(@as(u32, 2), rejected.odd);

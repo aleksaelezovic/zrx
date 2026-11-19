@@ -121,7 +121,7 @@ This app existed for the previous zrx and was rebuilt on the rewritten API
 without changing the library, to find out what is missing. What it needed
 that was general has since been added to zrx: `orElse`, which turns a
 handler's error into a value (a rejected record has to continue downstream,
-and `recover` can only skip), the `.create_new` mode of `fileWriter`, and
+and `recover` takes the item out of the pipe), the `.create_new` mode of `fileWriter`, and
 `fileReader`, with which the input is a binding like the output. Bindings
 are acquired in the order they are written, so the input is opened before
 the output is created and a missing input leaves no file behind.

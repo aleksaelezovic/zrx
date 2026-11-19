@@ -4,7 +4,7 @@ const http = zrx.ext.http;
 
 test {
     try zrx.program(zrx.range(u32, 0, 3), .{
-        zrx.recover(http.fail),
+        zrx.recover(anyerror, .{http.fail()}),
         zrx.drain(),
     }).run(.{});
 }

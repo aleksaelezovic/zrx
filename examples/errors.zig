@@ -1,5 +1,5 @@
-//! A handler error fails the run unless a `recover` upstream handles it.
-//! Here good records go to stdout and rejected ones to stderr.
+//! A handler error fails the run unless a `recover` before it takes it. Here
+//! good records go to stdout and rejected ones down a path of their own.
 const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
@@ -21,14 +21,22 @@ fn double(value: u32) u32 {
     return value * 2;
 }
 
-/// Handles exactly `ParseError`; any other error would still fail the run.
-fn reject(err_out: zrx.Stderr, err: ParseError, text: []const u8) !void {
-    try err_out.writer.print("rejected \"{s}\": {s}\n", .{ text, @errorName(err) });
-    try err_out.writer.flush();
+/// A line that did not parse, and why.
+const Rejected = zrx.Failed(ParseError, []const u8);
+
+fn described(rejected: Rejected) struct { []const u8, []const u8 } {
+    return .{ rejected.item, @errorName(rejected.err) };
 }
 
+/// Where a rejected line goes instead: a pipe like any other.
+const rejections = pipe(.{
+    map(described),
+    print(zrx.Stderr, "rejected \"{s}\": {s}\n"),
+});
+
+/// Takes exactly `ParseError`; any other error would still fail the run.
 pub const records = pipe(.{
-    recover(reject),
+    recover(ParseError, rejections),
     map(parse),
     map(double),
     print(zrx.Stdout, "{d}\n"),

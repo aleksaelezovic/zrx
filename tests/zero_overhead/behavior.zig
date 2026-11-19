@@ -54,12 +54,22 @@ test "flattened" {
     }
 }
 
-test "recovered" {
+test "recovered, recoveredInto, recoveredOnce" {
+    for (inputs) |items| inline for (.{ cases.recovered, cases.recoveredInto, cases.recoveredOnce }) |case| {
+        var with: struct { u32, u64 } = .{ 0, 0 };
+        var without: struct { u32, u64 } = .{ 0, 0 };
+        case(true, items, &with[0], &with[1]);
+        case(false, items, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
+test "recoveredOrFailed" {
     for (inputs) |items| {
         var with: struct { u32, u64 } = .{ 0, 0 };
         var without: struct { u32, u64 } = .{ 0, 0 };
-        cases.recovered(true, items, &with[0], &with[1]);
-        cases.recovered(false, items, &without[0], &without[1]);
+        const failed = cases.recoveredOrFailed(true, items, &with[0], &with[1]);
+        try std.testing.expectEqual(cases.recoveredOrFailed(false, items, &without[0], &without[1]), failed);
         try std.testing.expectEqual(without, with);
     }
 }

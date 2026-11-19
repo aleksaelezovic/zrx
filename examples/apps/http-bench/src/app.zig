@@ -13,6 +13,7 @@ const route = zrx.route;
 const when = zrx.when;
 const otherwise = zrx.otherwise;
 const recover = zrx.recover;
+const drain = zrx.drain;
 const concurrent = zrx.concurrent;
 const print = zrx.print;
 const all = zrx.all;
@@ -48,7 +49,7 @@ const readsOrPosts = any(.{ http.method(.GET), http.method(.POST) });
 
 /// What is done with a request.
 pub const api = pipe(.{
-    recover(http.fail),
+    recover(anyerror, .{http.fail()}),
     route(.{
         when(all(.{ isBaseline, readsOrPosts }), sums),
         when(all(.{ isJson, http.method(.GET) }), greets),
@@ -60,7 +61,7 @@ pub const api = pipe(.{
 /// What is done with a connection: one of `workers` holds its conversation.
 pub const server = program(http.connections(), .{
     concurrent(workers, .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{drain()}),
         http.serve(api),
     }),
 });
