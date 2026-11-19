@@ -950,7 +950,9 @@ answer and lets the connection go on:
 | anything else | 500 |
 
 Without it, a handler's error fails the run like any other. The answers
-that were completed before it are still written to the peer.
+that were completed before it are still written to the peer, unless the
+connection itself has failed: a connection whose read or write failed is not
+written to again.
 
 A connection goes on after an answer when the next request can be found: the
 body was read to its end, or was not read and can be skipped. It is closed
@@ -963,7 +965,9 @@ connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
 the connection is closed. The same goes for a request whose `Host` is not
 in order, before any handler sees it: an HTTP/1.1 request has exactly one
 `Host`, an HTTP/1.0 request at most one, and its value is a host with an
-optional port, or empty.
+optional port, or empty. The host is a name, in which a `%` introduces two
+hexadecimal digits, or an IP address, which in brackets is an IPv6 address
+without a zone.
 
 A connection that breaks fails its push with `error.ReadFailed` or
 `error.WriteFailed`. `recover(http.disconnected)` before `serve` handles

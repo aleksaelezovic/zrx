@@ -508,13 +508,13 @@ test "a request needs one valid Host, and an HTTP/1.0 request may have none" {
     try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\n\r\n");
     try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nHost: test\r\n\r\n");
     try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.0\r\nHost: a\r\nhost: b\r\n\r\n");
-    inline for (.{ "two words", "a/path", "user@host", "host:port", "[::1", "[]", "[::1]x" }) |value| {
+    inline for (.{ "two words", "a/path", "user@host", "host:port", "[::1", "[]", "[::1]x", "[abc]", "[1::2::3]", "[::1%25eth0]", "[fe80::1%1]", "[v1]", "[v.x]", "example%", "ex%4", "ex%zzample" }) |value| {
         try expectAnswer(refused, "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: " ++ value ++ "\r\n\r\n");
     }
     // What is refused is refused before any handler, and what came before it is answered.
     try expectAnswer(ok("text/plain", "55") ++ refused, get_sum ++ "GET /sum HTTP/1.1\r\n\r\n" ++ get_sum);
 
-    inline for (.{ "example.com", "example.com:8080", "127.0.0.1:80", "[::1]", "[2001:db8::1]:8443", "", "host:" }) |value| {
+    inline for (.{ "example.com", "example.com:8080", "127.0.0.1:80", "[::1]", "[2001:db8::1]:8443", "[::ffff:1.2.3.4]", "[v1f.a:b]", "ex%41mple", "", "host:" }) |value| {
         try expectAnswer(ok("text/plain", "55"), "GET /sum?a=13&b=42 HTTP/1.1\r\nHost: " ++ value ++ "\r\n\r\n");
     }
 }
@@ -573,6 +573,32 @@ test "a connection that breaks fails the run, or is dropped by disconnected" {
     var again = brokenAfter("GET /sum HT", &storage[3]);
     const one: http.Transport = .{ .reader = &again, .writer = &wires[0].writer };
     try std.testing.expectError(error.ReadFailed, program(fromValue(one), .{http.serve(api)}).run(.{}));
+}
+
+/// A writer that takes nothing, and counts how often it was asked to.
+const Refusing = struct {
+    writer: Io.Writer,
+    buffer: [64]u8 = undefined,
+    attempts: usize = 0,
+
+    fn init(refusing: *Refusing) void {
+        refusing.* = .{ .writer = .{ .buffer = &refusing.buffer, .vtable = &.{ .drain = drain } } };
+    }
+
+    fn drain(writer: *Io.Writer, _: []const []const u8, _: usize) Io.Writer.Error!usize {
+        const refusing: *Refusing = @alignCast(@fieldParentPtr("writer", writer));
+        refusing.attempts += 1;
+        return error.WriteFailed;
+    }
+};
+
+test "a connection whose write failed is not written to again" {
+    var peer: Io.Reader = .fixed(get_sum);
+    var refusing: Refusing = undefined;
+    refusing.init();
+    const one: http.Transport = .{ .reader = &peer, .writer = &refusing.writer };
+    try std.testing.expectError(error.WriteFailed, program(fromValue(one), .{http.serve(api)}).run(.{}));
+    try std.testing.expectEqual(@as(usize, 1), refusing.attempts);
 }
 
 test "an answer that cannot be written breaks the connection, not the run" {
@@ -1145,6 +1171,98 @@ test "a connection a stage dropped is closed by the listener when the run is ove
     try std.testing.expectEqual(@as(usize, 0), Sockets.closed_twice.load(.seq_cst));
     var in = dropped.reader(io, &.{});
     try std.testing.expectEqual(@as(usize, 0), try in.interface.readSliceShort(&answer));
+}
+
+/// An `Io` whose first write to a socket is cancelled, and whose later ones
+/// fail for another reason. One at a time: its state is global.
+const WriteCancelledOnce = struct {
+    var inner: Io = undefined;
+    var vtable: Io.VTable = undefined;
+    var writes: std.atomic.Value(usize) = .init(0);
+
+    fn over(under: Io) Io {
+        inner = under;
+        vtable = under.vtable.*;
+        vtable.operate = operate;
+        writes.store(0, .seq_cst);
+        return .{ .userdata = under.userdata, .vtable = &vtable };
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: Io.Operation) Io.Cancelable!Io.Operation.Result {
+        if (operation != .net_write) return inner.vtable.operate(userdata, operation);
+        if (writes.fetchAdd(1, .seq_cst) == 0) return error.Canceled;
+        return .{ .net_write = error.NetworkDown };
+    }
+};
+
+test "a write that was cancelled comes out as a cancellation, whatever follows on the socket" {
+    const Server = struct {
+        // One connection, on the calling task, with broken connections
+        // dropped: were the cancellation taken for one, the run would end well.
+        const served = program(http.connections(), .{
+            take(1),
+            recover(http.disconnected),
+            http.serve(api),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{ WriteCancelledOnce.over(io), &ready });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out = stream.writer(io, &.{});
+    try out.interface.writeAll(get_sum);
+    try std.testing.expectError(error.Canceled, server.await(io));
+    // Nothing was written again after the write that was cancelled.
+    try std.testing.expectEqual(@as(usize, 1), WriteCancelledOnce.writes.load(.seq_cst));
+}
+
+/// Fills more than the connection's buffer, so that the answer is written
+/// at once, takes the failure of that write, and fails for another reason.
+fn sendThenFail(response: http.Response, _: http.Request) error{NotFound}!void {
+    const large: [2 * 4096]u8 = @splat('x');
+    response.send(.ok, "text/plain", &large) catch {};
+    return error.NotFound;
+}
+
+test "a handler that fails after a cancelled write does not hide the cancellation" {
+    const Server = struct {
+        const served = program(http.connections(), .{
+            take(1),
+            http.serve(.{forEach(sendThenFail)}),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready) !void {
+            return served.run(.{ with, ready });
+        }
+    };
+    var ready: Ready = .{};
+    var server = try io.concurrent(Server.run, .{ WriteCancelledOnce.over(io), &ready });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const stream = try address.connect(io, .{ .mode = .stream });
+    defer stream.close(io);
+    var out = stream.writer(io, &.{});
+    try out.interface.writeAll(get_sum);
+    // The handler's own error would have the answers before it flushed. The
+    // connection has failed, though: it is not written to again.
+    try std.testing.expectError(error.Canceled, server.await(io));
+    try std.testing.expectEqual(@as(usize, 1), WriteCancelledOnce.writes.load(.seq_cst));
 }
 
 /// An `Io` whose first accept finds that the peer has already given up.

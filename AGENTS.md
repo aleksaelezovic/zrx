@@ -207,8 +207,10 @@ to this file; edit `AGENTS.md`, not copies.
   interim one (1xx) is answered 500, since it would leave the peer without
   an answer, and 204 and 304 go out without a body or a length. A cancellation
   `std` recorded on the connection comes out of `serve` whatever the
-  conversation returned, and answers completed before a conversation
-  failed are flushed. `serve` refuses a request whose `Host` is not in
+  conversation returned. Answers completed before a handler failed are
+  flushed, but a connection whose read or write failed is not written to
+  again: a second failure would replace the one `std` recorded, and a
+  cancellation recorded there would be lost. `serve` refuses a request whose `Host` is not in
   order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is

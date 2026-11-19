@@ -604,7 +604,7 @@ fn Serve(comptime P: type) type {
 
                 pub fn push(self: *Self, connection: In, _: anytype) !Flow {
                     if (In == Transport) {
-                        try self.converse(connection.reader, connection.writer);
+                        try self.converse(connection.reader, connection.writer, Unrecorded{});
                         return .more;
                     }
                     const io = di.get(self.env, Io);
@@ -614,7 +614,7 @@ fn Serve(comptime P: type) type {
                     var out_buffer: [output_bytes]u8 = undefined;
                     var reader = connection.stream.reader(io, &in_buffer);
                     var writer = connection.stream.writer(io, &out_buffer);
-                    const outcome = self.converse(&reader.interface, &writer.interface);
+                    const outcome = self.converse(&reader.interface, &writer.interface, Recorded{ .reader = &reader, .writer = &writer });
                     // `std` reports a cancelled read or write as a failed one,
                     // or not at all when it was skipping a body for us, and
                     // records which it was. The request is used up either
@@ -625,13 +625,24 @@ fn Serve(comptime P: type) type {
                     return .more;
                 }
 
-                fn converse(self: *const Self, in: *Io.Reader, out: *Io.Writer) !void {
+                fn converse(self: *const Self, in: *Io.Reader, out: *Io.Writer, transport: anytype) !void {
                     var exchange: Exchange = .{ .server = .init(in, out), .request = undefined, .pending = false, .broken = false };
                     var chain: Chain = undefined;
                     chain.init(&self.op.pipe, di.extend(self.env, Response{ .exchange = &exchange }));
-                    // Whatever ends the conversation early, the answers
-                    // that were completed before it are the peer's.
-                    errdefer out.flush() catch {};
+                    return self.requests(&exchange, &chain, in, out) catch |err| {
+                        // When a handler ends the conversation early, the
+                        // answers completed before it are still the peer's.
+                        // Not so when the connection itself failed: writing
+                        // to it again could replace the failure `std`
+                        // recorded, a cancellation among them, with that of
+                        // the new write.
+                        if (err != error.ReadFailed and err != error.WriteFailed and transport.usable()) out.flush() catch {};
+                        return err;
+                    };
+                }
+
+                /// The requests of one connection, each through `chain`.
+                fn requests(_: *const Self, exchange: *Exchange, chain: *Chain, in: *Io.Reader, out: *Io.Writer) !void {
                     while (true) {
                         // The peer may be waiting for what was answered so
                         // far, unless a whole further request is already
@@ -660,7 +671,7 @@ fn Serve(comptime P: type) type {
                             if (std.ascii.eqlIgnoreCase(expectation, "100-continue")) exchange.request.head.expect = "100-continue";
                         }
                         exchange.pending = true;
-                        const wants_more = try chain.push(Request{ .exchange = &exchange }, Closed{}) == .more;
+                        const wants_more = try chain.push(Request{ .exchange = exchange }, Closed{}) == .more;
                         if (exchange.pending) _ = try exchange.begin(.internal_server_error, null, 0);
                         if (!wants_more or !exchange.reusable()) break;
                     }
@@ -671,6 +682,25 @@ fn Serve(comptime P: type) type {
         }
     };
 }
+
+/// A socket: `std` records why a read or a write failed, and a later
+/// failure replaces the record. Nothing has failed while both are empty.
+const Recorded = struct {
+    reader: *const Io.net.Stream.Reader,
+    writer: *const Io.net.Stream.Writer,
+
+    fn usable(recorded: Recorded) bool {
+        return recorded.reader.err == null and recorded.writer.err == null;
+    }
+};
+
+/// A reader and a writer of the caller's: what failed is only known from
+/// the error that came back.
+const Unrecorded = struct {
+    fn usable(_: Unrecorded) bool {
+        return true;
+    }
+};
 
 /// RFC 9112, 3.2: a request has at most one `Host`, with a valid value, and
 /// an HTTP/1.1 request has exactly one. Anything else is answered 400.
@@ -686,24 +716,56 @@ fn hostValid(request: *std.http.Server.Request) bool {
     return hostValue(value);
 }
 
-/// `uri-host [ ":" port ]`, or nothing at all, which is what a client sends
-/// for a target without an authority.
+/// `uri-host [ ":" port ]` (RFC 3986, 3.2.2), or nothing at all, which is
+/// what a client sends for a target without an authority.
 fn hostValue(value: []const u8) bool {
     var rest = value;
     if (rest.len != 0 and rest[0] == '[') {
-        // An IP literal: up to its closing bracket.
         const close = std.mem.findScalar(u8, rest, ']') orelse return false;
-        if (close == 1) return false;
-        for (rest[1..close]) |c| if (!std.ascii.isHex(c) and c != ':' and c != '.' and c != '%' and c != 'v') return false;
+        if (!ipLiteral(rest[1..close])) return false;
         rest = rest[close + 1 ..];
     } else {
+        // A registered name or an IPv4 address: neither holds a colon.
         const end = std.mem.findScalar(u8, rest, ':') orelse rest.len;
-        for (rest[0..end]) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "-._~%!$&'()*+,;=", c) == null) return false;
+        if (!nameText(rest[0..end], "")) return false;
         rest = rest[end..];
     }
     if (rest.len == 0) return true;
     if (rest[0] != ':') return false;
     for (rest[1..]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// What stands between the brackets: an IPv6 address, or an address of a
+/// later version, `"v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" )`.
+fn ipLiteral(literal: []const u8) bool {
+    if (literal.len != 0 and (literal[0] == 'v' or literal[0] == 'V')) {
+        const dot = std.mem.findScalar(u8, literal, '.') orelse return false;
+        if (dot == 1 or dot + 1 == literal.len) return false;
+        for (literal[1..dot]) |c| if (!std.ascii.isHex(c)) return false;
+        // No percent-encoding here: `%` is not in the set.
+        for (literal[dot + 1 ..]) |c| if (c == '%') return false;
+        return nameText(literal[dot + 1 ..], ":");
+    }
+    // An address as it is written, which leaves out a zone: `%` is no
+    // part of one.
+    _ = Io.net.Ip6Address.parse(literal, 0) catch return false;
+    return true;
+}
+
+/// Unreserved characters, sub-delimiters, `also`, and percent-encoded
+/// bytes: a `%` is followed by two hexadecimal digits.
+fn nameText(name: []const u8, comptime also: []const u8) bool {
+    var i: usize = 0;
+    while (i < name.len) : (i += 1) {
+        const c = name[i];
+        if (c == '%') {
+            if (name.len - i < 3 or !std.ascii.isHex(name[i + 1]) or !std.ascii.isHex(name[i + 2])) return false;
+            i += 2;
+        } else if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "-._~!$&'()*+,;=" ++ also, c) == null) {
+            return false;
+        }
+    }
     return true;
 }
 
