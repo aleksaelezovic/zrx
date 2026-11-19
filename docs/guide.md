@@ -959,8 +959,12 @@ or `body` and went on, or it happened while an unread body was skipped. An
 answer is not started on it either, however large: `send` and the
 responders return the failure and write nothing. The conversation ends
 there with `error.ReadFailed` or `error.WriteFailed`, or with
-`error.Canceled` if that is what interrupted it. For an `http.Transport`,
-only the errors that come back are known.
+`error.Canceled` if that is what interrupted it.
+
+An `http.Transport` has no such record. A read that fails while an unread
+body is skipped ends its conversation in the same way, with
+`error.ReadFailed` and without an answer. A failure that a handler took
+is not known to `serve`.
 
 A connection goes on after an answer when the next request can be found: the
 body was read to its end, or was not read and can be skipped. It is closed

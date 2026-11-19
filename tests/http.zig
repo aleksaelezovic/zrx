@@ -601,6 +601,49 @@ test "a connection whose write failed is not written to again" {
     try std.testing.expectEqual(@as(usize, 1), refusing.attempts);
 }
 
+/// A reader that delivers `arrival` in one read and fails at the next.
+const Breaking = struct {
+    reader: Io.Reader,
+    buffer: [512]u8 = undefined,
+    arrival: []const u8,
+    reads: usize = 0,
+
+    fn init(breaking: *Breaking, arrival: []const u8) void {
+        breaking.* = .{ .arrival = arrival, .reader = .{ .buffer = &breaking.buffer, .vtable = &.{ .stream = stream }, .seek = 0, .end = 0 } };
+    }
+
+    fn stream(reader: *Io.Reader, writer: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const breaking: *Breaking = @alignCast(@fieldParentPtr("reader", reader));
+        breaking.reads += 1;
+        if (breaking.reads != 1) return error.ReadFailed;
+        return writer.write(limit.sliceConst(breaking.arrival));
+    }
+};
+
+/// Serves a request whose body `sub` leaves unread and which has arrived in
+/// part, from a reader that fails when the rest is asked for.
+fn brokenWhileSkipping(comptime sub: anytype, comptime framing: []const u8) !void {
+    var breaking: Breaking = undefined;
+    breaking.init("POST /x HTTP/1.1\r\nHost: test\r\n" ++ framing);
+    var wire: Wire = undefined;
+    wire.init();
+    const connection: http.Transport = .{ .reader = &breaking.reader, .writer = &wire.writer };
+    try std.testing.expectError(error.ReadFailed, program(fromValue(connection), .{http.serve(sub)}).run(.{}));
+    try std.testing.expectEqual(@as(usize, 2), breaking.reads);
+    try std.testing.expectEqual(@as(usize, 0), wire.writes);
+}
+
+test "a reader that fails while an unread body is skipped ends the conversation without a write" {
+    const with_length = "Content-Length: 10\r\n\r\nabc";
+    const chunked = "Transfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n";
+    // Before an answer with content, one without, and the 500 for a request
+    // the pipe left unanswered.
+    try brokenWhileSkipping(.{http.status(.ok)}, with_length);
+    try brokenWhileSkipping(.{http.status(.ok)}, chunked);
+    try brokenWhileSkipping(.{http.status(.no_content)}, with_length);
+    try brokenWhileSkipping(.{zrx.drain()}, with_length);
+}
+
 test "an answer that cannot be written breaks the connection, not the run" {
     var first: Io.Reader = .fixed(get_sum);
     var second: Io.Reader = .fixed(get_sum);

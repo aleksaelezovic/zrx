@@ -350,9 +350,9 @@ const Exchange = struct {
         request.head.expect = null;
         if (request.head.keep_alive) {
             try x.flushBeforeBody();
-            // Skipped here and not by `std` as it answers, so that the
-            // connection can be looked at in between.
-            if (!x.skipBody()) request.head.keep_alive = false;
+            // Skipped here and not by `std` as it answers, which keeps a
+            // failed read to itself and goes on to write.
+            if (!try x.skipBody()) request.head.keep_alive = false;
         }
         // The last read of this request is behind it, whether the handler
         // read the body or it was skipped. If the connection failed, the
@@ -421,13 +421,15 @@ const Exchange = struct {
     }
 
     /// Reads past a body nobody asked for, as `std` would when it answers.
-    /// False when the next request cannot be found behind it.
-    fn skipBody(x: *Exchange) bool {
+    /// False when the next request cannot be found behind it. Fails when
+    /// the connection did, which is not the peer's framing: that `std`
+    /// puts on record.
+    fn skipBody(x: *Exchange) error{ReadFailed}!bool {
         const reader = &x.server.reader;
         if (reader.state != .received_head) return reader.state == .ready;
         if (x.request.head.method.requestHasBody()) {
             const body = x.request.readerExpectContinue(&.{}) catch return false;
-            _ = body.discardRemaining() catch return false;
+            _ = body.discardRemaining() catch return if (reader.body_err == null) error.ReadFailed else false;
         } else {
             reader.state = .ready;
         }
