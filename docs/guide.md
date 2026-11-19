@@ -565,7 +565,8 @@ is in a timed wait whose deadline is `t`: for `batchWithin` that is the
 first item of a batch plus its age, for `debounce` the latest item plus the
 quiet period. That is the event to wait on, in place of a sleep, before
 moving the clock or asserting that nothing has been emitted. `advanceTo(t)`
-sets the time, never backwards, and wakes the waits to look again. The whole
+sets the time, never backwards, and wakes the waits whose deadline has
+come; a wait that is not due stays asleep. The whole
 test, with `Input` and `Windows`, is in
 [`tests/timing.zig`](../tests/timing.zig).
 

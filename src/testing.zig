@@ -50,7 +50,9 @@ pub const Clock = struct {
     }
 
     /// Sets the time to `since_start`, which must not be earlier than it is
-    /// now, and wakes every timed wait so that it looks at the clock again.
+    /// now, and wakes the timed waits whose deadline has come. A wait that
+    /// is not due stays asleep: `Io.Event.waitTimeout` takes any wake that
+    /// did not set the event for its timeout.
     pub fn advanceTo(clock: *Clock, since_start: Io.Duration) void {
         const inner = clock.inner;
         clock.mutex.lockUncancelable(inner);
@@ -59,7 +61,9 @@ pub const Clock = struct {
         std.debug.assert(to >= clock.time.load(.seq_cst));
         clock.time.store(to, .seq_cst);
         var it = clock.waiters;
-        while (it) |waiter| : (it = waiter.next) waiter.ready.set(inner);
+        while (it) |waiter| : (it = waiter.next) {
+            if (waiter.deadline <= to) waiter.ready.set(inner);
+        }
     }
 
     /// Returns once some task is in a timed wait whose deadline is

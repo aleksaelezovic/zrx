@@ -135,6 +135,21 @@ test "zrx.testing.Clock times a wait given as a duration from the time it has" {
     try std.testing.expectError(error.Timeout, waiting.await(io));
 }
 
+test "zrx.testing.Clock leaves a wait asleep until its own deadline" {
+    var clock: zrx.testing.Clock = .init(io);
+    var event: Io.Event = .unset;
+    const timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+    var waiting = try io.concurrent(Io.Event.waitTimeout, .{ &event, clock.io(), timeout });
+    defer _ = waiting.cancel(io) catch {};
+    try clock.waitingAt(.fromSeconds(5));
+    clock.advanceTo(.fromSeconds(1));
+    // Still in its wait: woken early, an event wait reports a timeout, and
+    // nothing would be waiting at five seconds any more.
+    try clock.waitingAt(.fromSeconds(5));
+    event.set(clock.io());
+    try waiting.await(io);
+}
+
 test "zrx.testing.Clock returns at once from a wait that is already over" {
     var clock: zrx.testing.Clock = .init(io);
     const timed = clock.io();
