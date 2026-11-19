@@ -201,7 +201,10 @@ to this file; edit `AGENTS.md`, not copies.
   and touches neither the slot nor the socket. Do not compare sockets for
   this; the system reuses their handles. Responders write unflushed and `serve`
   flushes before a read that may wait for the peer (a head or body that is
-  not whole in the buffer); do not flush per response. A cancellation
+  not whole in the buffer); do not flush per response. Every head is
+  written by `Exchange.begin`, which is where a status is judged: an
+  interim one (1xx) is answered 500, since it would leave the peer without
+  an answer, and 204 and 304 go out without a body or a length. A cancellation
   `std` recorded on the connection comes out of `serve` whatever the
   conversation returned. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the

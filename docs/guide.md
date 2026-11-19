@@ -870,7 +870,7 @@ to `serve` carries the requests of one connection.
 | `http.reject()` | Terminal. Closes each connection it is given without reading or answering anything. |
 | `http.text("fmt")` | Terminal, in `sub`. Answers 200 with the item formatted as `text/plain`; a tuple supplies several arguments. |
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
-| `http.status(code)` | Terminal, in `sub`. Answers `code` with an empty body; a 204 or 1xx carries no length. |
+| `http.status(code)` | Terminal, in `sub`. Answers the final status `code` with an empty body; a 204 or 304 carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
 | `http.fail` | For `recover`, in `sub`: answers a failed request with the status of its error. |
 | `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
@@ -922,6 +922,15 @@ fn created(response: http.Response, id: u64) !void {
     try response.send(.created, "text/plain", try std.fmt.bufPrint(&buffer, "{d}", .{id}));
 }
 ```
+
+A 204 and a 304 end with their head. They are written without a body and
+without a `content-length`, also when `send` is given content. (A 304 may
+carry the length of the representation it stands for; zrx does not know it
+and sends none.)
+
+An interim status (1xx) does not answer a request. `http.status` rejects
+one at compile time, and `send`, given one at run time, answers 500 in its
+place. `100 Continue` is sent by `request.body`, as above.
 
 ### Failures
 

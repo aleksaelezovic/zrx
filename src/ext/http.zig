@@ -317,6 +317,12 @@ const Exchange = struct {
             x.broken = true;
             return null;
         }
+        if (code.class() == .informational) {
+            // An interim response answers nothing: sent as the answer, it
+            // would leave the peer waiting for the final one.
+            _ = try x.begin(.internal_server_error, null, 0);
+            return null;
+        }
         x.pending = false;
         const request = &x.request;
         // Answering instead of reading the body the client is still waiting
@@ -325,8 +331,9 @@ const Exchange = struct {
         request.head.expect = null;
         if (request.head.keep_alive) try x.flushBeforeBody();
         if (bodyless(code)) {
-            // `std` writes a length or closes the connection; a status
-            // without a body must not carry one (RFC 9110, 8.6).
+            // `std` writes a length or closes the connection. A 204 must
+            // not carry one (RFC 9110, 8.6); a 304 may only carry that of
+            // the representation it does not send, which is not known here.
             if (request.head.keep_alive and !x.skipBody()) request.head.keep_alive = false;
             const out = x.server.out;
             try out.print("HTTP/1.1 {d} {s}\r\n", .{ @backingInt(code), code.phrase() orelse "" });
@@ -403,9 +410,10 @@ const Exchange = struct {
     }
 };
 
-/// 1xx and 204 never have a body, and say so by having no length.
+/// 204 and 304 end with their head (RFC 9110, 15.3.5 and 15.4.5): they are
+/// written without a body and without a length.
 fn bodyless(code: Status) bool {
-    return code.class() == .informational or code == .no_content;
+    return code == .no_content or code == .not_modified;
 }
 
 /// A request, as the item of the pipe given to `serve`. It points into the
@@ -508,6 +516,10 @@ pub const Response = struct {
 
     /// Answers the request with `content`. Each request is answered once:
     /// a second answer writes nothing and closes the connection.
+    ///
+    /// `code` is the final status. A 204 or a 304 is written without a body
+    /// and without a length, whatever `content` is. An interim status (1xx)
+    /// is no answer: the request is answered 500 in its place.
     pub fn send(response: Response, code: Status, content_type: ?[]const u8, content: []const u8) Io.Writer.Error!void {
         const out = try response.exchange.begin(code, content_type, content.len) orelse return;
         try out.writeAll(content);
@@ -709,11 +721,16 @@ const Json = struct {
 };
 
 /// Ends the pipe by answering `code` with an empty body, whatever the item.
+/// `code` is a final status: an interim one (1xx) is a compile error.
 pub fn status(comptime code: Status) Responder("http.status", Coded(code)) {
     return .{};
 }
 
 fn Coded(comptime code: Status) type {
+    if (code.class() == .informational) @compileError(std.fmt.comptimePrint(
+        "http.status: {d} is an interim status, which does not answer a request; answer with a final status such as `.ok` or `.no_content`",
+        .{@backingInt(code)},
+    ));
     return struct {
         fn send(x: *Exchange, _: anytype) Io.Writer.Error!void {
             _ = try x.begin(code, null, 0);

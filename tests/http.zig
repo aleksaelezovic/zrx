@@ -70,6 +70,12 @@ fn teapot(response: http.Response, _: http.Request) !void {
     try response.send(.teapot, "text/plain", "short and stout");
 }
 
+/// Answers with the status its path names, and a body that status may not have.
+fn coded(response: http.Response, request: http.Request) !void {
+    const code = std.fmt.parseInt(u10, request.path()[1..], 10) catch return error.NotFound;
+    try response.send(@fromBackingInt(@intCast(code)), "text/plain", "not for this status");
+}
+
 const routes = route(.{
     when(http.path("/sum"), .{
         map(sum),
@@ -211,6 +217,28 @@ test "a status without a body carries no length, and the connection goes on" {
     try std.testing.expectEqualStrings("HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n", wire.text());
     try converse(nothing, &.{.{ .buffer = "HEAD / HTTP/1.1\r\n\r\n" }}, &wire);
     try std.testing.expectEqualStrings(no_content, wire.text());
+}
+
+test "a 304 is written without a body and without a length, and the connection goes on" {
+    const not_modified = "HTTP/1.1 304 Not Modified\r\n\r\n";
+    var wire: Wire = undefined;
+    try converse(.{http.status(.not_modified)}, &.{.{ .buffer = get_sum ++ post_sum ++ get_sum }}, &wire);
+    try std.testing.expectEqualStrings(times(3, not_modified), wire.text());
+    // Content given to `send` is left out: the answer ends with its head.
+    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /304 HTTP/1.1\r\n\r\n") }}, &wire);
+    try std.testing.expectEqualStrings(times(2, not_modified), wire.text());
+    try converse(.{forEach(coded)}, &.{.{ .buffer = times(2, "GET /204 HTTP/1.1\r\n\r\n") }}, &wire);
+    try std.testing.expectEqualStrings(times(2, "HTTP/1.1 204 No Content\r\n\r\n"), wire.text());
+}
+
+test "an interim status given to send is answered 500, and the connection goes on" {
+    var wire: Wire = undefined;
+    try converse(.{forEach(coded)}, &.{.{ .buffer = "GET /103 HTTP/1.1\r\n\r\n" ++ "GET /100 HTTP/1.1\r\n\r\n" ++ "GET /200 HTTP/1.1\r\n\r\n" }}, &wire);
+    try std.testing.expectEqualStrings(
+        times(2, empty("500 Internal Server Error", .open)) ++
+            "HTTP/1.1 200 OK\r\ncontent-length: 19\r\ncontent-type: text/plain\r\n\r\nnot for this status",
+        wire.text(),
+    );
 }
 
 test "a handler answers through the Response dependency" {

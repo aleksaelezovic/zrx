@@ -27,6 +27,7 @@ pub const cases = .{
     .{ "http_serve_open", "http.serve: the pipe must answer every request, but it still emits `http.Method`; end it with http.text(...), http.json(), http.status(...) or another terminal operator" },
     .{ "http_serve_item", "http.serve: items must be `http.Connection` (from `http.connections()`) or `http.Transport`, got `u32`" },
     .{ "http_serve_without_io", "http.serve: needs `std.Io` to read and write a connection; pass `io` to `run(.{ io, ... })`" },
+    .{ "http_status_interim", "http.status: 103 is an interim status, which does not answer a request; answer with a final status such as `.ok` or `.no_content`" },
     .{ "http_reject_item", "http.reject: items must be `http.Connection` (from `http.connections()`), got `u32`" },
     .{ "http_reject_without_io", "http.reject: needs `std.Io` to close a connection; pass `io` to `run(.{ io, ... })`" },
     .{ "http_connections_listener", "http.connections: needs a listener; bind one with `program(...).provide(.{ http.listen(address, .{}) })`" },
