@@ -10,6 +10,7 @@
 - [Stopping early](#stopping-early)
 - [Concurrency and backpressure](#concurrency-and-backpressure)
 - [Input and output](#input-and-output)
+- [HTTP](#http)
 - [Lifetimes](#lifetimes)
 - [Writing your own](#writing-your-own)
 - [How zero overhead is checked](#how-zero-overhead-is-checked)
@@ -824,6 +825,175 @@ reports, which for `std.Io.Reader` is `error.ReadFailed`.
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
 
+## HTTP
+
+`zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a
+source, an operator and some handlers written against the public contracts,
+compiled only when a program uses it.
+
+```zig
+const http = zrx.ext.http;
+
+const api = pipe(.{
+    recover(http.fail),
+    route(.{
+        when(http.path("/sum"), .{
+            map(sum),
+            http.text("{d}"),
+        }),
+        when(all(.{ http.path("/hello"), http.method(.GET) }), .{
+            map(constant(hello)),
+            http.json(),
+        }),
+        otherwise(.{http.status(.not_found)}),
+    }),
+});
+
+const server = program(http.connections(), .{
+    concurrent(64, .{
+        recover(http.disconnected),
+        http.serve(api),
+    }),
+}).provide(.{http.listen(address, .{ .reuse_address = true })});
+
+try server.run(.{io});
+```
+
+There are two pipes. The program's pipe carries connections; the pipe given
+to `serve` carries the requests of one connection.
+
+| | |
+|---|---|
+| `http.listen(address, options)` | Binding. Listens for the run and provides the `http.Listener`; `listener.port()` is the bound port. Needs `std.Io`. |
+| `http.connections()` | Source: the connections accepted from the listener. |
+| `http.serve(sub)` | Terminal. Holds the conversation on each connection with `sub`, an operator tuple or `pipe(...)` of `http.Request` items that ends in a terminal operator. |
+| `http.text("fmt")` | Terminal, in `sub`. Answers 200 with the item formatted as `text/plain`; a tuple supplies several arguments. |
+| `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
+| `http.status(code)` | Terminal, in `sub`. Answers `code` with an empty body. |
+| `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
+| `http.fail` | For `recover`, in `sub`: answers a failed request with the status of its error. |
+| `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
+
+`serve` constructs `sub` anew for every connection and finishes it when the
+connection ends, so its stages hold per-connection state: with an inner
+`take(100)`, no more than 100 requests are taken from a connection. The connection's `http.Response`
+is added to the dependencies of `sub`. That is how the responders and `fail`
+find the request to answer, and why they are rejected outside `serve`. `sub`
+is synchronous: put `queue` and `concurrent` around `serve`, not in it.
+
+### Requests
+
+A request points into its connection. Use it during its push; do not keep it.
+
+```zig
+fn sum(request: http.Request) !i64 {
+    var total: i64 = 0;
+    var pairs = request.query();
+    while (pairs.next()) |pair| total += std.fmt.parseInt(i64, pair.value, 10) catch 0;
+    var buffer: [32]u8 = undefined;
+    const body = try request.body(&buffer);
+    return total + (std.fmt.parseInt(i64, body, 10) catch 0);
+}
+```
+
+- `request.method()`, `request.path()`, `request.header(name)` and
+  `request.query()`, whose `next()` gives `name` and `value` pairs. Nothing is
+  percent-decoded.
+- `request.body(&buffer)` reads the whole body and returns it, empty when the
+  request has none. It owns the framing: its errors are `BadRequest` (a body
+  on a method that takes none, two framings, an invalid chunk),
+  `LengthRequired`, `PayloadTooLarge` (more than the buffer holds) and
+  `ExpectationFailed`. It answers `Expect: 100-continue` itself.
+- Reading the body overwrites the head. Read the path, query and headers
+  first; call `body` at most once.
+
+### Answers
+
+Each request is answered once. A request that `sub` let pass without an
+answer is answered 500. A second answer writes nothing and closes the
+connection. A `HEAD` request gets the head of the answer alone.
+
+To answer in a way the responders do not cover, ask for the `http.Response`:
+
+```zig
+fn created(response: http.Response, id: u64) !void {
+    var buffer: [32]u8 = undefined;
+    try response.send(.created, "text/plain", try std.fmt.bufPrint(&buffer, "{d}", .{id}));
+}
+```
+
+### Failures
+
+`recover(http.fail)` at the start of `sub` turns a handler's error into an
+answer and lets the connection go on:
+
+| Error | Status |
+|---|---|
+| `error.BadRequest` | 400 |
+| `error.NotFound` | 404 |
+| `error.MethodNotAllowed` | 405 |
+| `error.LengthRequired` | 411 |
+| `error.PayloadTooLarge` | 413 |
+| `error.ExpectationFailed` | 417 |
+| anything else | 500 |
+
+Without it, a handler's error fails the run like any other.
+
+A connection goes on after an answer when the next request can be found: the
+body was read to its end, or was not read and can be skipped. It is closed
+after an error of `body`, after an answer given while the peer still waits
+for `100 Continue`, and when a request declares a body in a way that cannot
+be skipped (no framing on `POST`, a body on `GET`).
+
+A head that does not parse is answered 400, and one that does not fit the
+connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
+the connection is closed.
+
+A connection that breaks fails its push with `error.ReadFailed` or
+`error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
+exactly these two, so one lost peer does not end the server and every other
+error still does. `fail` does not answer them either: they pass through it.
+
+### Connections and writes
+
+`serve` owns a connection from the push on and closes it when the
+conversation ends, whatever ended it. A connection that was accepted and is
+still waiting for a worker when the run ends is not closed by zrx.
+
+Answers are collected in a 4 KiB buffer per connection and written when the
+peer has sent nothing further: before `serve` waits for the next request,
+and when the connection ends. Requests that arrive together (pipelined) are
+therefore answered with one write.
+
+For a connection that is not a socket, or in a test, give `serve` an
+`http.Transport` instead: a reader and a writer of yours, which it flushes
+and does not close.
+
+```zig
+const connection: http.Transport = .{ .reader = &reader, .writer = &writer };
+try program(fromValue(connection), .{http.serve(api)}).run(.{});
+```
+
+### Limits
+
+- One worker holds one connection for as long as it is open. An idle
+  keep-alive connection occupies its worker, and a peer that connects while
+  all are taken waits. Size `concurrent(n, ...)` for the open connections you
+  expect, with room to spare.
+- `n` is a comptime number. With `std.Io.Threaded`, which is what
+  `std.process.Init` provides, every worker is a thread.
+- Without `concurrent`, `serve` holds one conversation at a time on the
+  task of the source.
+- `text` and `json` format the item twice, once to learn its length.
+- Accepting stops only when the run does. A failure to accept, other than a
+  connection its peer already gave up, fails the run.
+- To stop a server, cancel the task that called `run`: it returns
+  `error.Canceled`, also from a read that was waiting for a request. Open
+  conversations are cut off, not completed.
+
+The [HTTP benchmark app](../examples/apps/http-bench/README.md) compares this
+with a server written against `std` alone and records what was measured.
+
 ## Lifetimes
 
 A run goes through these steps:
@@ -973,8 +1143,15 @@ A resource acquired for one item (opened before the item's sub-pipe and
 released after it) is not here. `each` covers the case where the item
 becomes a stream.
 
-Present in the previous implementation and not ported: HTTP serving, signals
-(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of
+HTTP is deliberately small for now. Not there: timeouts for idle or slow
+peers, graceful shutdown, more connections than workers (no queue of ready
+connections, no event loop), response headers of your own, streamed bodies,
+path parameters, configurable buffer sizes, TLS and HTTP/2. Parsing is
+`std.http.Server`'s; zrx has no parser of its own.
+
+Present in the previous implementation and not ported: signals
+(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of
 the three standalone example applications. The
-[record processor](../examples/apps/record-processor/README.md) is ported, and
-its README lists what the port needed that the library does not have yet.
+[record processor](../examples/apps/record-processor/README.md) and the
+[HTTP benchmark](../examples/apps/http-bench/README.md) are ported, and
+their READMEs list what the ports needed that the library does not have yet.

@@ -9,7 +9,7 @@ comptime {
 }
 
 /// Behavior suites in `tests/`, each importing only the public `zrx` module.
-const suites = .{ "di", "operators", "handlers", "nested", "flow", "timing", "programs", "io", "json", "extending" };
+const suites = .{ "di", "operators", "handlers", "nested", "flow", "timing", "programs", "io", "json", "extending", "http" };
 
 /// Runnable examples and the exact output they must produce.
 const examples = .{

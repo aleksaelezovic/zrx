@@ -24,8 +24,9 @@ to this file; edit `AGENTS.md`, not copies.
   `src/pipe.zig` (chain), `src/di.zig` (injection) and `src/program.zig` stay
   small and know nothing about individual operators.
 - The feature set of the previous implementation is an upper bound, not a
-  backlog. HTTP, signals, retry and the standalone apps were dropped in the
-  rewrite and return only by explicit decision.
+  backlog. Signals, retry and the standalone apps were dropped in the
+  rewrite and return only by explicit decision. HTTP has returned by such a
+  decision, as the extension `zrx.ext.http` (see below).
 - Exactly Zig 0.17.0 (`.zigversion`). Reuse `std.Io`, `std.mem.Allocator` and
   std containers; no scheduler or runtime of our own.
 
@@ -181,6 +182,20 @@ to this file; edit `AGENTS.md`, not copies.
   That makes it atomic per file and not per run: say so wherever it is
   described. The first wording promised that a failed run leaves no file,
   and a review showed two published files where it did.
+- **HTTP is an extension, not core.** `src/ext/http.zig` is written against
+  the public source, operator and handler contracts, is analyzed only when
+  `zrx.ext.http` is referenced, and the core knows nothing of it (it still
+  compiles freestanding). `serve` holds a synchronous sub-pipe as
+  `concurrent` does and constructs it per connection with that connection's
+  `Response` added to the environment; a boundary inside it is a compile
+  error. `serve` owns and closes each `Connection`. Responders write
+  unflushed and `serve` flushes when its read buffer is empty; do not flush
+  per response. Parsing stays `std.http.Server`'s. The first version is one
+  worker per open connection with no timeouts and no graceful shutdown; the
+  guide's "Not here yet" lists what was left out on purpose. What it does is
+  described in the guide's HTTP section and pinned in `tests/http.zig`: a
+  behavior goes into that section together with its test. Performance is
+  stated only in the benchmark app's README, with the measurement behind it.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
