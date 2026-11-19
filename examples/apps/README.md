@@ -7,6 +7,7 @@ library's root build.
 | App | Purpose |
 |---|---|
 | [Record processor](record-processor/README.md) | Bounded import validation, normalized output, diagnostics and a summary |
+| [Audit archive](audit-archive/README.md) | A JSONL export checked and archived in order, with a slow archive holding the reader back (`batch`, `queue`) |
 
 ## Project boundary
 
