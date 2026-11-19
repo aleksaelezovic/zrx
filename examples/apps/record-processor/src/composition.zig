@@ -89,8 +89,17 @@ pub const records_pipe = pipe(.{
     }),
 });
 
-/// Processes the lines of `Input`.
-pub const processing = zrx.program(zrx.lines(Input, records.max_line_bytes), records_pipe);
+/// Where the summary and the diagnostics go unless a run says otherwise.
+const consoles = .{
+    zrx.stdout(256),
+    zrx.stderr(1024),
+};
+
+/// Processes the lines of `Input`: a file in production, a fixed reader in tests.
+pub const processing = zrx.program(zrx.lines(Input, records.max_line_bytes), records_pipe).provide(consoles);
+
+/// Processes the lines of standard input.
+pub const from_stdin = zrx.program(zrx.stdinLines(records.max_line_bytes), records_pipe).provide(consoles);
 
 /// Writes one text to standard output.
 pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement).provide(.{zrx.stdout(1024)})) {

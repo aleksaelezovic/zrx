@@ -31,27 +31,19 @@ fn reportInvalid(io: Io) !void {
     try writer.interface.flush();
 }
 
-/// Opens the input `config` names and processes it into a new output file.
-/// The output is created exclusively: an existing file is never overwritten.
+/// Processes the input `config` names into a new output file. The output is
+/// created exclusively: an existing file is never overwritten.
 pub fn process(io: Io, config: commands.Config, rules: records.Rules) !summaries.Summary {
-    // A line of the maximum length and its LF must fit.
-    var input_buffer: [records.max_line_bytes + 1]u8 = undefined;
-    const input_file = if (config.readsStdin()) Io.File.stdin() else try Io.Dir.cwd().openFile(io, config.input, .{});
-    defer if (!config.readsStdin()) input_file.close(io);
-    var input = input_file.readerStreaming(io, &input_buffer);
-
     var summary: summaries.Summary = .{};
-    const production = zrx.program(zrx.lines(composition.Input, records.max_line_bytes), composition.records_pipe).provide(.{
-        zrx.stdout(256),
-        zrx.stderr(1024),
-        zrx.fileWriter(composition.Accepted, config.output, 4096, .{ .mode = .create_new }),
-    });
-    try production.run(.{
-        io,
-        rules,
-        composition.Input{ .reader = &input.interface },
-        &summary,
-    });
+    const output = zrx.fileWriter(composition.Accepted, config.output, 4096, .{ .mode = .create_new });
+    if (config.readsStdin()) {
+        try composition.from_stdin.run(.{ io, rules, &summary, output });
+    } else {
+        // Written before the output, so opened before it: a missing input
+        // fails the run while no output file exists yet.
+        const input = zrx.fileReader(composition.Input, config.input, records.max_line_bytes + 1);
+        try composition.processing.run(.{ io, rules, &summary, input, output });
+    }
     return summary;
 }
 
