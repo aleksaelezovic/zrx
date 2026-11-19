@@ -352,6 +352,31 @@ const Custom = struct {
     }
 };
 
+/// The same, with declarations that happen to be named like the ones this
+/// library uses for its own programs. A system must not take it for one.
+const Lookalike = struct {
+    pub const zrx_program = {};
+    pub const zrx_own = {};
+
+    pub fn run(_: *const Lookalike, deps: anytype) !void {
+        zrx.di.get(deps, Left).seen.add(@intCast(deps.len));
+    }
+
+    pub fn runResolved(_: *const Lookalike, deps: anytype) !void {
+        zrx.di.get(deps, Left).seen.add(1000);
+    }
+};
+
+test "a system calls a runnable's run, whatever else the runnable declares" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
+    try system(.{Lookalike{}}).run(.{Left{ .seen = &left }});
+    try system(.{ Lookalike{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{ 1, 3 });
+    try right.expect(&.{2});
+}
+
 test "a runnable of the caller's own is given a system's dependencies as a tuple" {
     var left: Numbers = .{};
     var right: Numbers = .{};
