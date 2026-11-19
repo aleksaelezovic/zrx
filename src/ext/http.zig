@@ -373,17 +373,11 @@ const Exchange = struct {
 
     /// Whether the next request can be found behind this one: its body was
     /// read to the end, it has none, or it has a length and can be skipped.
-    ///
-    /// An unread chunked body is not skipped. Where it ends is known by
-    /// parsing its chunks, which is `std`'s to do, and its chunk reader
-    /// overflows on a chunk size of 2^64 - 2 or more: a request to any
-    /// route could then stop a server built with safety checks.
     fn bodySettled(x: *const Exchange) bool {
         const head = &x.request.head;
         return switch (x.server.reader.state) {
             .ready => true,
             .received_head => unread: {
-                if (head.transfer_encoding != .none) break :unread false;
                 const length = head.content_length orelse break :unread !head.method.requestHasBody();
                 break :unread length == 0 or head.method.requestHasBody();
             },
@@ -394,18 +388,10 @@ const Exchange = struct {
     /// Sends what was answered so far unless the rest of this request's body
     /// is already in the read buffer: reading or skipping it may wait for the
     /// peer, who may be waiting for those answers.
-    ///
-    /// Only a body with a length is looked for there. Where a chunked body
-    /// ends is known by parsing its chunks, which is `std`'s to do, and a
-    /// wrong guess would wait for a peer that waits for us: a chunked body
-    /// costs a write, also when all of it has arrived.
     fn flushBeforeBody(x: *Exchange) Io.Writer.Error!void {
         if (x.server.reader.state != .received_head) return;
-        const head = &x.request.head;
-        if (head.transfer_encoding == .none) {
-            const length = head.content_length orelse return;
-            if (x.server.reader.in.bufferedLen() >= length) return;
-        }
+        const length = x.request.head.content_length orelse return;
+        if (x.server.reader.in.bufferedLen() >= length) return;
         try x.server.out.flush();
     }
 
@@ -430,12 +416,6 @@ const Exchange = struct {
         // ended the connection inside it, the next read finds that out.
         _ = body.discardRemaining() catch return error.ReadFailed;
         return true;
-    }
-
-    /// Why reading the body failed: the peer's framing, or the connection.
-    fn bodyFailure(x: *const Exchange) Request.BodyError {
-        const err = x.server.reader.body_err orelse return error.ReadFailed;
-        return if (err == error.HttpChunkInvalid) error.BadRequest else error.ReadFailed;
     }
 };
 
@@ -502,43 +482,34 @@ pub const Request = struct {
     /// The whole body, read into `buffer`; empty for a request that has
     /// none. Call it at most once. Its failures are what `fail` answers:
     ///
-    /// - `BadRequest`: a body on a method that takes none, both a length and
-    ///   chunked framing, or an invalid chunk;
-    /// - `LengthRequired`: a body method with neither;
+    /// - `BadRequest`: a body on a method that takes none;
+    /// - `LengthRequired`: a method that takes one, without a length;
     /// - `PayloadTooLarge`: more than `buffer` holds;
     /// - `ExpectationFailed`: an `Expect` other than `100-continue`.
     ///
     /// After any of them the connection is closed once the request is
     /// answered. `ReadFailed` and `WriteFailed` are the connection's own.
+    ///
+    /// A body has a length: a request with a `Transfer-Encoding` does not
+    /// get here (see `refusal`).
     pub fn body(request: Request, buffer: []u8) BodyError![]u8 {
         const x = request.exchange;
         const fields = request.head();
-        const length = fields.content_length;
-        const chunked = fields.transfer_encoding != .none;
         errdefer fields.keep_alive = false;
         if (!fields.method.requestHasBody()) {
-            if (chunked or (length orelse 0) != 0) return error.BadRequest;
+            if ((fields.content_length orelse 0) != 0) return error.BadRequest;
             return buffer[0..0];
         }
-        if (chunked and length != null) return error.BadRequest;
-        if (!chunked and length == null) return error.LengthRequired;
-        // Where a chunked body ends is `std`'s reading of its chunk sizes,
-        // which takes more than hexadecimal digits. What follows such a
-        // body is therefore not read as a request.
-        if (chunked) fields.keep_alive = false;
-        if (length) |n| if (n > buffer.len) return error.PayloadTooLarge;
+        const length = fields.content_length orelse return error.LengthRequired;
+        if (length > buffer.len) return error.PayloadTooLarge;
         try x.flushBeforeBody();
         const reader = x.request.readerExpectContinue(&.{}) catch |err| switch (err) {
             error.HttpExpectationFailed => return error.ExpectationFailed,
             error.WriteFailed => return error.WriteFailed,
         };
-        const n = reader.readSliceShort(buffer) catch return x.bodyFailure();
-        if (x.server.reader.state != .ready) {
-            // The buffer is full and the body is not over, or the peer is gone.
-            var more: [1]u8 = undefined;
-            if ((reader.readSliceShort(&more) catch return x.bodyFailure()) != 0) return error.PayloadTooLarge;
-            if (x.server.reader.state != .ready) return error.ReadFailed;
-        }
+        const n = reader.readSliceShort(buffer) catch return error.ReadFailed;
+        // Less than its length: the peer is gone.
+        if (x.server.reader.state != .ready) return error.ReadFailed;
         return buffer[0..n];
     }
 };
@@ -574,8 +545,7 @@ pub const Response = struct {
 /// conversation ends without an error. Requests are read while the peer keeps the connection
 /// alive and the pipe wants more; a request the pipe did not answer is
 /// answered 500. Output is flushed when no further request is waiting in
-/// the read buffer, so pipelined requests share a write; a chunked body is
-/// flushed for before it is read.
+/// the read buffer, so pipelined requests share a write.
 ///
 /// A head that does not parse is answered 400, one larger than `head_bytes`
 /// 431, and the connection closed. A connection that breaks fails the push
@@ -690,8 +660,8 @@ fn Serve(comptime P: type) type {
                             },
                             error.ReadFailed => return error.ReadFailed,
                         };
-                        if (!admitted(&exchange.request)) {
-                            try refuse(out, .bad_request);
+                        if (refusal(&exchange.request)) |code| {
+                            try refuse(out, code);
                             break;
                         }
                         // The expectation is a token, compared without
@@ -735,41 +705,50 @@ const Recorded = struct {
 
 /// What `std` parsed leniently is judged here, before any handler sees the
 /// request: a head that a proxy in front could read differently must not be
-/// served, or the two disagree on where the next request begins. False
-/// for a request to refuse, which is answered 400.
+/// served, or the two disagree on where the next request begins. Returns
+/// the status to refuse the request with, or null when it is in order.
 ///
+/// 400:
+/// - A target is not empty, and holds no space or control character.
 /// - A field is `name ":" value`, and its name is a token: nothing stands
 ///   between it and the colon (RFC 9112, 5.1).
-/// - A value, and the target, hold no CR, LF or NUL (RFC 9110, 5.5); the
-///   target holds no space or other control character either.
+/// - A value holds no CR, LF or NUL (RFC 9110, 5.5).
 /// - `Content-Length` is digits (RFC 9110, 8.6); `std` takes a sign and
 ///   underscores, and refuses an empty one itself.
-/// - `Transfer-Encoding` is `chunked` as `std` knows it, in lower case, and
-///   nothing else: that is all that is read here.
 /// - There is at most one `Host`, with a valid value, and an HTTP/1.1
 ///   request has exactly one (RFC 9112, 3.2).
+/// - A request is not framed in two ways, by a length and by a transfer
+///   coding (RFC 9112, 6.1).
+///
+/// 411: a request with a `Transfer-Encoding`, whatever it names. No body is
+/// read that is framed by one: decoding `chunked` is `std`'s, and its chunk
+/// reader takes sizes that are no hexadecimal number and overflows on one
+/// of 2^64 - 2 or more, which stops a program built with safety checks.
 ///
 /// And one thing is set right: `close` among several connection options
 /// ends the connection (RFC 9112, 9.6), where `std` compares the whole value.
-fn admitted(request: *std.http.Server.Request) bool {
-    for (request.head.target) |c| if (c <= ' ' or c == 0x7f) return false;
+fn refusal(request: *std.http.Server.Request) ?Status {
+    const target = request.head.target;
+    if (target.len == 0) return .bad_request;
+    for (target) |c| if (c <= ' ' or c == 0x7f) return .bad_request;
     var host: ?[]const u8 = null;
+    var coded = false;
     var lines = std.mem.splitSequence(u8, request.head_buffer, "\r\n");
     _ = lines.first(); // the request line, which `std` took apart
     while (lines.next()) |line| {
         if (line.len == 0) break;
-        const colon = std.mem.findScalar(u8, line, ':') orelse return false;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return .bad_request;
         const name = line[0..colon];
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (!token(name)) return false;
-        for (value) |c| if (c == '\r' or c == '\n' or c == 0) return false;
+        if (!token(name)) return .bad_request;
+        for (value) |c| if (c == '\r' or c == '\n' or c == 0) return .bad_request;
         if (std.ascii.eqlIgnoreCase(name, "host")) {
-            if (host != null) return false;
+            if (host != null) return .bad_request;
             host = value;
         } else if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            for (value) |c| if (!std.ascii.isDigit(c)) return false;
+            for (value) |c| if (!std.ascii.isDigit(c)) return .bad_request;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            if (!std.mem.eql(u8, value, "chunked")) return false;
+            coded = true;
         } else if (std.ascii.eqlIgnoreCase(name, "connection")) {
             var options = std.mem.splitScalar(u8, value, ',');
             while (options.next()) |option| {
@@ -777,8 +756,10 @@ fn admitted(request: *std.http.Server.Request) bool {
             }
         }
     }
-    const value = host orelse return request.head.version == .@"HTTP/1.0";
-    return hostValue(value);
+    const value = host orelse if (request.head.version == .@"HTTP/1.0") "" else return .bad_request;
+    if (!hostValue(value)) return .bad_request;
+    if (coded) return if (request.head.content_length != null) .bad_request else .length_required;
+    return null;
 }
 
 /// `*tchar` (RFC 9110, 5.6.2). An empty name is refused by `std`.

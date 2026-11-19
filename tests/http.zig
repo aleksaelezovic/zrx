@@ -277,17 +277,8 @@ test "a second answer writes nothing and closes the connection" {
 // The request
 // ---------------------------------------------------------------------------
 
-test "the body is read whether its length is given or it is chunked" {
+test "a body is read by its length" {
     try expectAnswer(ok("text/plain", "75"), post_sum);
-    try expectAnswer(okClosed("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2\r\n1\r\n0\r\n0\r\n\r\n");
-}
-
-test "the connection is closed after a chunked body, and nothing behind it is read as a request" {
-    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n";
-    try expectAnswer(okClosed("text/plain", "75"), chunked ++ "2\r\n20\r\n0\r\n\r\n" ++ get_sum);
-    // `std` reads this size as a last chunk; another parser reads 44 bytes
-    // of body, and then what follows here is no request to it.
-    try expectAnswer(okClosed("text/plain", "55"), chunked ++ "+2c\r\n\r\n" ++ get_sum);
 }
 
 test "a body is awaited from a peer that expects to be told to continue" {
@@ -366,31 +357,6 @@ test "an answer does not wait for the rest of a request that arrived in part" {
     try converse(api, &.{ .{ .buffer = get_sum ++ unread[0 .. unread.len - 1] }, .{ .buffer = unread[unread.len - 1 ..] } }, &wire);
     try std.testing.expectEqual(1, wire.writes);
     try std.testing.expectEqualStrings(ok("text/plain", "55") ++ empty("405 Method Not Allowed", .open), wire.text());
-}
-
-test "a chunked body is flushed for before it is read, also when it arrived whole" {
-    const chunked = "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
-    const both = ok("text/plain", "55") ++ okClosed("text/plain", "75");
-    var wire: Wire = undefined;
-    // All of it arrived with the request before it: with a length that is
-    // one write (see above), chunked it is two.
-    try converse(api, &.{.{ .buffer = get_sum ++ chunked }}, &wire);
-    try std.testing.expectEqual(2, wire.writes);
-    try std.testing.expectEqualStrings(both, wire.text());
-    // Part of it: the first answer is written before the rest is read.
-    try converse(api, &.{ .{ .buffer = get_sum ++ chunked[0 .. chunked.len - 5] }, .{ .buffer = chunked[chunked.len - 5 ..] } }, &wire);
-    try std.testing.expectEqual(2, wire.writes);
-    try std.testing.expectEqualStrings(both, wire.text());
-    // One nobody reads is not read at all: it is answered with the
-    // connection closed, and the rest of it is not waited for.
-    const unread = "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n";
-    const refused = ok("text/plain", "55") ++ empty("405 Method Not Allowed", .closed);
-    try converse(api, &.{.{ .buffer = get_sum ++ unread }}, &wire);
-    try std.testing.expectEqual(1, wire.writes);
-    try std.testing.expectEqualStrings(refused, wire.text());
-    try converse(api, &.{.{ .buffer = get_sum ++ unread[0 .. unread.len - 5] }}, &wire);
-    try std.testing.expectEqual(1, wire.writes);
-    try std.testing.expectEqualStrings(refused, wire.text());
 }
 
 test "the connection ends when the peer asks to close it" {
@@ -527,12 +493,9 @@ test "a body that cannot be taken is refused and the connection closed" {
     const cases = .{
         // No framing on a method that has a body.
         .{ "POST /sum HTTP/1.1\r\nHost: test\r\n\r\n", "411 Length Required" },
-        // More than the handler's buffer holds, by its length and by its chunks.
+        // More than the handler's buffer holds.
         .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 9\r\n\r\n123456789", "413 Payload Too Large" },
-        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n9\r\n123456789\r\n0\r\n\r\n", "413 Payload Too Large" },
-        // Two framings, a chunk that is none, a body where none belongs.
-        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n", "400 Bad Request" },
-        .{ "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n", "400 Bad Request" },
+        // A body where none belongs.
         .{ "GET /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20", "400 Bad Request" },
         .{ "POST /sum HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nExpect: a-miracle\r\n\r\n20", "417 Expectation Failed" },
     };
@@ -553,12 +516,6 @@ test "a body nobody read is skipped, or the connection closed where it cannot be
     try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\n\r\n" ++ get_sum);
     // One the peer ended the connection in is found out once it was answered.
     try expectAnswer(not_allowed, "POST /json HTTP/1.1\r\nHost: test\r\nContent-Length: 10\r\n\r\nabc");
-    // A chunked one is not skipped, whatever is in it.
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n" ++ get_sum);
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n2X\r\n" ++ get_sum);
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
-    // Not even its chunk sizes are parsed: `std` overflows on this one.
-    try expectAnswer(empty("405 Method Not Allowed", .closed), "POST /json HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nabc");
     try expectAnswer(
         "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 27\r\ncontent-type: application/json\r\n\r\n{\"message\":\"Hello, World!\"}",
         "GET /json HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" ++ get_sum,
@@ -634,9 +591,61 @@ test "a head that a proxy in front could read differently is refused" {
     try expectAnswer(ok("text/plain", "75"), "POST /sum?a=13&b=42 HTTP/1.1\r\nHost: test\r\nX-Empty:\r\nContent-Length: \t2 \r\n\r\n20");
 }
 
-test "a transfer coding other than chunked is refused" {
-    inline for (.{ "gzip", "identity", "none", "gzip, chunked", "chunked, chunked", "xchunked", "Chunked", "" }) |coding| {
-        try expectAnswer(empty("400 Bad Request", .closed), "POST /sum HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: " ++ coding ++ "\r\nContent-Length: 2\r\n\r\n20" ++ get_sum);
+var dispatched: usize = 0;
+
+fn noteDispatched(_: http.Request) void {
+    dispatched += 1;
+}
+
+/// A pipe that leaves the body alone and answers whatever it is given.
+const answers_anything = pipe(.{
+    tap(noteDispatched),
+    http.status(.ok),
+});
+
+/// `head` is answered `code` and the connection closed, and no handler ran.
+fn expectRefused(comptime code: []const u8, comptime head: []const u8) !void {
+    var wire: Wire = undefined;
+    dispatched = 0;
+    try converse(answers_anything, &.{.{ .buffer = head ++ get_sum }}, &wire);
+    try std.testing.expectEqualStrings(empty(code, .closed), wire.text());
+    try std.testing.expectEqual(@as(usize, 0), dispatched);
+}
+
+test "a request framed in two ways is refused before any handler runs" {
+    const bad = "400 Bad Request";
+    try expectRefused(bad, "POST /x HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n20\r\n0\r\n\r\n");
+    try expectRefused(bad, "POST /x HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n20");
+    try expectRefused(bad, "GET /x HTTP/1.1\r\nHost: test\r\nContent-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    // One framing alone reaches the handler.
+    var wire: Wire = undefined;
+    dispatched = 0;
+    try converse(answers_anything, &.{.{ .buffer = "POST /x HTTP/1.1\r\nHost: test\r\nContent-Length: 2\r\n\r\n20" }}, &wire);
+    try std.testing.expectEqual(@as(usize, 1), dispatched);
+}
+
+test "a request without a target is refused before any handler runs" {
+    try expectRefused("400 Bad Request", "GET  HTTP/1.1\r\nHost: test\r\n\r\n");
+}
+
+test "a request with a transfer coding is asked for a length before any handler runs" {
+    const asked = "411 Length Required";
+    const chunked = "POST /x HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try expectRefused(asked, chunked ++ "2\r\n20\r\n0\r\n\r\n");
+    // Not even its chunk sizes are looked at. `std` overflows on the first
+    // of these and reads the second as a last chunk.
+    try expectRefused(asked, chunked ++ "ffffffffffffffff\r\nabc");
+    try expectRefused(asked, chunked ++ "+2c\r\n\r\n");
+    // On a method that has no body, and from an HTTP/1.0 peer.
+    try expectRefused(asked, "GET /x HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    try expectRefused(asked, "POST /x HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+    // Whatever the coding is called, where `std` knows the name.
+    inline for (.{ "gzip", "identity", "none", "gzip, chunked" }) |coding| {
+        try expectRefused(asked, "POST /x HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: " ++ coding ++ "\r\n\r\n");
+    }
+    // A name it does not know is a head that does not parse.
+    inline for (.{ "xchunked", "Chunked", "chunked, chunked, chunked" }) |coding| {
+        try expectRefused("400 Bad Request", "POST /x HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: " ++ coding ++ "\r\n\r\n");
     }
 }
 
@@ -941,8 +950,8 @@ fn noteReached(reached: *Reached, _: http.Request) void {
 test "a server skipping a body nobody read can be cancelled" {
     const Server = struct {
         // One loop on the calling task, as above. Here the read that is
-        // interrupted is the one `std` makes to skip the body before the
-        // answer, whose failure it does not report.
+        // interrupted is the one that skips the body once the request
+        // was answered.
         const served = program(http.connections(), .{
             recover(http.disconnected),
             http.serve(.{
