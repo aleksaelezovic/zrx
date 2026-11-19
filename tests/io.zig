@@ -531,6 +531,23 @@ test "a file that cannot be opened or read fails the run with the error the syst
     try std.testing.expectEqual(@as(usize, 0), pieces.count);
 }
 
+test "a file whose lines cannot be read fails the run with the error the system gave" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines", .data = "unread\n" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines", .{tmp.sub_path});
+
+    var buffer: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const failing = support.ReadFails.over(io);
+    const from_source = program(fileLines(path, 8), .{print(Log, "{f},")}).run(.{ failing, Log{ .writer = &writer } });
+    try std.testing.expectError(error.InputOutput, from_source);
+    const from_binding = program(lines(Input, 8), .{print(Log, "{f},")}).run(.{ failing, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    try std.testing.expectError(error.InputOutput, from_binding);
+    try std.testing.expectEqualStrings("", writer.buffered());
+}
+
 // path -> its bytes -> one digest -> a row, as the guide writes it.
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
