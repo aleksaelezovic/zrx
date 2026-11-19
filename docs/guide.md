@@ -762,6 +762,31 @@ answers `.done`. See [`src/sources.zig`](../src/sources.zig).
 `requires(arity) []const type` and `call(env, args)`. See
 [`src/handlers.zig`](../src/handlers.zig).
 
+**A binding** that acquires something for the run is a value whose type
+declares `zrx_resource`, the type it `Provides`, the dependency types it
+`needs`, and `bind(self, env, rest) !void`. `env` holds what it needs.
+`bind` calls `rest.call(value)` once, and the rest of the run happens inside
+that call: what `bind` does after it returns is its release, and that may
+fail. `resource(acquire, release)` is the short form for two handlers. This
+one keeps a tally for the run and reports it when the run is over:
+
+```zig
+const Tallied = struct {
+    pub const zrx_resource = {};
+    pub const Provides = *Tally;
+    pub const needs: []const type = &.{*Report};
+
+    pub fn bind(_: Tallied, env: anytype, rest: anytype) !void {
+        var tally: Tally = .{};
+        try rest.call(&tally);
+        zrx.di.get(env, *Report).total = tally.count;
+    }
+};
+```
+
+Give it to `provide` or to `run` like any other binding. See
+[`src/resources.zig`](../src/resources.zig).
+
 ## How zero overhead is checked
 
 [`tests/zero_overhead/cases.zig`](../tests/zero_overhead/cases.zig) writes each
