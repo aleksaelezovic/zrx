@@ -108,8 +108,8 @@ try report.run(.{io});
 
 `provide` gives a program *defaults*: bindings that `run` uses unless it is
 given one that provides the same type. It is not a second kind of
-dependency: `p.provide(a).run(b)` is `p.run(a ++ b)`, where a binding in `b`
-replaces a default of its type. Among the defaults, and among what `run` is
+dependency: `p.provide(a).run(b)` runs with everything in `b` and with the
+bindings of `a` whose type `b` does not provide. Among the defaults, and among what `run` is
 given, a type has one provider; a second one is a compile error. The
 resulting environment is shared by the source and all stages, including
 branch and route cases.

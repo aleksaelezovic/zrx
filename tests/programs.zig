@@ -342,6 +342,27 @@ test "what a resource provides reaches the programs of a system as the value it 
     try right.expect(&.{7});
 }
 
+/// A runnable that is not a zrx program: a system asks only for the mark
+/// and for `run`, which is given the dependencies as a tuple.
+const Custom = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const Custom, deps: anytype) !void {
+        zrx.di.get(deps, Left).seen.add(@intCast(deps.len));
+    }
+};
+
+test "a runnable of the caller's own is given a system's dependencies as a tuple" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
+    try system(.{Custom{}}).run(.{Left{ .seen = &left }});
+    try system(.{ Custom{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    // What it counted: one dependency, then three.
+    try left.expect(&.{ 1, 3 });
+    try right.expect(&.{2});
+}
+
 fn patiently(clock: std.Io, out: anytype) !void {
     var value: u32 = 0;
     while (value < 200) : (value += 1) {

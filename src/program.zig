@@ -45,15 +45,23 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
         /// Runs with the given bindings, values and resources alike, and
         /// with the defaults they do not replace.
         pub fn run(self: *const Self, deps: anytype) !void {
-            const Run = struct {
-                program: *const Self,
-
-                pub fn call(body: @This(), env: anytype) !void {
-                    return body.program.runBound(env);
-                }
-            };
             return resources.run(self.bindings, deps, Run{ .program = self });
         }
+
+        /// What a `system` calls for its members: `env` is an environment
+        /// that is already resolved, so every element of it is a value,
+        /// whatever its type looks like. The defaults still apply.
+        pub fn runResolved(self: *const Self, env: anytype) !void {
+            return resources.run(self.bindings, resources.resolved(env), Run{ .program = self });
+        }
+
+        const Run = struct {
+            program: *const Self,
+
+            pub fn call(body: @This(), env: anytype) !void {
+                return body.program.runBound(env);
+            }
+        };
 
         fn runBound(self: *const Self, env: anytype) !void {
             const Env = @TypeOf(env);
@@ -191,9 +199,14 @@ pub fn System(comptime Ps: type) type {
             return resources.run(.{}, deps, Run{ .system = self });
         }
 
+        /// A system inside a system: nothing is left to resolve.
+        pub fn runResolved(self: *const @This(), env: anytype) !void {
+            return self.runBound(env);
+        }
+
         fn runBound(self: *const @This(), env: anytype) !void {
             const Env = @TypeOf(env);
-            if (members.len == 1) return self.programs[0].run(resources.resolved(env));
+            if (members.len == 1) return runMember(&self.programs[0], env);
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");
 
             const list = comptime blk: {
@@ -215,7 +228,16 @@ fn Member(comptime P: type, comptime Env: type) type {
         env: Env,
 
         pub fn run(self: @This()) !void {
-            return self.program.run(resources.resolved(self.env));
+            return runMember(self.program, self.env);
         }
     };
+}
+
+/// Hands a member the environment its system resolved. A program or system
+/// of this library takes it as resolved values. Any other runnable (a type
+/// with `zrx_program` and `run`) is given the tuple itself, as `run` always
+/// was, and never sees how this library marks one.
+fn runMember(member: anytype, env: anytype) !void {
+    const M = @TypeOf(member.*);
+    return if (comptime @hasDecl(M, "runResolved")) member.runResolved(env) else member.run(env);
 }

@@ -50,10 +50,13 @@ to this file; edit `AGENTS.md`, not copies.
   up per item. `std.Io` and the allocator are ordinary dependencies.
   The source and all stages use one environment.
 - **`provide` and `run` are one concept.** `run` takes bindings: values and
-  resources alike. `provide` only gives a program defaults for them, so
-  `p.provide(a).run(b)` is `p.run(a ++ b)`; a binding given to `run` replaces
-  a default that provides the same type, and a replaced resource is not
-  acquired. Within either tuple a type has one provider. The order bindings
+  resources alike. `provide` only gives a program defaults for them:
+  `p.provide(a).run(b)` runs with `b` and with what of `a` it does not
+  replace. (It is not `p.run(a ++ b)`: within one tuple a type may not have
+  two providers.) A binding given to `run` replaces a default that provides
+  the same type, and a replaced resource is not acquired. A system hands
+  what it resolved to this library's programs as values (`runResolved`) and
+  to any other `zrx_program` as the tuple it is. Within either tuple a type has one provider. The order bindings
   are written in decides nothing but ties: a resource declares `Provides`
   and `needs`, and `src/resources.zig` orders acquisition at compile time
   (values, then again and again the first resource in written order whose
