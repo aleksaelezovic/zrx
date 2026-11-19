@@ -69,8 +69,8 @@ and a push is a chain of direct calls the optimizer flattens. `zig build
 zero-overhead` compiles each fixture in
 [`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
 as a hand-written loop, and compares the optimized LLVM IR function by
-function. The fixtures cover every synchronous operator. Seventeen of the
-twenty-two consist of the same instructions (the same multiset, once value and
+function. The fixtures cover every synchronous operator. Eighteen of the
+twenty-three consist of the same instructions (the same multiset, once value and
 block names are erased); the other five differ only in loop shape and are
 required to be free of calls and extra memory traffic. A separate test runs
 both variants of every fixture and requires equal results.

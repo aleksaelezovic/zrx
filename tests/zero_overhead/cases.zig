@@ -608,6 +608,38 @@ export fn same_each(ptr: [*]const Group, len: usize, out: *u64) void {
     nested(exported_with_zrx, ptr[0..len], out);
 }
 
+// --- using --------------------------------------------------------------------------------------
+
+fn openFor(ledger: Ledger, value: u32) Session {
+    ledger.opened.* +%= 1;
+    return .{ .bias = ledger.opened.* ^ value };
+}
+
+/// A session for every item, opened from the item and closed after it.
+pub fn withItemResource(comptime with_zrx: bool, items: []const u32, opened: *u32, closed: *u32, out: *u64) void {
+    const ledger: Ledger = .{ .opened = opened, .closed = closed };
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.using(zrx.resource(openFor, close), .{map(biased)}),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{ ledger, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            const session = openFor(ledger, value);
+            defer close(ledger, session);
+            sum +%= value +% session.bias;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_using(ptr: [*]const u32, len: usize, opened: *u32, closed: *u32, out: *u64) void {
+    withItemResource(exported_with_zrx, ptr[0..len], opened, closed, out);
+}
+
 // --- attempt ------------------------------------------------------------------------------------
 
 /// Small values count for half; the others are tripled.

@@ -20,6 +20,8 @@ const fileBytes = zrx.fileBytes;
 const fold = zrx.fold;
 const each = zrx.each;
 const attempt = zrx.attempt;
+const using = zrx.using;
+const resource = zrx.resource;
 const concurrent = zrx.concurrent;
 const forEach = zrx.forEach;
 const fileWriter = zrx.fileWriter;
@@ -637,6 +639,57 @@ test "files of several sizes are hashed by concurrent workers, and a missing one
         }
     }
     try std.testing.expectEqualSlices(usize, &@as([paths.len]usize, @splat(2)), &found);
+}
+
+// A file opened for one item and closed after it, as the guide writes it.
+
+const Opened = struct { file: std.Io.File };
+
+/// How many files are open at the moment.
+var open_files: usize = 0;
+
+fn opened(clock: std.Io, path: []const u8) !Opened {
+    const file = try std.Io.Dir.cwd().openFile(clock, path, .{});
+    open_files += 1;
+    return .{ .file = file };
+}
+fn closed(clock: std.Io, input: Opened) void {
+    input.file.close(clock);
+    open_files -= 1;
+}
+/// The file is open while this runs.
+fn measured(clock: std.Io, input: Opened, path: []const u8) !Row {
+    try std.testing.expectEqual(@as(usize, 1), open_files);
+    return .{ .path = path, .bytes = try input.file.length(clock) };
+}
+
+test "a file is opened for one item, used by the sub-pipe's handlers, and closed after it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const sizes = [_]usize{ 0, 5, 300 };
+    const filler: [300]u8 = @splat('x');
+    var names: [sizes.len + 1][128]u8 = undefined;
+    var paths: [sizes.len + 1][]const u8 = undefined;
+    for (sizes, 0..) |size, i| {
+        var name: [16]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "file-{d}", .{i}), .data = filler[0..size] });
+        paths[i] = try std.fmt.bufPrint(&names[i], ".zig-cache/tmp/{s}/file-{d}", .{ tmp.sub_path, i });
+    }
+    paths[sizes.len] = try std.fmt.bufPrint(&names[sizes.len], ".zig-cache/tmp/{s}/missing", .{tmp.sub_path});
+
+    var rows: support.Recorder(Row) = .{};
+    open_files = 0;
+    const sized = pipe(.{using(resource(opened, closed), .{map(measured)})});
+    const work = pipe(.{
+        attempt(sized, failed),
+        forEach(support.record(Row)),
+    });
+    try program(fromSlice(&paths), work).run(.{ io, &rows });
+
+    try std.testing.expectEqual(@as(usize, 0), open_files);
+    try std.testing.expectEqual(paths.len, rows.len);
+    for (sizes, rows.slice()[0..sizes.len]) |size, row| try std.testing.expectEqual(@as(u64, size), row.bytes);
+    try std.testing.expectEqual(@as(?anyerror, error.FileNotFound), rows.slice()[sizes.len].failure);
 }
 
 // --- cancellation inside a write --------------------------------------------------

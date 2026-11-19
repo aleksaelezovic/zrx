@@ -254,3 +254,13 @@ test "attemptedCapped" {
     try std.testing.expect(!cases.attemptedCapped(true, inputs[3], &untouched));
     try std.testing.expectEqual(@as(u64, 99), untouched);
 }
+
+test "withItemResource" {
+    for (inputs) |items| {
+        var with: struct { u32, u32, u64 } = .{ 3, 7, 99 };
+        var without: struct { u32, u32, u64 } = .{ 3, 7, 98 };
+        cases.withItemResource(true, items, &with[0], &with[1], &with[2]);
+        cases.withItemResource(false, items, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without, with);
+    }
+}

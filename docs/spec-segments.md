@@ -41,7 +41,8 @@ without a test does not belong in this list. Nothing is promised about a
 moment inside the run.
 
 1. **On success**, every stage instance with a `finish` hook has finished exactly once.
-   The stages of an `each` sub-pipe are instances per item: see 14.
+   The stages of an `each` or `using` sub-pipe are instances per item: see
+   14 and 15.
    *Tests: "the end of the stream travels with the data", "queued sub-pipes of
    a branch each finish once", the six "invariants" (`tests/flow.zig`).*
 2. **On an error**, `run` returns it. A segment may have finished before
@@ -175,6 +176,24 @@ moment inside the run.
     stream is not an item's", "attempt around each: an item whose source or
     sub-pipe fails becomes one value" (`tests/nested.zig`), and the four
     "invariants" with an `each` or an `attempt` (`tests/flow.zig`).*
+15. **A resource per item.** For every item,
+    `using(resource(acquire, release), sub)` acquires a value, constructs
+    the stages of `sub` with it among their dependencies, pushes the item
+    into them, finishes them once and releases the value, in that order and
+    before the push of that item returns. When `sub` or the pipe after the
+    `using` fails for an item, its stages are not finished and the value is
+    still released. When `acquire` fails, no stage is constructed and
+    nothing is released. A sub-pipe that is done ends its item only. Once
+    `run` has returned, every value a `using` acquired has been released.
+    *Tests: "using acquires a resource for every item, lets the sub-pipe's
+    handlers see it, and releases it after the item", "the release of a
+    using runs when its sub-pipe fails, and when the pipe after it does",
+    "an acquire that fails makes no sub-pipe and releases nothing, and an
+    attempt can stand in for the item", "a sub-pipe of a using that is done
+    ends its item; the pipe after it being done ends the stream", the two
+    "invariants" with a `using` (`tests/flow.zig`), and "a file is opened
+    for one item, used by the sub-pipe's handlers, and closed after it"
+    (`tests/io.zig`).*
 
 ## Not promised
 
@@ -311,7 +330,7 @@ lock, right before what it allows and after every step that can take time.
   ends. The continuation returning `.done` or the last worker reaching its
   own input limit closes input and withdraws demand. Scope retirement closes
   input and wakes the coordinator's wait.
-- **A stage whose sub-pipe runs within one push** (`each`, `attempt`)
+- **A stage whose sub-pipe runs within one push** (`each`, `using`, `attempt`)
   declares none of these: it rejects a sub-pipe with a boundary, so it has
   no tasks to pass on.
 - `src/pipe.zig` knows these markers and hooks, not `queue`.

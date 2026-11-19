@@ -17,6 +17,7 @@ const take = zrx.take;
 const queue = zrx.queue;
 const concurrent = zrx.concurrent;
 const each = zrx.each;
+const using = zrx.using;
 const attempt = zrx.attempt;
 const branch = zrx.branch;
 const route = zrx.route;
@@ -474,6 +475,7 @@ test "a downstream limit wakes a producer without another item and all segments 
         // Sub-pipes within one item are constructed in a pipe that tracks demand.
         pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), end }),
         pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), end }),
+        pipe(.{ mark(0), queue(1), using(resource(countLease, countRelease), .{map(same)}), end }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -482,7 +484,8 @@ test "a downstream limit wakes a producer without another item and all segments 
         var upstream: Trace(0) = .{};
         var downstream: Trace(1) = .{};
         var fallbacks: Fallbacks = .{};
-        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream, &fallbacks });
+        var leases: Leases = .{};
+        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream, &fallbacks, &leases });
         try std.testing.expect(state.stopped);
         try seen.expect(&.{6});
         try upstream.events.expect("ipf");
@@ -917,6 +920,188 @@ test "terminal cases can be queued" {
     try program(range(u32, 0, 6), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4 });
     try right.expect(&.{ 2, 6, 10 });
+}
+
+// --- a resource per item ------------------------------------------------------
+
+/// What happened, in order: a letter and the item it happened for.
+const Journal = support.Recorder(u8);
+const Lease = struct { of: u32 };
+
+fn note(journal: *Journal, what: u8, item: u32) void {
+    journal.add(what);
+    journal.add('0' + @as(u8, @intCast(item)));
+}
+fn lease(journal: *Journal, item: u32) Lease {
+    note(journal, 'A', item);
+    return .{ .of = item };
+}
+fn giveBack(journal: *Journal, held: Lease) void {
+    note(journal, 'R', held.of);
+}
+/// The lease is a dependency here, like any other.
+fn useLease(journal: *Journal, held: Lease, item: u32) u32 {
+    note(journal, 'u', held.of);
+    return item + 10 * held.of;
+}
+fn failAtOne(value: u32) error{One}!u32 {
+    if (value % 10 == 1) return error.One;
+    return value;
+}
+
+/// Passes every item on and notes its own construction and end.
+const Noted = struct {
+    pub const zrx_operator = {};
+    pub const name = "noted";
+
+    pub fn Out(comptime _: type, comptime In: type) type {
+        return In;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        return struct {
+            journal: *Journal,
+
+            pub fn init(self: *@This(), _: *const Noted, env: Env) void {
+                self.journal = zrx.di.get(env, *Journal);
+                self.journal.add('i');
+            }
+
+            pub fn push(_: *@This(), item: In, down: anytype) !zrx.Flow {
+                return down.push(item);
+            }
+
+            pub fn finish(self: *@This(), _: anytype) !void {
+                self.journal.add('f');
+            }
+        };
+    }
+};
+
+test "using acquires a resource for every item, lets the sub-pipe's handlers see it, and releases it after the item" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    const work = pipe(.{
+        using(resource(lease, giveBack), .{
+            Noted{},
+            map(useLease),
+        }),
+        forEach(record),
+    });
+    try program(range(u32, 0, 3), work).run(.{ &seen, &journal });
+    try seen.expect(&.{ 0, 11, 22 });
+    // Acquired, the sub-pipe constructed, used and finished, released: once
+    // per item, one item after the other.
+    try journal.expect("A0iu0fR0A1iu1fR1A2iu2fR2");
+}
+
+test "the release of a using runs when its sub-pipe fails, and when the pipe after it does" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    const inside = pipe(.{
+        using(resource(lease, giveBack), .{
+            Noted{},
+            map(useLease),
+            map(failAtOne),
+        }),
+        forEach(record),
+    });
+    try std.testing.expectError(error.One, program(range(u32, 0, 3), inside).run(.{ &seen, &journal }));
+    // The sub-pipe of the item that failed is not finished; its lease is released.
+    try journal.expect("A0iu0fR0A1iu1R1");
+    try seen.expect(&.{0});
+
+    var after: Journal = .{};
+    const outside = pipe(.{
+        using(resource(lease, giveBack), .{map(useLease)}),
+        map(failAtOne),
+        forEach(record),
+    });
+    try std.testing.expectError(error.One, program(range(u32, 0, 3), outside).run(.{ &seen, &after }));
+    try after.expect("A0u0R0A1u1R1");
+}
+
+fn leaseBelowTwo(journal: *Journal, item: u32) error{Taken}!Lease {
+    if (item >= 2) {
+        note(journal, 'X', item);
+        return error.Taken;
+    }
+    return lease(journal, item);
+}
+fn unleased(journal: *Journal, _: error{Taken}, item: u32) u32 {
+    note(journal, 'F', item);
+    return 999;
+}
+
+test "an acquire that fails makes no sub-pipe and releases nothing, and an attempt can stand in for the item" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    const leased = pipe(.{using(resource(leaseBelowTwo, giveBack), .{
+        Noted{},
+        map(useLease),
+    })});
+    try std.testing.expectError(error.Taken, program(range(u32, 1, 4), .{ leased, forEach(record) }).run(.{ &seen, &journal }));
+    try journal.expect("A1iu1fR1X2");
+    try seen.expect(&.{11});
+
+    var again: Journal = .{};
+    try program(range(u32, 1, 4), .{ attempt(leased, unleased), forEach(record) }).run(.{ &seen, &again });
+    try again.expect("A1iu1fR1X2F2X3F3");
+    try seen.expect(&.{ 11, 11, 999, 999 });
+}
+
+test "a sub-pipe of a using that is done ends its item; the pipe after it being done ends the stream" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    // Every item gets a `take(1)` of its own.
+    const fresh = pipe(.{
+        using(resource(lease, giveBack), .{
+            take(1),
+            map(useLease),
+        }),
+        forEach(record),
+    });
+    try program(range(u32, 0, 3), fresh).run(.{ &seen, &journal });
+    try seen.expect(&.{ 0, 11, 22 });
+
+    var limited: Journal = .{};
+    const two = pipe(.{
+        using(resource(lease, giveBack), .{map(useLease)}),
+        take(2),
+        forEach(record),
+    });
+    try program(range(u32, 0, 1000), two).run(.{ &seen, &limited });
+    // The second lease is released before the stream stops; no third is taken.
+    try limited.expect("A0u0R0A1u1R1");
+}
+
+fn tenfold(item: u32) Lease {
+    return .{ .of = item * 10 };
+}
+fn leasePlusItem(held: Lease, item: u32) u32 {
+    return held.of + item;
+}
+
+test "a resource without release is a value computed from the item" {
+    var seen: Numbers = .{};
+    try program(range(u32, 1, 4), .{ using(resource(tenfold, null), .{map(leasePlusItem)}), forEach(record) }).run(.{&seen});
+    try seen.expect(&.{ 11, 22, 33 });
+}
+
+fn leaseOfItem(item: u32) Lease {
+    return .{ .of = item };
+}
+
+test "a value of a type that is already a dependency replaces it inside the sub-pipe only" {
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        using(resource(leaseOfItem, null), .{map(leasePlusItem)}),
+        map(leasePlusItem),
+        forEach(record),
+    });
+    try program(range(u32, 1, 3), work).run(.{ &seen, Lease{ .of = 100 } });
+    // Inside: the item's own lease. After the using: the program's.
+    try seen.expect(&.{ 102, 104 });
 }
 
 // --- segments ---------------------------------------------------------------
@@ -1426,9 +1611,10 @@ const Probe = struct {
     ended: Numbers = .{},
     beside: Numbers = .{},
     fallbacks: Fallbacks = .{},
+    leases: Leases = .{},
 
     fn run(probe: *Probe, comptime shape: anytype, comptime ending: Way) !void {
-        const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside }, &probe.fallbacks };
+        const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside }, &probe.fallbacks, &probe.leases };
         const result = program(range(u32, 0, item_count), shape.build(ending)).run(deps);
         if (ending == .fails) {
             try std.testing.expectError(error.Ended, result);
@@ -1441,6 +1627,9 @@ const Probe = struct {
         // No shape has a sub-pipe that fails under an `attempt`: whatever
         // ends the run, no fallback is asked.
         try std.testing.expectEqual(@as(usize, 0), probe.fallbacks.count.load(.seq_cst));
+        // However the run ended, what a `using` acquired has been released.
+        try std.testing.expectEqual(probe.leases.acquired.load(.seq_cst), probe.leases.released.load(.seq_cst));
+        if (@hasDecl(shape, "leased")) try std.testing.expect(probe.leases.acquired.load(.seq_cst) != 0);
         inline for (.{ &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4 }) |trace| {
             if (trace.events.len > 0) {
                 if (ending == .fails) {
@@ -1742,6 +1931,60 @@ const AfterAttempt = struct {
         return 0;
     }
 };
+
+/// What the shapes with a `using` acquired and released.
+const Leases = struct {
+    acquired: std.atomic.Value(usize) = .init(0),
+    released: std.atomic.Value(usize) = .init(0),
+};
+const Leased = struct { of: u32 };
+
+fn countLease(leases: *Leases, value: u32) Leased {
+    _ = leases.acquired.fetchAdd(1, .seq_cst);
+    return .{ .of = value };
+}
+fn countRelease(leases: *Leases, _: Leased) void {
+    _ = leases.released.fetchAdd(1, .seq_cst);
+}
+
+/// The sub-pipe of a `using` behind a queue: it gets one item, so one that
+/// is done after an item has taken them all.
+const UsingSubPipe = struct {
+    const leased = {};
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), using(resource(countLease, countRelease), .{ender(ending)}), mark(1), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), using(resource(countLease, countRelease), .{ender(ending)}), mark(1), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    pub fn doneCount() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+/// A `using` in every concurrent worker; the pipe after the workers ends.
+const UsingInWorkers = struct {
+    const leased = {};
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), concurrent(3, .{using(resource(countLease, countRelease), .{map(same)})}), mark(1), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), concurrent(3, .{using(resource(countLease, countRelease), .{map(same)})}), mark(1), ender(ending), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+test "invariants: the sub-pipe of a using runs out, stops, or fails, and every resource is released" {
+    try checkShape(UsingSubPipe);
+}
+test "invariants: the pipe after a using in concurrent workers ends, and every resource is released" {
+    try checkShape(UsingInWorkers);
+}
 
 test "invariants: the sub-pipe of an each runs out, stops, or fails" {
     try checkShape(EachSubPipe);

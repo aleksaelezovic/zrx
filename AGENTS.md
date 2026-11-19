@@ -48,6 +48,8 @@ to this file; edit `AGENTS.md`, not copies.
 - **Dependencies are resolved once.** The environment is a tuple keyed by exact
   type. A stage copies what its handler asked for at `init`; nothing is looked
   up per item. `std.Io` and the allocator are ordinary dependencies.
+  A per-item sub-pipe (`each`, `using`) resolves them once per item, at its
+  `init`, with nothing looked up per push.
   The source and all stages use one environment.
 - **`provide` and `run` are one concept.** `run` takes bindings: values and
   resources alike. `provide` only gives a program defaults for them, so
@@ -85,16 +87,23 @@ to this file; edit `AGENTS.md`, not copies.
 - **A sub-pipe may live for one item.** `each(source_of, sub)` is a nested
   program per item: its stage keeps the environment and a pointer to its
   operator, and for every item constructs `sub`'s stages, runs the item's
-  source into them and finishes them, all inside that item's `push`. That is
-  construction per item, not a lookup per item: a stage still copies what it
-  asked for when it is constructed. `attempt(sub, fallback)` is `orElse` for
+  source into them and finishes them, all inside that item's `push`.
+  `using(resource(acquire, release), sub)` is a resource per item on the
+  same machinery (`live` and `ItemTail` in `src/ops/nested.zig`): it
+  acquires from the item, constructs `sub` with `di.extend(env, value)`,
+  pushes the item, finishes `sub`, and releases in a `defer`, so also when
+  the item fails. It is an ordinary stage: it declares no `Provides`,
+  `provide` or `deinit`, which `Chain` goes on rejecting in favor of
+  `Program.provide`. `resource(...)` has two uses, and the operator decides
+  the data of `acquire` as for any handler: none in `provide`, the item in
+  `using`. `attempt(sub, fallback)` is `orElse` for
   a sub-pipe and follows its rules. Its tail puts a failure of the pipe
   after it aside, answers `.done`, and `push` returns the failure once the
   sub-pipe has returned: inside the sub-pipe it could not be told from the
   sub-pipe's own, and a flag for it goes stale when a `recover` in there
-  swallows it. Neither may contain a task boundary, neither adds to the
-  stage contract, and both live in `src/ops/nested.zig` on the operator and
-  source contracts. `each` pairs what it emits with the item as
+  swallows it. None of the three may contain a task boundary, none adds to
+  the stage contract, and all live in `src/ops/nested.zig` on the operator
+  and source contracts. `each` pairs what it emits with the item as
   `Tagged(Item, T)`, where `Item` is the parameter type `source_of`
   declares, as `fold` takes its state type from its reducer.
 - **A boundary splits a pipe into segments, each with a task.**

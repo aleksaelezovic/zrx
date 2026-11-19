@@ -1,8 +1,9 @@
 //! Sub-pipes that run inside one push: `each` runs a fresh one over a source
-//! made from every item, `attempt` turns the failure of one into a value.
+//! made from every item, `using` runs a fresh one with a resource acquired
+//! for the item, and `attempt` turns the failure of one into a value.
 //!
-//! Neither is a task boundary and neither may contain one: what the sub-pipe
-//! does for an item is over when the push of that item returns.
+//! None is a task boundary and none may contain one: what the sub-pipe does
+//! for an item is over when the push of that item returns.
 const std = @import("std");
 const di = @import("../di.zig");
 const core = @import("../pipe.zig");
@@ -13,6 +14,51 @@ const handlers = @import("../handlers.zig");
 const Flow = core.Flow;
 const End = core.End;
 const lift = core.lift;
+
+// ---------------------------------------------------------------------------
+// A sub-pipe that lives for one item: what `each` and `using` share
+// ---------------------------------------------------------------------------
+
+/// What a sub-pipe that lives for one item emits for items of type `In`.
+/// It has to emit something, and it cannot hold a task: its stages are gone
+/// when the push of the item returns.
+fn EmittedPerItem(comptime who: []const u8, comptime nothing_to: []const u8, comptime Sub: type, comptime Env: type, comptime In: type) type {
+    const T = Sub.Out(Env, In);
+    if (T == End) @compileError(who ++ ": the sub-pipe ends with a terminal operator, so it emits nothing to " ++ nothing_to ++ "; remove it and end the pipe after " ++ who ++ "(...)");
+    if (Sub.Stage(Env, In).has_boundary)
+        @compileError(who ++ ": the sub-pipe contains a task boundary, but it lives for one item; keep it synchronous and put task boundaries outside " ++ who ++ "(...)");
+    return T;
+}
+
+/// The `down` of such a sub-pipe. It notes when the pipe after the operator
+/// is done. Only that ends the operator; a sub-pipe that is done ends its
+/// item. With a `Pair`, what the sub-pipe emits is paired with the item.
+fn ItemTail(comptime Down: type, comptime T: type, comptime Pair: ?type) type {
+    return struct {
+        down: Down,
+        of: if (Pair) |P| @FieldType(P, "source") else void,
+        done: *bool,
+
+        pub fn push(tail: @This(), value: T) !Flow {
+            const sent = if (Pair) |P| P{ .source = tail.of, .item = value } else value;
+            if (try tail.down.push(sent) == .done) {
+                tail.done.* = true;
+                return .done;
+            }
+            return .more;
+        }
+    };
+}
+
+/// The life of one item's sub-pipe: its stages are constructed from `env`,
+/// `feed.into` gives them their stream, and they are finished. A failure
+/// leaves them unfinished, as it does the stages of a program.
+fn live(comptime Chain: type, sub: anytype, env: anytype, tail: anytype, feed: anytype) !void {
+    var chain: Chain = undefined;
+    chain.init(sub, env);
+    try feed.into(&chain, tail);
+    try chain.finish(tail);
+}
 
 // ---------------------------------------------------------------------------
 // each
@@ -46,19 +92,9 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
             return S;
         }
 
-        /// What `sub` emits for the items of that source.
-        fn Emitted(comptime Env: type, comptime In: type) type {
-            const Item = Source(Env, In).Item;
-            const T = Sub.Out(Env, Item);
-            if (T == End) @compileError("each: the sub-pipe ends with a terminal operator, so it emits nothing to pair with the item; remove it and end the pipe after each(...)");
-            if (Sub.Stage(Env, Item).has_boundary)
-                @compileError("each: the sub-pipe contains a task boundary, but it lives for one item; keep it synchronous and put task boundaries outside each(...)");
-            return T;
-        }
-
         pub fn Out(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
-            const T = Emitted(Env, In);
+            const T = EmittedPerItem(name, "pair with the item", Sub, Env, Source(Env, In).Item);
             // The item as `source_of` takes it: a pipe written for
             // `[]const u8` then emits the same type whichever kind of
             // slice it is fed.
@@ -68,12 +104,13 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
         pub fn Stage(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
             const S = Source(Env, In);
-            const T = Emitted(Env, In);
             const Pair = Out(Env, In);
+            const T = @FieldType(Pair, "item");
             const Chain = Sub.Stage(Env, S.Item);
             // As for a program without a task boundary: a producer that asks
             // for `Stop` learns about completion through its pushes.
             const wants_stop = completion.sourceWantsStop(S);
+            const SourceEnv = if (wants_stop) di.Extend(Env, completion.Stop) else Env;
             return struct {
                 op: *const Op,
                 /// Kept to construct the sub-pipe's stages for every item.
@@ -81,33 +118,24 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
 
                 const Self = @This();
 
-                /// The `down` of the sub-pipe: pairs what it emits with the
-                /// item and notes when the pipe after `each` is done. Only
-                /// that ends `each`; a sub-pipe that is done ends its item.
-                fn Paired(comptime Down: type) type {
-                    return struct {
-                        down: Down,
-                        of: @FieldType(Pair, "source"),
-                        done: *bool,
+                /// The stream of one item: its source, run into the sub-pipe.
+                const FromSource = struct {
+                    source: *const S,
+                    env: SourceEnv,
 
-                        pub fn push(tail: @This(), value: T) !Flow {
-                            if (try tail.down.push(Pair{ .source = tail.of, .item = value }) == .done) {
-                                tail.done.* = true;
-                                return .done;
-                            }
-                            return .more;
-                        }
-                    };
-                }
+                    pub fn into(feed: @This(), chain: *Chain, tail: anytype) !void {
+                        return feed.source.run(feed.env, Entry(@TypeOf(tail)){ .chain = chain, .tail = tail });
+                    }
+                };
 
                 /// The `down` the item's source pushes into.
-                fn Feed(comptime Tail: type) type {
+                fn Entry(comptime Down: type) type {
                     return struct {
                         chain: *Chain,
-                        tail: Tail,
+                        tail: Down,
 
-                        pub fn push(feed: @This(), item: S.Item) !Flow {
-                            return feed.chain.push(item, feed.tail);
+                        pub fn push(entry: @This(), item: S.Item) !Flow {
+                            return entry.chain.push(item, entry.tail);
                         }
                     };
                 }
@@ -119,12 +147,101 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
                     const source: S = try lift(di.invoke(source_of, self.env, .{item}));
                     var done = false;
-                    const tail: Paired(@TypeOf(down)) = .{ .down = down, .of = item, .done = &done };
-                    var chain: Chain = undefined;
-                    chain.init(&self.op.pipe, self.env);
+                    const tail: ItemTail(@TypeOf(down), T, Pair) = .{ .down = down, .of = item, .done = &done };
                     const source_env = if (wants_stop) di.extend(self.env, completion.Stop{}) else self.env;
-                    try source.run(source_env, Feed(@TypeOf(tail)){ .chain = &chain, .tail = tail });
-                    try chain.finish(tail);
+                    try live(Chain, &self.op.pipe, self.env, tail, FromSource{ .source = &source, .env = source_env });
+                    return if (done) .done else .more;
+                }
+            };
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// using
+// ---------------------------------------------------------------------------
+
+/// A resource per item. For every item, the `acquire(deps..., item)` of
+/// `resource(acquire, release)` gives a value; a fresh `sub` is constructed
+/// with that value among its dependencies, the item is pushed into it and
+/// `sub` is finished; then `release(deps..., value)` runs, also when `sub`
+/// or the pipe after it failed. All of it happens before the push of that
+/// item returns. What `sub` emits goes on as it is.
+pub fn using(scoped: anytype, sub: anytype) Using(Scoped(@TypeOf(scoped)), core.NormalizedPipe("using", @TypeOf(sub))) {
+    return .{ .pipe = core.normalizePipe("using", sub) };
+}
+
+/// The `resource(acquire, release)` a `using` is given.
+fn Scoped(comptime R: type) type {
+    if (@typeInfo(R) != .@"struct" or !@hasDecl(R, "zrx_acquire")) @compileError(
+        "using: expected `resource(acquire, release)` as its first argument, got `" ++ @typeName(R) ++ "`; it is acquired for every item and released after it",
+    );
+    return R;
+}
+
+fn Using(comptime R: type, comptime Sub: type) type {
+    const acquire = R.zrx_acquire;
+    const release = R.zrx_release;
+    const releases = @TypeOf(release) != @TypeOf(null);
+    return struct {
+        pipe: Sub,
+
+        const Op = @This();
+        pub const zrx_operator = {};
+        pub const name = "using";
+
+        /// What is acquired for one item. The rules are those of a
+        /// program's resource, in the same words.
+        fn Value(comptime Env: type, comptime In: type) type {
+            const V = di.Payload(di.Bound(name, acquire, Env, &.{In}).Return);
+            if (V == void) @compileError("resource: acquire must return the value to provide");
+            if (releases and di.Bound(name, release, Env, &.{V}).Return != void)
+                @compileError("resource: release must return `void`; a release cannot fail");
+            return V;
+        }
+
+        /// The environment of the sub-pipe: the stage's, with the value.
+        fn Inner(comptime Env: type, comptime In: type) type {
+            return di.Extend(Env, Value(Env, In));
+        }
+
+        pub fn Out(comptime Env: type, comptime In: type) type {
+            @setEvalBranchQuota(di.quota);
+            return EmittedPerItem(name, "send on", Sub, Inner(Env, In), In);
+        }
+
+        pub fn Stage(comptime Env: type, comptime In: type) type {
+            @setEvalBranchQuota(di.quota);
+            const V = Value(Env, In);
+            const T = Out(Env, In);
+            const Chain = Sub.Stage(Inner(Env, In), In);
+            return struct {
+                op: *const Op,
+                /// Kept to acquire, to release, and to construct the
+                /// sub-pipe's stages for every item.
+                env: Env,
+
+                const Self = @This();
+
+                /// The stream of one item: the item.
+                const TheItem = struct {
+                    item: In,
+
+                    pub fn into(feed: @This(), chain: *Chain, tail: anytype) !void {
+                        _ = try chain.push(feed.item, tail);
+                    }
+                };
+
+                pub fn init(self: *Self, op: *const Op, env: Env) void {
+                    self.* = .{ .op = op, .env = env };
+                }
+
+                pub fn push(self: *Self, item: In, down: anytype) !Flow {
+                    const value: V = try lift(di.invoke(acquire, self.env, .{item}));
+                    defer if (releases) di.invoke(release, self.env, .{value});
+                    var done = false;
+                    const tail: ItemTail(@TypeOf(down), T, null) = .{ .down = down, .of = {}, .done = &done };
+                    try live(Chain, &self.op.pipe, di.extend(self.env, value), tail, TheItem{ .item = item });
                     return if (done) .done else .more;
                 }
             };

@@ -69,8 +69,8 @@ Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
 
 Where a pipe is expected, pass an inline operator tuple or a constructed
 `pipe(...)` value. This applies to `program`, each child of `branch`, and the
-sub-pipes of `when`, `otherwise`, `concurrent`, `each` and `attempt`. Both
-forms construct the same pipe;
+sub-pipes of `when`, `otherwise`, `concurrent`, `each`, `using` and
+`attempt`. Both forms construct the same pipe;
 `pipe(...)` is useful for named, reusable compositions. Bare operators are
 rejected; wrap even a single operator in `.{ ... }`.
 
@@ -245,6 +245,7 @@ Within one item:
 | Operator | Effect |
 |---|---|
 | `each(source_of, sub)` | Runs a fresh `sub` over the source that `source_of(deps..., item)` returns, and emits what `sub` emits, paired with the item. See [each](#each). |
+| `using(resource(acquire, release), sub)` | Acquires a value for the item, runs a fresh `sub` for it with that value as a dependency, and releases the value. See [using](#using). |
 | `attempt(sub, fallback)` | Runs `sub`; when it fails for an item, emits `fallback(deps..., err, item)` in its place. See [Errors](#errors). |
 
 Terminal:
@@ -334,6 +335,59 @@ const hashed = pipe(.{
   the failure into a value instead, wrap the `each` in
   [`attempt`](#errors). The full statement is guarantee 14 of
   [the segments spec](spec-segments.md#guarantees).
+
+### using
+
+`using` gives every item a resource of its own: something that is acquired
+for the item, used by the handlers that work on it, and released when they
+are done. It is written with `resource(acquire, release)`, as a resource of
+the program is, and here `acquire` receives the item. A file is opened for
+its path, measured while it is open, and closed:
+
+```zig
+const Opened = struct { file: Io.File };
+
+fn opened(io: Io, path: []const u8) !Opened {
+    return .{ .file = try Io.Dir.cwd().openFile(io, path, .{}) };
+}
+fn closed(io: Io, input: Opened) void {
+    input.file.close(io);
+}
+
+/// The file is a dependency here, like any other.
+fn measured(io: Io, input: Opened, path: []const u8) !Row { ... }
+
+const sized = pipe(.{
+    using(resource(opened, closed), .{
+        map(measured),
+    }),
+    forEach(save),
+});
+```
+
+- For an item, in this order: `acquire(deps..., item)` gives the value; a
+  fresh copy of the sub-pipe is constructed with the value among its
+  dependencies; the item is pushed into it; the sub-pipe is finished;
+  `release(deps..., value)` runs. All of it happens within the push of that
+  item.
+- **The release also runs when the item fails**, in the sub-pipe or in the
+  pipe after the `using`. It returns `void` and cannot fail. When `acquire`
+  itself fails there is nothing to release. Pass `null` for a value that
+  needs no release.
+- **The value is a dependency of the sub-pipe only**, keyed by its type like
+  every dependency: give it a type of its own (`Opened`, not a bare
+  `Io.File`). Stages outside the sub-pipe do not see it. If the program
+  already has a dependency of that type, the item's value replaces it
+  inside the sub-pipe.
+- What the sub-pipe emits goes on as it is: the item itself flows through
+  the sub-pipe, so nothing is paired. As with `each`, state in the sub-pipe
+  lasts one item, a sub-pipe that is done ends its item, and the sub-pipe
+  cannot contain a task boundary or end in a terminal operator.
+- The full statement is guarantee 15 of
+  [the segments spec](spec-segments.md#guarantees).
+
+`each` is for an item that becomes a stream; `using` is for an item that
+needs something held open while it is worked on.
 
 ## Handler combinators
 
@@ -538,8 +592,9 @@ branch(.{
   `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a task boundary (the
   pipe after the route would be pushed to from two tasks). Put the boundary
-  after the route. The sub-pipes of `each` and `attempt` cannot either: what
-  they do for an item is over when the push of that item returns.
+  after the route. The sub-pipes of `each`, `using` and `attempt` cannot
+  either: what they do for an item is over when the push of that item
+  returns.
 - When the stages after a boundary are done, the segment before it finds out
   at its next push. A producer that asks for `zrx.Stop` can also observe that
   its consumers have finished while it waits for input.
@@ -836,8 +891,9 @@ A run goes through these steps:
 4. After the tasks have joined, release acquired resources in reverse
    order, including after a failed run or a partial acquisition.
 
-The stages of an `each` sub-pipe go through steps 2 and 3 once for every
-item, within the push of that item.
+The stages of an `each` or `using` sub-pipe go through steps 2 and 3 once
+for every item, within the push of that item. A `using` also acquires before
+them and releases after them, per item.
 
 ## Writing your own
 
@@ -943,7 +999,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Seventeen are `same`; `take`, `batch`,
+Every synchronous operator has a fixture. Eighteen are `same`; `take`, `batch`,
 the handler combinators and `attempt` are `lean`, each with the reason next
 to it.
 
@@ -967,10 +1023,6 @@ Two things make it work, and are worth knowing when writing an operator:
 
 Stopping a source from outside, so that a signal or a timeout ends a run
 gracefully, is proposed in [the segments spec](spec-segments.md).
-
-A resource acquired for one item (opened before the item's sub-pipe and
-released after it) is not here. `each` covers the case where the item
-becomes a stream.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

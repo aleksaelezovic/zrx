@@ -60,6 +60,7 @@ pub const concurrent = @import("ops/concurrent.zig").concurrent;
 // Sub-pipes within one item
 const nested = @import("ops/nested.zig");
 pub const each = nested.each;
+pub const using = nested.using;
 pub const attempt = nested.attempt;
 
 const timing = @import("ops/timing.zig");

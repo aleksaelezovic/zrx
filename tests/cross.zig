@@ -69,6 +69,27 @@ export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
     return true;
 }
 
+const Opened = struct { file: std.Io.File };
+
+fn opened(io: std.Io, path: []const u8) !Opened {
+    return .{ .file = try std.Io.Dir.cwd().openFile(io, path, .{}) };
+}
+fn closed(io: std.Io, input: Opened) void {
+    input.file.close(io);
+}
+fn fileLength(io: std.Io, input: Opened, _: []const u8) !u64 {
+    return input.file.length(io);
+}
+
+export fn zrx_cross_file_per_item(io: *const std.Io, path: [*:0]const u8) bool {
+    const sizes = program(zrx.fromValue(@as([]const u8, std.mem.span(path))), pipe(.{
+        zrx.using(zrx.resource(opened, closed), .{zrx.map(fileLength)}),
+        zrx.drain(),
+    }));
+    sizes.run(.{io.*}) catch return false;
+    return true;
+}
+
 export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     const batches = program(zrx.range(u32, first, end), pipe(.{
         zrx.batchWithin(1000, .fromSeconds(60)),

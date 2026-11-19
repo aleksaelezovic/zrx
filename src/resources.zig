@@ -32,6 +32,9 @@ fn Resource(comptime acquire: anytype, comptime release: anytype) type {
             di.requires("resource acquire", acquire, 0),
             if (releases) di.requires("resource release", release, 1) else &.{},
         );
+        /// For an operator that acquires and releases by itself (`using`).
+        pub const zrx_acquire = acquire;
+        pub const zrx_release = release;
 
         pub fn bind(_: @This(), env: anytype, next: anytype) !void {
             const Env = @TypeOf(env);
