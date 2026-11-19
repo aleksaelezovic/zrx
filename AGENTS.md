@@ -203,8 +203,7 @@ to this file; edit `AGENTS.md`, not copies.
   and touches neither the slot nor the socket. Do not compare sockets for
   this; the system reuses their handles. Responders write unflushed and `serve`
   flushes before a read that may wait for the peer (a head or body that is
-  not whole in the buffer, and any chunked body: its end is not searched
-  for); do not flush per response. Every head is
+  not whole in the buffer); do not flush per response. Every head is
   written by `Exchange.begin`, which is where a status is judged: an
   interim one (1xx) is answered 500, since it would leave the peer without
   an answer, and 204 and 304 go out without a body or a length. A cancellation
@@ -221,11 +220,20 @@ to this file; edit `AGENTS.md`, not copies.
   a `content-length` counted before the skip and content written after
   it. That is why `begin` writes every head itself and `std`'s
   `respondStreaming`, which skips first, is not used. A read that fails
-  in the skip is returned, for a socket and a transport alike. An unread
-  chunked body is not skipped but answered with the connection closed:
-  `std`'s chunk reader overflows on a chunk size near 2^64, and that must
-  not be reachable on a route that reads no body. `serve` refuses a request whose `Host` is not in
-  order before any handler sees it. Parsing stays `std.http.Server`'s. The first version is one
+  in the skip is returned, for a socket and a transport alike. `serve` refuses a request whose `Host` is not in
+  order before any handler sees it, and one whose head a proxy in front
+  could read differently (`refusal`): `std` parses leniently, and a
+  disagreement on where a request ends is request smuggling. That check
+  holds only what `std` lets through; two rules that duplicated refusals
+  of its parser were removed when no test could tell them apart. No body
+  framed by a transfer coding is read: such a request is answered 411
+  before any handler sees it. Chunk sizes cannot be checked from outside
+  `std`, whose chunk reader takes sizes that are no hexadecimal number
+  and overflows on one near 2^64 (a remote stop of a safe build). Not
+  skipping such a body, and then closing the connection after one, each
+  left `request.body` reaching that decoder. Chunked request bodies
+  return when `std` decodes them with checks, or by explicit decision
+  with a decoder of zrx's own. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
   guide's "Not here yet" lists what was left out on purpose. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a

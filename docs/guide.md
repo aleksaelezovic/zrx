@@ -901,8 +901,8 @@ fn sum(request: http.Request) !i64 {
   `request.query()`, whose `next()` gives `name` and `value` pairs. Nothing is
   percent-decoded.
 - `request.body(&buffer)` reads the whole body and returns it, empty when the
-  request has none. It owns the framing: its errors are `BadRequest` (a body
-  on a method that takes none, two framings, an invalid chunk),
+  request has none. A body has a length (see below for chunked ones). Its
+  errors are `BadRequest` (a body on a method that takes none),
   `LengthRequired`, `PayloadTooLarge` (more than the buffer holds) and
   `ExpectationFailed`. It answers `Expect: 100-continue` itself, in any
   casing of that token.
@@ -972,9 +972,10 @@ there ends the conversation with `error.ReadFailed`, for a socket and an
 
 The connection is closed after an error of `body`, after an answer given
 while the peer still waits for `100 Continue`, after any answer to an
-HTTP/1.0 request (whose `Expect` is ignored), and when a body was left
-unread that is not skipped: one without framing on `POST`, one on `GET`,
-and a chunked one. A chunked body is read by `body` and by nothing else.
+HTTP/1.0 request (whose `Expect` is ignored), when the peer asks for it
+with `close` among its `Connection` options, and when a body was left
+unread that cannot be skipped: one without a length on `POST`, and one on
+`GET`.
 
 A head that does not parse is answered 400, and one that does not fit the
 connection's read buffer (8 KiB for a socket) 431, by `serve` itself; then
@@ -984,6 +985,24 @@ in order, before any handler sees it: an HTTP/1.1 request has exactly one
 optional port, or empty. The host is a name, in which a `%` introduces two
 hexadecimal digits, or an IP address, which in brackets is an IPv6 address
 without a zone.
+
+`serve` also refuses, with 400 and before any handler sees it, a head
+that a proxy in front of it could read differently, since the two would
+then disagree on where the next request begins:
+
+- a field name that is not a token, such as one with a space before its
+  colon, and a line without a colon;
+- a CR, LF or NUL inside a field value;
+- an empty target, and a space or control character in one;
+- a `Content-Length` that is not digits only;
+- both a `Content-Length` and a `Transfer-Encoding`.
+
+A request with a `Transfer-Encoding` is answered 411, before any handler
+sees it: chunked request bodies are not read. Decoding them is `std`'s,
+and its chunk reader accepts sizes that are no hexadecimal number and
+overflows on one of 2^64 - 2 or more, which stops a program built with
+safety checks. A client has to send a `Content-Length`. (A coding whose
+name `std` does not know is a head that does not parse: 400.)
 
 A connection that breaks fails its push with `error.ReadFailed` or
 `error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
@@ -1025,10 +1044,8 @@ Answers are collected in a 4 KiB buffer per connection and written before
 `serve` reads something that may not have arrived yet (a request head, or a
 body, that is not whole in its read buffer) and when the connection ends.
 Requests that arrived together and whole (pipelined) are therefore answered
-with one write, as long as their bodies have a length. Where a chunked body
-ends is not looked for in the buffer: what was answered so far is written
-before `body` reads one, also when all of it has arrived. An answer never
-waits for the rest of a request that arrived in part.
+with one write. An answer never waits for the rest of a request that
+arrived in part.
 
 For a connection that is not a socket, or in a test, give `serve` an
 `http.Transport` instead: a reader and a writer of yours, which it flushes
@@ -1216,12 +1233,9 @@ becomes a stream.
 HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
 connections, no event loop), response headers of your own, streamed bodies,
-path parameters, configurable buffer sizes, TLS and HTTP/2. Parsing is
-`std.http.Server`'s; zrx has no parser of its own. One defect of it is
-known: its chunk reader overflows on a chunk size of 2^64 - 2 or more,
-which stops a program built with safety checks. `serve` never reads a
-chunked body by itself for that reason; `request.body` does, when a
-handler calls it for a chunked request.
+chunked request bodies (answered 411 until `std` decodes them with checks;
+see [Answers](#answers)), path parameters, configurable buffer sizes, TLS
+and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
 
 Present in the previous implementation and not ported: signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of
