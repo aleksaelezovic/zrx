@@ -36,22 +36,32 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
 
         const Self = @This();
 
-        /// Binds values and resources for the source and every stage of this program.
+        /// Gives this program defaults: bindings `run` uses unless it is
+        /// given one that provides the same type.
         pub fn provide(self: *const Self, bindings: anytype) Program(S, P, Joined(Bindings, @TypeOf(bindings))) {
             return .{ .source = self.source, .pipe = self.pipe, .bindings = self.bindings ++ bindings };
         }
 
-        /// Runs with additional caller-supplied dependencies.
+        /// Runs with the given bindings, values and resources alike, and
+        /// with the defaults they do not replace.
         pub fn run(self: *const Self, deps: anytype) !void {
-            const Run = struct {
-                program: *const Self,
-
-                pub fn call(body: @This(), env: anytype) !void {
-                    return body.program.runBound(env);
-                }
-            };
-            return resources.run(self.bindings, di.normalize(deps), Run{ .program = self });
+            return resources.run(self.bindings, deps, Run{ .program = self });
         }
+
+        /// What a `system` calls for its members: `env` is an environment
+        /// that is already resolved, so every element of it is a value,
+        /// whatever its type looks like. The defaults still apply.
+        pub fn runResolved(self: *const Self, env: anytype) !void {
+            return resources.run(self.bindings, resources.resolved(env), Run{ .program = self });
+        }
+
+        const Run = struct {
+            program: *const Self,
+
+            pub fn call(body: @This(), env: anytype) !void {
+                return body.program.runBound(env);
+            }
+        };
 
         fn runBound(self: *const Self, env: anytype) !void {
             const Env = @TypeOf(env);
@@ -108,7 +118,7 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
 
 fn Joined(comptime A: type, comptime B: type) type {
     if (!di.isTuple(B)) @compileError("program.provide: expected a tuple of bindings such as `.{ logger }`");
-    return @Tuple(di.types(A) ++ di.types(B));
+    return resources.Bindings(@Tuple(di.types(A) ++ di.types(B)));
 }
 
 /// Segment 0 of a program whose pipe has a task boundary, as a member of a
@@ -176,10 +186,27 @@ pub fn System(comptime Ps: type) type {
 
         pub const zrx_program = {};
 
+        /// Runs with the given bindings. A resource among them is acquired
+        /// once, around all the programs.
         pub fn run(self: *const @This(), deps: anytype) !void {
-            const env = di.normalize(deps);
+            const Run = struct {
+                system: *const System(Ps),
+
+                pub fn call(body: @This(), env: anytype) !void {
+                    return body.system.runBound(env);
+                }
+            };
+            return resources.run(.{}, deps, Run{ .system = self });
+        }
+
+        /// A system inside a system: nothing is left to resolve.
+        pub fn runResolved(self: *const @This(), env: anytype) !void {
+            return self.runBound(env);
+        }
+
+        fn runBound(self: *const @This(), env: anytype) !void {
             const Env = @TypeOf(env);
-            if (members.len == 1) return self.programs[0].run(env);
+            if (members.len == 1) return runMember(&self.programs[0], env);
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");
 
             const list = comptime blk: {
@@ -201,7 +228,16 @@ fn Member(comptime P: type, comptime Env: type) type {
         env: Env,
 
         pub fn run(self: @This()) !void {
-            return self.program.run(self.env);
+            return runMember(self.program, self.env);
         }
     };
+}
+
+/// Hands a member the environment its system resolved. A program or system
+/// of this library takes it as resolved values. Any other runnable (a type
+/// with `zrx_program` and `run`) is given the tuple itself, as `run` always
+/// was, and never sees how this library marks one.
+fn runMember(member: anytype, env: anytype) !void {
+    const M = @TypeOf(member.*);
+    return if (comptime @hasDecl(M, "runResolved")) member.runResolved(env) else member.run(env);
 }

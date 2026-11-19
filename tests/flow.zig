@@ -16,6 +16,8 @@ const fold = zrx.fold;
 const take = zrx.take;
 const queue = zrx.queue;
 const concurrent = zrx.concurrent;
+const each = zrx.each;
+const attempt = zrx.attempt;
 const branch = zrx.branch;
 const route = zrx.route;
 const when = zrx.when;
@@ -469,6 +471,9 @@ test "a downstream limit wakes a producer without another item and all segments 
         pipe(.{ mark(0), concurrent(2, .{map(same)}), end }),
         pipe(.{ mark(0), concurrent(2, .{map(same)}), queue(1), end }),
         pipe(.{ mark(0), concurrent(1, .{end}) }),
+        // Sub-pipes within one item are constructed in a pipe that tracks demand.
+        pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), end }),
+        pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), end }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -476,7 +481,8 @@ test "a downstream limit wakes a producer without another item and all segments 
         var ticks: Ticks = .{};
         var upstream: Trace(0) = .{};
         var downstream: Trace(1) = .{};
-        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream });
+        var fallbacks: Fallbacks = .{};
+        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream, &fallbacks });
         try std.testing.expect(state.stopped);
         try seen.expect(&.{6});
         try upstream.events.expect("ipf");
@@ -1419,9 +1425,10 @@ const Probe = struct {
     t4: Trace(4) = .{},
     ended: Numbers = .{},
     beside: Numbers = .{},
+    fallbacks: Fallbacks = .{},
 
     fn run(probe: *Probe, comptime shape: anytype, comptime ending: Way) !void {
-        const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside } };
+        const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside }, &probe.fallbacks };
         const result = program(range(u32, 0, item_count), shape.build(ending)).run(deps);
         if (ending == .fails) {
             try std.testing.expectError(error.Ended, result);
@@ -1431,6 +1438,9 @@ const Probe = struct {
             const wanted = if (ending == .done) (if (@hasDecl(shape, "doneCount")) shape.doneCount() else 1) else shape.ended();
             try std.testing.expectEqual(wanted, probe.ended.len);
         }
+        // No shape has a sub-pipe that fails under an `attempt`: whatever
+        // ends the run, no fallback is asked.
+        try std.testing.expectEqual(@as(usize, 0), probe.fallbacks.count.load(.seq_cst));
         inline for (.{ &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4 }) |trace| {
             if (trace.events.len > 0) {
                 if (ending == .fails) {
@@ -1648,6 +1658,102 @@ test "invariants: concurrent workers beside a queued branch" {
 }
 test "invariants: concurrent workers in a terminal route case" {
     try checkShape(ConcurrentRouted);
+}
+
+// Per-item sub-pipes belong to the segment they stand in. The ended side is
+// the sub-pipe of an `each`, or the pipe after an `each` or an `attempt`,
+// which is then done or fails in the middle of an item's stream.
+
+const Fallbacks = struct {
+    count: std.atomic.Value(usize) = .init(0),
+};
+
+/// The item and the number after it.
+fn twoFrom(value: u32) @TypeOf(range(u32, 0, 0)) {
+    return range(u32, value, value + 2);
+}
+fn untagged(pair: zrx.Tagged(u32, u32)) u32 {
+    return pair.item;
+}
+fn neverFails(value: u32) error{Never}!u32 {
+    return value;
+}
+fn countFallback(fallbacks: *Fallbacks, _: error{Never}, value: u32) u32 {
+    _ = fallbacks.count.fetchAdd(1, .seq_cst);
+    return value;
+}
+
+/// The sub-pipe of an `each` behind a queue: every item gives two values, of
+/// which a sub-pipe that is done takes one.
+const EachSubPipe = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), each(twoFrom, .{ender(ending)}), map(untagged), mark(1), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), each(twoFrom, .{ender(ending)}), map(untagged), mark(1), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return 2 * item_count;
+    }
+    pub fn doneCount() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+/// The pipe after an `each`: it is done, or fails, with the first of an item's two values.
+const AfterEach = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), mark(1), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), mark(1), ender(ending), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return 2 * item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+/// An `each` in every concurrent worker, beside a queued branch.
+const EachInWorkers = struct {
+    fn First(comptime ending: Way) type {
+        return @TypeOf(pipe(.{ concurrent(3, .{ each(twoFrom, .{map(same)}), map(untagged) }), mark(1), ender(ending), forEach(toLeft) }));
+    }
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), branch(.{ @as(First(ending), undefined), .{ queue(1), mark(2), forEach(toRight) } }) })) {
+        const first: First(ending) = pipe(.{ concurrent(3, .{ each(twoFrom, .{map(same)}), map(untagged) }), mark(1), ender(ending), forEach(toLeft) });
+        return pipe(.{ mark(0), branch(.{ first, .{ queue(1), mark(2), forEach(toRight) } }) });
+    }
+    fn ended() usize {
+        return 2 * item_count;
+    }
+    fn beside() usize {
+        return item_count;
+    }
+};
+
+/// The pipe after an `attempt`: its failure is not the sub-pipe's.
+const AfterAttempt = struct {
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) });
+    }
+    fn ended() usize {
+        return item_count;
+    }
+    fn beside() usize {
+        return 0;
+    }
+};
+
+test "invariants: the sub-pipe of an each runs out, stops, or fails" {
+    try checkShape(EachSubPipe);
+}
+test "invariants: the pipe after an each ends in the middle of an item" {
+    try checkShape(AfterEach);
+}
+test "invariants: an each in concurrent workers beside a queued branch" {
+    try checkShape(EachInWorkers);
+}
+test "invariants: the pipe after an attempt ends" {
+    try checkShape(AfterAttempt);
 }
 
 /// Timed batching between queues, with a direct sibling after it.

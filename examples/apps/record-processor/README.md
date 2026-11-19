@@ -124,18 +124,19 @@ and `recover` can only skip), and the `.create_new` mode of `fileWriter`.
 
 What is still worked around here, ordered by how much it shapes the code:
 
-1. **A program has no result.** The caller needs the totals for the exit
-   status, so `tap(remember)` stores them through a `*Summary` dependency.
-2. **No source for "this file, or stdin".** `app.zig` opens the input and
+1. **No source for "this file, or stdin".** `app.zig` opens the input and
    passes its reader as a dependency. (That also lets it fail on a missing
    input before any output file is created; a source opens later than that.)
-3. **`print` only ends a pipe.** Writing records and then aggregating became a
+2. **`print` only ends a pipe.** Writing records and then aggregating became a
    `branch` with a `filter` per destination. `print` flushes output in its own
    hooks.
-4. **Choosing a program is plain Zig.** Help, invalid usage and processing are
+3. **Choosing a program is plain Zig.** Help, invalid usage and processing are
    a `switch` in `app.zig`; a pipe cannot switch to another source.
-5. **Owned bounded text.** The old `zrx.Line(n)` is gone; `records.zig`
+4. **Owned bounded text.** The old `zrx.Line(n)` is gone; `records.zig`
    defines `Text(n)`.
 
 What needed nothing: the record cap (`scan` numbers, a handler enforces),
-injected rules, and testing the production pipe against in-memory I/O.
+injected rules, testing the production pipe against in-memory I/O, and the
+totals the caller needs for the exit status. A program ends with nothing or
+an error, and what it produces is an effect of its pipe: `tap(remember)`
+stores the totals through a `*Summary` dependency.

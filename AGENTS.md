@@ -48,9 +48,22 @@ to this file; edit `AGENTS.md`, not copies.
 - **Dependencies are resolved once.** The environment is a tuple keyed by exact
   type. A stage copies what its handler asked for at `init`; nothing is looked
   up per item. `std.Io` and the allocator are ordinary dependencies.
-  `Program.provide` applies bindings in order before constructing the stages.
-  A binding shadows an earlier value of the same type. The source and all
-  stages use the resulting environment.
+  The source and all stages use one environment.
+- **`provide` and `run` are one concept.** `run` takes bindings: values and
+  resources alike. `provide` only gives a program defaults for them:
+  `p.provide(a).run(b)` runs with `b` and with what of `a` it does not
+  replace. (It is not `p.run(a ++ b)`: within one tuple a type may not have
+  two providers.) A binding given to `run` replaces a default that provides
+  the same type, and a replaced resource is not acquired. A system hands
+  what it resolved to this library's programs as values (`runResolved`) and
+  to any other `zrx_program` as the tuple it is. Within either tuple a type has one provider. The order bindings
+  are written in decides nothing but ties: a resource declares `Provides`
+  and `needs`, and `src/resources.zig` orders acquisition at compile time
+  (values, then again and again the first resource in written order whose
+  needs are there). Nothing of the graph exists at run time. There is no
+  shadowing and no left-to-right application: that made `provide` and `run`
+  two things that behaved differently, and a resource given to `run` a
+  confusing compile error.
 - **Handlers** are comptime-known functions: leading parameters are
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
@@ -72,6 +85,21 @@ to this file; edit `AGENTS.md`, not copies.
   The boundary registers workers through `Tasks` and `tasks` in the existing
   scope. Its `work` coordinates their ends; no nested supervisor or selective
   cancellation is used for successful completion.
+- **A sub-pipe may live for one item.** `each(source_of, sub)` is a nested
+  program per item: its stage keeps the environment and a pointer to its
+  operator, and for every item constructs `sub`'s stages, runs the item's
+  source into them and finishes them, all inside that item's `push`. That is
+  construction per item, not a lookup per item: a stage still copies what it
+  asked for when it is constructed. `attempt(sub, fallback)` is `orElse` for
+  a sub-pipe and follows its rules. Its tail puts a failure of the pipe
+  after it aside, answers `.done`, and `push` returns the failure once the
+  sub-pipe has returned: inside the sub-pipe it could not be told from the
+  sub-pipe's own, and a flag for it goes stale when a `recover` in there
+  swallows it. Neither may contain a task boundary, neither adds to the
+  stage contract, and both live in `src/ops/nested.zig` on the operator and
+  source contracts. `each` pairs what it emits with the item as
+  `Tagged(Item, T)`, where `Item` is the parameter type `source_of`
+  declares, as `fold` takes its state type from its reducer.
 - **A boundary splits a pipe into segments, each with a task.**
   [docs/spec-segments.md](docs/spec-segments.md) is the design record.
   Segment 0 is the source and the stages up to the first boundary. A program
@@ -139,6 +167,13 @@ to this file; edit `AGENTS.md`, not copies.
   wrapped to mark what they push; the scope knows nothing of it. Do not
   add a way to put operators on a source before a merge: operators live in
   the program's pipe.
+- **JSON is an extension named after its format.** `src/ext/json.zig`,
+  exported as `zrx.ext.json` and analyzed only when referenced, holds one
+  handler: `map(json.encode(.{}))` returns `std.json.fmt(item, options)`,
+  which `print` or `write` formats with `{f}`. One spelling: `encode` is
+  always called with its options, and there is no sink that hides
+  `write(Role, "{f}\n")`. No general serialization layer for one format.
+  Decoding is not there.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -153,6 +188,13 @@ to this file; edit `AGENTS.md`, not copies.
   operator tuple or `pipe(...)` value. Each child of `branch`, and the
   sub-pipes of `when` and `otherwise`, accept those same two forms, never a
   bare operator. Every branch must terminate; route cases may rejoin.
+- **A run ends with nothing or an error.** `run` returns `void` or an
+  error, by design. Whatever a program produces (output, a summary, a count
+  that decides an exit status) is an effect of a stage in its pipe: a sink,
+  or a handler that writes through a dependency, such as `tap(remember)`
+  into a `*Summary`. That is the intended form and not a workaround. Do not
+  list "a program has no result" as a gap, and do not add a way to return a
+  value from `run`.
 
 ## Zero overhead
 

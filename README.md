@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
 | Concept | What it is |
 |---|---|
 | **handler** | A plain function. Its leading parameters are dependencies, found by type; its last parameter is the data. |
-| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`, `provide(db)`. |
+| **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`. |
 | **pipe** | Operators composed left to right. A pipe is itself an operator, so pipes nest. |
 | **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
 | **system** | Several programs run together with the same dependencies. |
@@ -69,9 +69,9 @@ and a push is a chain of direct calls the optimizer flattens. `zig build
 zero-overhead` compiles each fixture in
 [`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
 as a hand-written loop, and compares the optimized LLVM IR function by
-function. The fixtures cover every synchronous operator. Twelve of the
-fifteen consist of the same instructions (the same multiset, once value and
-block names are erased); the other three differ only in loop shape and are
+function. The fixtures cover every synchronous operator. Seventeen of the
+twenty-two consist of the same instructions (the same multiset, once value and
+block names are erased); the other five differ only in loop shape and are
 required to be free of calls and extra memory traffic. A separate test runs
 both variants of every fixture and requires equal results.
 

@@ -28,15 +28,17 @@ fn scale(factor: Scale, value: u32) u32 { ... }
 //       ^ dependency   ^ data
 ```
 
-Dependencies come from two places:
-
-- the tuple passed to `run`: `app.run(.{ io, Scale{ .by = 2 } })`;
-- the tuple on `program(...).provide(.{ ... })`, available to the source and every stage.
+Dependencies come from the *bindings* a program is run with:
+`app.run(.{ io, Scale{ .by = 2 } })`. A program can be given some of them in
+advance with `provide`; see [Programs and systems](#programs-and-systems).
+The source and every stage see the same ones.
 
 Rules:
 
-- The key is the type. Two values of the same type cannot both be passed to
-  `run`; wrap one in a struct to name its role (`const Audit = struct { log: *Log };`).
+- The key is the type, and a type has one provider. Two values of the same
+  type cannot both be passed to `run`; wrap one in a struct to name its role
+  (`const Audit = struct { log: *Log };`).
+- The order bindings are written in does not matter.
 - A dependency is copied into each handler that asks for it when the program
   starts. Share mutable state through a pointer type (`*Counter`).
 - `std.Io` and `std.mem.Allocator` are ordinary dependencies. Operators that
@@ -67,7 +69,8 @@ Nesting changes nothing: `pipe(.{ a, pipe(.{ b, c }), d })` is exactly
 
 Where a pipe is expected, pass an inline operator tuple or a constructed
 `pipe(...)` value. This applies to `program`, each child of `branch`, and the
-sub-pipes of `when` and `otherwise`. Both forms construct the same pipe;
+sub-pipes of `when`, `otherwise`, `concurrent`, `each` and `attempt`. Both
+forms construct the same pipe;
 `pipe(...)` is useful for named, reusable compositions. Bare operators are
 rejected; wrap even a single operator in `.{ ... }`.
 
@@ -104,23 +107,49 @@ const report = program(source, .{
 try report.run(.{io});
 ```
 
-`provide` adds bindings to the program description. Each run applies them
-left to right, starting with the values passed to `run`. A binding shadows
-an earlier binding of the same type. The final environment is shared by the
-source and all stages, including branch and route cases.
+`provide` gives a program *defaults*: bindings that `run` uses unless it is
+given one that provides the same type. It is not a second kind of
+dependency: `p.provide(a).run(b)` runs with everything in `b` and with the
+bindings of `a` whose type `b` does not provide. Among the defaults, and among what `run` is
+given, a type has one provider; a second one is a compile error. The
+resulting environment is shared by the source and all stages, including
+branch and route cases.
 
-`resource(acquire, release)` is a binding that calls `acquire(deps...)` once
-per run. Later bindings can use its result as a dependency. On exit, acquired
-resources are released in reverse order after the program's tasks have
-joined. `release(deps..., value)` uses the dependencies in scope at acquisition
-and returns `void`. Use `null` for a computed binding that needs no release.
+A binding is a value, which provides its own type, or a *resource*.
+`resource(acquire, release)` calls `acquire(deps...)` once per run and
+provides what it returns. `release(deps..., value)` returns `void`. Use
+`null` for a computed binding that needs no release. `stdout`, `stderr` and
+`fileWriter` are resources that need `std.Io`.
+
+Bindings may be written in any order, in `provide` or in `run`:
+
+```zig
+const app = program(source, work).provide(.{
+    resource(openSession, closeSession), // needs a Connection
+    resource(connect, disconnect), // needs a Config
+});
+try app.run(.{ io, config });
+```
+
+What every resource provides and needs is known at compile time, and that
+decides the order. A run starts with the values, then acquires a resource
+once everything it needs is there. Of the resources that are ready, it takes
+the one written first; defaults count as written before what `run` is
+given. A resource that needs a type nothing provides, and resources that
+need each other, are compile errors. Acquired resources are released in the
+reverse order, after the program's tasks have joined.
+
+A default that `run` replaces is not acquired. A test can run the `report`
+program above with `Report{ .writer = &writer }` in the tuple, and no file
+is created.
 
 ```zig
 try system(.{ ingest, report }).run(.{ io, &mailbox });
 ```
 
-`system` runs its programs together with the same dependencies and returns when
-all have finished. The first failure cancels the others and is returned; a
+`system` runs its programs together with the same bindings and returns when
+all have finished. What it is given replaces a default of the same type in
+each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and is returned; a
 program that had ended before that has released its resources. A system is itself runnable,
 so systems nest. With more than one program, each runs as a task of its own,
 so the `Io` must be able to run tasks concurrently; with one that cannot,
@@ -138,6 +167,7 @@ so the `Io` must be able to run tasks concurrently; with one that cannot,
 | `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
 | `mergeTagged(T, .{ .a = x, .b = y })` | `merge`, with every item marked by the source it came from; see [below](#knowing-where-an-item-came-from). |
 | `lines(Role, n)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
+| `fileBytes(path, n)` | The bytes of a file, at most `n` at a time; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
 
@@ -210,6 +240,13 @@ Flow:
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
 | `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
 
+Within one item:
+
+| Operator | Effect |
+|---|---|
+| `each(source_of, sub)` | Runs a fresh `sub` over the source that `source_of(deps..., item)` returns, and emits what `sub` emits, paired with the item. See [each](#each). |
+| `attempt(sub, fallback)` | Runs `sub`; when it fails for an item, emits `fallback(deps..., err, item)` in its place. See [Errors](#errors). |
+
 Terminal:
 
 | Operator | Effect |
@@ -237,6 +274,67 @@ fold(0, add),
 
 An item no case takes is dropped. Each case has its own stage state.
 
+### each
+
+A program has one source. `each` gives every *item* one. For an item,
+`source_of(deps..., item)` returns a source; a fresh copy of the sub-pipe
+runs over that source to its end; what the sub-pipe emits goes on down the
+pipe. Here a path becomes its bytes, the bytes become one digest, and the
+pipe carries on with a row:
+
+```zig
+const read_bytes = 32 * 1024;
+
+/// The running digest of one file.
+const Hash = struct {
+    sha: Sha256 = .init(.{}),
+    bytes: u64 = 0,
+
+    fn update(hash: Hash, piece: []const u8) Hash { ... }
+};
+
+fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+    return fileBytes(path, read_bytes);
+}
+
+fn described(file: zrx.Tagged([]const u8, Hash)) Row { ... }
+
+const digest = pipe(.{fold(Hash{}, Hash.update)});
+
+/// path -> its bytes -> one digest -> a row
+const hashed = pipe(.{
+    each(bytesOf, digest),
+    map(described),
+});
+```
+
+- **State in the sub-pipe lasts one item.** Its stages are constructed when
+  the item arrives and finished when the item's source has ended: the `fold`
+  above emits once per file, and a `take(3)` there would limit every file to
+  three pieces. A sub-pipe that is done ends its item, and the next item
+  starts afresh. Only the pipe *after* `each` being done stops the stream.
+- **What goes on is `Tagged(Item, T)`**, a struct with the fields `source`
+  (the item the sub-pipe ran for) and `item` (what it emitted). `Item` is
+  the type `source_of` declares for its parameter, so a pipe written for
+  `[]const u8` emits the same type whether it is fed `[]const u8` or the
+  `[:0]const u8` of a command line. If that parameter is `anytype`, it is
+  the item's own type.
+- **Everything for an item happens within its push**, on the task that
+  pushed it. The sub-pipe is therefore synchronous: it cannot contain a task
+  boundary, and it must emit something (it cannot end in a terminal
+  operator). To work on several items at once, put the `each` inside
+  `concurrent`.
+- **The source is any source**: `fromSlice`, `range`, `fileBytes`, one of
+  your own. `source_of` takes dependencies like any handler and may fail. It
+  has to name the type it returns: `zrx.FileBytes(n)` for `fileBytes`, and
+  for the other built-in sources, whose types have no public name yet,
+  `@TypeOf(range(u32, 0, 0))`.
+- A failure of `source_of`, of the source or of the sub-pipe fails the run
+  like any handler error, and that item's sub-pipe is not finished. To turn
+  the failure into a value instead, wrap the `each` in
+  [`attempt`](#errors). The full statement is guarantee 14 of
+  [the segments spec](spec-segments.md#guarantees).
+
 ## Handler combinators
 
 Small handlers so that domain code does not have to restate them. They are
@@ -248,6 +346,7 @@ they are built from.
 | `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
 | `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
+| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. |
 | `reduce(seed, f)` | Folds the elements of an array, slice or batch item with `f(deps..., state, element)`; `seed` for an empty one. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
@@ -276,9 +375,42 @@ after every resource has been released. `run`'s error set is inferred from your
 handlers and the operators you used: it is `anyerror` only if a handler's is,
 and a program whose handlers cannot fail has an empty one.
 
-There are two ways to handle an error instead. To keep the item as a value of
-your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
+There are three ways to handle an error instead. To keep the item as a value
+of your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `rejected(deps..., err, item)` when `parse` fails and passes its result on.
+`require` goes the other way, from a value to an error:
+`map(require(isPlausible, error.InvalidReading))` fails an item that
+`filter(isPlausible)` would drop without a trace.
+
+When what fails is not one handler but several operators, wrap them:
+`attempt(sub, fallback)` is `orElse` for a sub-pipe. When `sub` fails for an
+item, `fallback(deps..., err, item)` is emitted in its place, with the item
+as it was at the `attempt`.
+
+```zig
+/// A file that cannot be hashed is still a row.
+fn failed(err: anyerror, path: []const u8) Row { ... }
+
+const manifest = pipe(.{
+    concurrent(4, .{attempt(hashed, failed)}),
+    forEach(save),
+});
+```
+
+- The rules are `orElse`'s. The fallback returns what the sub-pipe emits.
+  Its error parameter must take every error the sub-pipe can fail with
+  (`anyerror` always does); `error.Canceled` is never handed to it. What it
+  handles is no longer in `run`'s error set.
+- What the sub-pipe had already emitted for the item is not taken back, and
+  its stages keep whatever state the item gave them.
+- A failure of the pipe *after* the `attempt` is not the sub-pipe's. It
+  fails the run as it would without the `attempt`, the fallback is not
+  asked, and a `recover` inside the sub-pipe does not see it.
+- The sub-pipe keeps its state for the whole stream, like a case of a
+  `route`. A failure at its end of the stream does not belong to an item and
+  fails the run.
+- The sub-pipe cannot contain a task boundary: a failure beyond one happens
+  on another task.
 
 To drop the item, put `recover(handler)` before the operators that may
 fail. When one of them fails for an item, the handler receives the error and
@@ -406,7 +538,8 @@ branch(.{
   `std.Io` cannot be interrupted.
 - A `route` case that rejoins the pipe cannot contain a task boundary (the
   pipe after the route would be pushed to from two tasks). Put the boundary
-  after the route.
+  after the route. The sub-pipes of `each` and `attempt` cannot either: what
+  they do for an item is over when the push of that item returns.
 - When the stages after a boundary are done, the segment before it finds out
   at its next push. A producer that asks for `zrx.Stop` can also observe that
   its consumers have finished while it waits for input.
@@ -527,6 +660,56 @@ the producer. Debounce holds one pending item plus any item already being
 delivered. Retained slices and pointers need backing storage that lives
 through their use, as with `batch` and `queue`.
 
+#### Testing timed operators
+
+A test should not wait 60 seconds for a batch, nor guess how long is long
+enough. `zrx.testing.Clock` wraps a `std.Io` and keeps its `.awake` clock
+still until the test moves it. The operators take time from the program's
+`Io`, so pass `clock.io()` to `run`:
+
+```zig
+fn collectWindows(timed: std.Io, input: *Input, windows: *Windows) !void {
+    try program(fromProducer(u32, Input.produce), pipe(.{
+        batchWithin(8, .fromMilliseconds(200)),
+        forEach(Windows.collect),
+    })).run(.{ timed, input, windows });
+}
+
+test "three readings make one window while the source is open" {
+    const io = std.testing.io;
+    var clock: zrx.testing.Clock = .init(io);
+    // ... `input` feeds the source one item at a time, `windows` is a queue
+    var run = try io.concurrent(collectWindows, .{ clock.io(), &input, &windows });
+    defer _ = run.cancel(io) catch {};
+
+    for ([_]u32{ 7, 8, 9 }) |reading| try input.send(reading);
+    try clock.waitingAt(.fromMilliseconds(200));
+    clock.advanceTo(.fromMilliseconds(200));
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8, 9 }, (try windows.seen.getOne(io)).slice());
+}
+```
+
+Times are durations since `Clock.init`. `waitingAt(t)` returns once a task
+is in a timed wait whose deadline is `t`: for `batchWithin` that is the
+first item of a batch plus its age, for `debounce` the latest item plus the
+quiet period. That is the event to wait on, in place of a sleep, before
+moving the clock or asserting that nothing has been emitted. `advanceTo(t)`
+sets the time, never backwards, and wakes the waits whose deadline has
+come; a wait that is not due stays asleep. The whole
+test, with `Input` and `Windows`, is in
+[`tests/timing.zig`](../tests/timing.zig).
+
+The clock is a value the test owns: declare one per test, keep it in place,
+and let it outlive the run. It covers reads of `.awake` and timed waits on
+`.awake` made through `clock.io()`, and nothing else:
+
+- `io.sleep`, the other clocks (`.real`, `.boot`) and `std.time` run on real
+  time, as does a handler that uses another `Io`.
+- A timed wait is woken only through `clock.io()`. A test that sets an event
+  some handler waits on with a timeout must set it through the clock's `Io`.
+- It does not make a source deterministic. The test still decides when items
+  arrive, as `input.send` does above.
+
 ## Input and output
 
 Readers and writers are dependencies. A *role* is the type one is keyed by:
@@ -539,10 +722,14 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `write(Role, "fmt")` | Terminal. Like `print`, but flushes only at the end of the stream. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
 | `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
+| `ext.json.encode(options)` | Handler: the item as JSON text, to be formatted with `{f}`. |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
+| `fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
+| `fileBytes(path, n)` | Source: the bytes of a file, in pieces of at most `n`. |
 
-Pass `stdout`, `stderr`, and `fileWriter` to `Program.provide`. The file
+`stdout`, `stderr`, `fileWriter` and `fileReader` are bindings: give them
+to `provide` or to `run`. A file
 closes when the program releases its resources. `print` flushes after each
 item and again at normal stream end: use it for output someone reads as it
 is produced. `write` leaves items in the writer's buffer and flushes at
@@ -562,7 +749,8 @@ caller must serialize those writes.
   `error.PathAlreadyExists`.
 
 Each file is published atomically. With several published files, the last
-one bound is named first, following resource release order. If naming one
+one acquired is named first, following resource release order: of the files
+in one tuple, the one written last. If naming one
 fails, `run` returns that error and the files published earlier stay in place.
 
 ```zig
@@ -572,18 +760,39 @@ program(source, work).provide(.{
 })
 ```
 
-To write JSON lines, map each item to `std.json.fmt` and format it with `{f}`:
+To write JSON lines, map each item with `json.encode` from the extension
+`zrx.ext.json` and format the result with `{f}`:
 
 ```zig
-fn json(event: Event) std.json.Formatter(Event) {
-    return std.json.fmt(event, .{});
-}
+const json = zrx.ext.json;
 
 const archive = pipe(.{
-    map(json),
+    map(json.encode(.{})),
     write(Archive, "{f}\n"),
 });
 ```
+
+`json.encode(options)` is a handler that returns `std.json.fmt(item, options)`,
+a value holding a copy of the item. The options are
+`std.json.Stringify.Options` and are always given, `.{}` for the defaults:
+`json.encode(.{ .emit_null_optional_fields = false })` leaves out optional
+fields that are null.
+
+`fileReader` is what lets a program be one constant for production and for
+tests. The program reads `lines(Input, n)`; `main` gives it the file, and a
+test gives it a reader of its own, which replaces a default:
+
+```zig
+const app = program(lines(Input, max_line), work);
+
+// in main:
+try app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
+// in a test:
+try app.run(.{ Input{ .reader = &fixed }, ... });
+```
+
+The buffer must hold the longest line and its newline, as for any reader
+given to `lines`.
 
 Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is
@@ -598,6 +807,19 @@ arrays for both. For `lines(Role, n)`, use a reader buffer of at least
 `error.StreamTooLong`, the reader stays at the start of the rejected line.
 You can retry with a larger limit if the reader has room.
 
+`fileBytes(path, n)` emits `[]const u8`: pieces of the file in order, none
+empty and none longer than `n`. A piece is a slice into the source's own
+buffer and is valid until the push that carries it returns. Reduce the
+pieces as they pass (`fold`), or copy what must be kept: do not send a piece
+across a `queue` or keep it in a `batch`. An empty file emits nothing.
+`zrx.FileBytes(n)` names the source's type, for a handler that returns one.
+
+When reading a file fails, the run fails with the error the system reported,
+such as `error.InputOutput`. That holds for `fileBytes`, `fileLines` and
+`stdinLines`, which own their reader. A reader given to `lines(Role, n)`,
+one of your own or one bound by `fileReader`, fails the run with what it
+reports, which for `std.Io.Reader` is `error.ReadFailed`.
+
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
@@ -606,13 +828,17 @@ they are called on. Keep the whole value when storing or queueing it.
 
 A run goes through these steps:
 
-1. Apply bindings and acquire program resources in declaration order.
+1. Build the environment from the bindings: the values, then each resource
+   once what it needs is there.
 2. Construct stages and run the source. With queues, each segment runs on
    its own task.
 3. On normal input end, finish each segment in stream order. Final values
    from `fold` and `batch` are pushed downstream here.
 4. After the tasks have joined, release acquired resources in reverse
    order, including after a failed run or a partial acquisition.
+
+The stages of an `each` sub-pipe go through steps 2 and 3 once for every
+item, within the push of that item.
 
 ## Writing your own
 
@@ -671,6 +897,31 @@ answers `.done`. See [`src/sources.zig`](../src/sources.zig).
 `requires(arity) []const type` and `call(env, args)`. See
 [`src/handlers.zig`](../src/handlers.zig).
 
+**A binding** that acquires something for the run is a value whose type
+declares `zrx_resource`, the type it `Provides`, the dependency types it
+`needs`, and `bind(self, env, rest) !void`. `env` holds what it needs.
+`bind` calls `rest.call(value)` once, and the rest of the run happens inside
+that call: what `bind` does after it returns is its release, and that may
+fail. `resource(acquire, release)` is the short form for two handlers. This
+one keeps a tally for the run and reports it when the run is over:
+
+```zig
+const Tallied = struct {
+    pub const zrx_resource = {};
+    pub const Provides = *Tally;
+    pub const needs: []const type = &.{*Report};
+
+    pub fn bind(_: Tallied, env: anytype, rest: anytype) !void {
+        var tally: Tally = .{};
+        try rest.call(&tally);
+        zrx.di.get(env, *Report).total = tally.count;
+    }
+};
+```
+
+Give it to `provide` or to `run` like any other binding. See
+[`src/resources.zig`](../src/resources.zig).
+
 ## How zero overhead is checked
 
 [`tests/zero_overhead/cases.zig`](../tests/zero_overhead/cases.zig) writes each
@@ -693,8 +944,9 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Fourteen are `same`; `take`, `batch`
-and the handler combinators are `lean`, each with the reason next to it.
+Every synchronous operator has a fixture. Seventeen are `same`; `take`, `batch`,
+the handler combinators and `attempt` are `lean`, each with the reason next
+to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it
@@ -716,6 +968,10 @@ Two things make it work, and are worth knowing when writing an operator:
 
 Stopping a source from outside, so that a signal or a timeout ends a run
 gracefully, is proposed in [the segments spec](spec-segments.md).
+
+A resource acquired for one item (opened before the item's sub-pipe and
+released after it) is not here. `each` covers the case where the item
+becomes a stream.
 
 Present in the previous implementation and not ported: HTTP serving, signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and two of

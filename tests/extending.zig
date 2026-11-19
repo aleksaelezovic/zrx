@@ -143,6 +143,24 @@ test "a custom source" {
     try seen.expect(&.{ 1, 2, 4, 8, 16, 32, 1, 2 });
 }
 
+fn powersBelow(limit: u32) Powers {
+    return .{ .limit = limit };
+}
+
+test "a custom source and operator run once for every item under each" {
+    var seen: Numbers = .{};
+    var journal: Journal = .{};
+    const work = pipe(.{
+        zrx.each(powersBelow, .{echoed(0)}),
+        map(zrx.field(.item)),
+        forEach(record),
+    });
+    try program(range(u32, 3, 5), work).run(.{ &seen, &journal });
+    try seen.expect(&.{ 1, 1, 2, 2, 0, 1, 1, 2, 2, 0 });
+    // Constructed, pushed to and finished for each item in turn.
+    try journal.expect("ippfippf");
+}
+
 // --- a composite handler ---------------------------------------------------------
 
 /// A predicate that is true when `predicate` is true for the item plus one.
@@ -169,6 +187,51 @@ test "a custom composite handler forwards dependencies" {
     var seen: Numbers = .{};
     try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), forEach(record) })).run(.{ &seen, Limit{ .max = 3 } });
     try seen.expect(&.{ 0, 1, 2 });
+}
+
+// --- a binding ------------------------------------------------------------------
+
+const Tally = struct { count: u32 = 0 };
+const Report = struct { total: u32 = 0, runs: u32 = 0 };
+
+/// The guide's example: a tally that lives for the run and is reported after it.
+const Tallied = struct {
+    pub const zrx_resource = {};
+    pub const Provides = *Tally;
+    pub const needs: []const type = &.{*Report};
+
+    pub fn bind(_: Tallied, env: anytype, rest: anytype) !void {
+        var tally: Tally = .{};
+        try rest.call(&tally);
+        zrx.di.get(env, *Report).total = tally.count;
+    }
+};
+
+fn tallied(tally: *Tally, _: u32) void {
+    tally.count += 1;
+}
+
+test "a custom binding provides a value for the run and releases after it" {
+    var report: Report = .{};
+    const counting = program(range(u32, 0, 5), .{forEach(tallied)});
+    try counting.provide(.{Tallied{}}).run(.{&report});
+    try std.testing.expectEqual(@as(u32, 5), report.total);
+    // Given to `run`, and written before what it needs.
+    report = .{};
+    try counting.run(.{ Tallied{}, &report });
+    try std.testing.expectEqual(@as(u32, 5), report.total);
+}
+
+fn failAtThree(value: u32) error{Three}!u32 {
+    if (value == 3) return error.Three;
+    return value;
+}
+
+test "what a custom binding does after the run is skipped when the run fails" {
+    var report: Report = .{};
+    const failing = program(range(u32, 0, 5), .{ map(failAtThree), forEach(tallied) });
+    try std.testing.expectError(error.Three, failing.provide(.{Tallied{}}).run(.{&report}));
+    try std.testing.expectEqual(@as(u32, 0), report.total);
 }
 
 // --- a task boundary of your own -------------------------------------------------

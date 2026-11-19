@@ -16,7 +16,14 @@ const print = zrx.print;
 const write = zrx.write;
 const lines = zrx.lines;
 const fileLines = zrx.fileLines;
+const fileBytes = zrx.fileBytes;
+const fold = zrx.fold;
+const each = zrx.each;
+const attempt = zrx.attempt;
+const concurrent = zrx.concurrent;
+const forEach = zrx.forEach;
 const fileWriter = zrx.fileWriter;
+const fileReader = zrx.fileReader;
 const fromProducer = zrx.fromProducer;
 const queue = zrx.queue;
 const recover = zrx.recover;
@@ -230,6 +237,24 @@ test "a published file appears only when the run succeeds, and replaces nothing"
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
+test "a writer given to run replaces a file default, and no file is created" {
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/report.txt", .{tmp.sub_path});
+    const report = program(range(u32, 0, 3), .{write(Report, "{d},")}).provide(.{fileWriter(Report, path, 16, .{})});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try report.run(.{ Report{ .writer = &writer }, io });
+    try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+    try std.testing.expectEqual(@as(usize, 0), try filesIn(tmp.dir));
+
+    // A file given to `run` may come before the `Io` it needs.
+    try program(range(u32, 0, 3), .{write(Report, "{d},")}).run(.{ fileWriter(Report, path, 16, .{}), io });
+    try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
+}
+
 const Name = zrx.Line(4);
 const Pet = struct { name: Name, legs: u32 };
 
@@ -309,6 +334,45 @@ test "a published file holds what a handler wrote without flushing" {
     var writer: std.Io.Writer = .fixed(&buffer);
     try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
+}
+
+/// One program for every test below: where its lines come from is a binding.
+const shouted = program(lines(Input, 8), .{
+    map(shoutShort),
+    print(Log, "{f},"),
+});
+
+fn shoutShort(line: zrx.Line(8)) zrx.Line(8) {
+    var upper = line;
+    for (upper.bytes[0..upper.len]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+    return upper;
+}
+
+test "fileReader binds a file for lines, given to provide or to run" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "words", .data = "red\ngreen\nblue" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/words", .{tmp.sub_path});
+
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try shouted.run(.{ io, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    try shouted.provide(.{fileReader(Input, path, 9)}).run(.{ io, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("RED,GREEN,BLUE,RED,GREEN,BLUE,", writer.buffered());
+}
+
+test "a reader given to run replaces a fileReader default, and its file is not opened" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var reader: std.Io.Reader = .fixed("in\nmemory");
+    const from_file = shouted.provide(.{fileReader(Input, ".zig-cache/tmp/zrx-no-such-file", 9)});
+    try from_file.run(.{ io, Input{ .reader = &reader }, Log{ .writer = &writer } });
+    try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
+
+    // Left to its default, the same program fails before any item.
+    try std.testing.expectError(error.FileNotFound, from_file.run(.{ io, Log{ .writer = &writer } }));
+    try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
 }
 
 test "the line limit counts the line, not its newline" {
@@ -400,6 +464,202 @@ test "a missing file fails the run before any item" {
     var writer: std.Io.Writer = .fixed(&buffer);
     const result = program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{f}")})).run(.{ io, &writer });
     try std.testing.expectError(error.FileNotFound, result);
+}
+
+// --- file bytes -------------------------------------------------------------------
+
+/// The pieces a file came in, put together again.
+const Pieces = struct {
+    bytes: [64]u8 = undefined,
+    len: usize = 0,
+    count: usize = 0,
+    longest: usize = 0,
+    empty: usize = 0,
+
+    fn add(pieces: *Pieces, piece: []const u8) void {
+        @memcpy(pieces.bytes[pieces.len..][0..piece.len], piece);
+        pieces.len += piece.len;
+        pieces.count += 1;
+        pieces.longest = @max(pieces.longest, piece.len);
+        if (piece.len == 0) pieces.empty += 1;
+    }
+};
+
+test "fileBytes gives the bytes of a file in order, at most n at a time" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/bytes", .{tmp.sub_path});
+    const content = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+    // Shorter than a piece, exactly one, one more, several and a rest; and nothing.
+    for ([_]usize{ 0, 1, 7, 8, 9, 16, 36 }) |size| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "bytes", .data = content[0..size] });
+        var pieces: Pieces = .{};
+        try program(fileBytes(path, 8), .{forEach(Pieces.add)}).run(.{ io, &pieces });
+        try std.testing.expectEqualStrings(content[0..size], pieces.bytes[0..pieces.len]);
+        try std.testing.expectEqual(try std.math.divCeil(usize, size, 8), pieces.count);
+        try std.testing.expect(pieces.longest <= 8);
+        try std.testing.expectEqual(@as(usize, 0), pieces.empty);
+    }
+
+    // It stops when the pipe is done: no piece is pushed after that.
+    var first: Pieces = .{};
+    var pushed: usize = 0;
+    try program(fileBytes(path, 8), .{ zrx.tap(countPiece), take(1), forEach(Pieces.add) }).run(.{ io, &first, &pushed });
+    try std.testing.expectEqualStrings(content[0..8], first.bytes[0..first.len]);
+    try std.testing.expectEqual(@as(usize, 1), pushed);
+}
+
+fn countPiece(pushed: *usize, _: []const u8) void {
+    pushed.* += 1;
+}
+
+test "a file that cannot be opened or read fails the run with the error the system gave" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "bytes", .data = "unread" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/bytes", .{tmp.sub_path});
+
+    var pieces: Pieces = .{};
+    const missing = program(fileBytes(".zig-cache/tmp/zrx-no-such-file", 8), .{forEach(Pieces.add)}).run(.{ io, &pieces });
+    try std.testing.expectError(error.FileNotFound, missing);
+    // `std.Io.File.Reader` reports `error.ReadFailed` and keeps the cause.
+    const unreadable = program(fileBytes(path, 8), .{forEach(Pieces.add)}).run(.{ support.ReadFails.over(io), &pieces });
+    try std.testing.expectError(error.InputOutput, unreadable);
+    try std.testing.expectEqual(@as(usize, 0), pieces.count);
+}
+
+test "fileLines fails the run with the error the system gave when a read fails" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines", .data = "unread\n" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines", .{tmp.sub_path});
+
+    var buffer: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const failing = support.ReadFails.over(io);
+    const from_source = program(fileLines(path, 8), .{print(Log, "{f},")}).run(.{ failing, Log{ .writer = &writer } });
+    try std.testing.expectError(error.InputOutput, from_source);
+    try std.testing.expectEqualStrings("", writer.buffered());
+}
+
+/// Reads from the bound file, handles that failure, then fails with a
+/// `ReadFailed` that is not the file's.
+fn readThenFail(input: Input, _: u32) error{ReadFailed}!void {
+    _ = input.reader.peekByte() catch {};
+    return error.ReadFailed;
+}
+
+test "a reader bound by fileReader reports ReadFailed, its own and anyone else's" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "lines", .data = "unread\n" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines", .{tmp.sub_path});
+
+    var buffer: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const failing = support.ReadFails.over(io);
+    const own = program(lines(Input, 8), .{print(Log, "{f},")}).run(.{ failing, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    try std.testing.expectError(error.ReadFailed, own);
+    // The binding cannot tell whose failure it is, so it names no cause:
+    // the file's recorded one would be wrong here.
+    const other = program(range(u32, 0, 1), .{zrx.forEach(readThenFail)}).run(.{ failing, fileReader(Input, path, 9) });
+    try std.testing.expectError(error.ReadFailed, other);
+}
+
+// path -> its bytes -> one digest -> a row, as the guide writes it.
+
+const Sha256 = std.crypto.hash.sha2.Sha256;
+const read_bytes = 4096;
+
+/// The running digest of one file.
+const Hash = struct {
+    sha: Sha256 = .init(.{}),
+    bytes: u64 = 0,
+
+    fn update(hash: Hash, piece: []const u8) Hash {
+        var next = hash;
+        next.sha.update(piece);
+        next.bytes += piece.len;
+        return next;
+    }
+};
+
+/// A hashed file, or what went wrong with it.
+const Row = struct {
+    path: []const u8,
+    bytes: u64 = 0,
+    sha256: [Sha256.digest_length]u8 = @splat(0),
+    failure: ?anyerror = null,
+};
+
+fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+    return fileBytes(path, read_bytes);
+}
+fn described(file: zrx.Tagged([]const u8, Hash)) Row {
+    var sha = file.item.sha;
+    return .{ .path = file.source, .bytes = file.item.bytes, .sha256 = sha.finalResult() };
+}
+fn failed(err: anyerror, path: []const u8) Row {
+    return .{ .path = path, .failure = err };
+}
+
+const digest = pipe(.{fold(Hash{}, Hash.update)});
+
+const hashed = pipe(.{
+    each(bytesOf, digest),
+    map(described),
+});
+
+test "files of several sizes are hashed by concurrent workers, and a missing one becomes a row" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const sizes = [_]usize{ 0, 1, read_bytes - 1, read_bytes, read_bytes + 1, 3 * read_bytes + 7, 100_003 };
+    const content = try std.testing.allocator.alloc(u8, sizes[sizes.len - 1]);
+    defer std.testing.allocator.free(content);
+    var random: std.Random.DefaultPrng = .init(0x5eed);
+    random.random().bytes(content);
+
+    var names: [sizes.len + 1][128]u8 = undefined;
+    var paths: [sizes.len + 1][]const u8 = undefined;
+    var expected: [sizes.len][Sha256.digest_length]u8 = undefined;
+    for (sizes, 0..) |size, i| {
+        var name: [16]u8 = undefined;
+        try tmp.dir.writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&name, "file-{d}", .{i}), .data = content[0..size] });
+        paths[i] = try std.fmt.bufPrint(&names[i], ".zig-cache/tmp/{s}/file-{d}", .{ tmp.sub_path, i });
+        Sha256.hash(content[0..size], &expected[i], .{});
+    }
+    paths[sizes.len] = try std.fmt.bufPrint(&names[sizes.len], ".zig-cache/tmp/{s}/missing", .{tmp.sub_path});
+
+    var rows: support.Recorder(Row) = .{};
+    const manifest = pipe(.{
+        concurrent(4, .{attempt(hashed, failed)}),
+        forEach(support.record(Row)),
+    });
+    // Twice over, so that workers have files of every size to share.
+    for (0..2) |_| try program(fromSlice(&paths), manifest).run(.{ io, &rows });
+
+    try std.testing.expectEqual(2 * paths.len, rows.len);
+    var found: [paths.len]usize = @splat(0);
+    for (rows.slice()) |row| {
+        const i = for (paths, 0..) |path, i| {
+            if (std.mem.eql(u8, path, row.path)) break i;
+        } else return error.UnknownPath;
+        found[i] += 1;
+        if (i == sizes.len) {
+            try std.testing.expectEqual(@as(?anyerror, error.FileNotFound), row.failure);
+        } else {
+            try std.testing.expectEqual(@as(?anyerror, null), row.failure);
+            try std.testing.expectEqual(@as(u64, sizes[i]), row.bytes);
+            try std.testing.expectEqualSlices(u8, &expected[i], &row.sha256);
+        }
+    }
+    try std.testing.expectEqualSlices(usize, &@as([paths.len]usize, @splat(2)), &found);
 }
 
 // --- cancellation inside a write --------------------------------------------------

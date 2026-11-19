@@ -257,6 +257,112 @@ test "systems nest, and a system of one needs no Io" {
     try seen.expect(&.{3});
 }
 
+const Depot = struct { id: u32 };
+const Opened = struct {
+    shared: std.atomic.Value(u32) = .init(0),
+    closed: std.atomic.Value(u32) = .init(0),
+    own: std.atomic.Value(u32) = .init(0),
+};
+
+fn openShared(opened: *Opened) Depot {
+    return .{ .id = 10 + opened.shared.fetchAdd(1, .seq_cst) };
+}
+fn closeShared(opened: *Opened, _: Depot) void {
+    _ = opened.closed.fetchAdd(1, .seq_cst);
+}
+fn openOwn(opened: *Opened) Depot {
+    _ = opened.own.fetchAdd(1, .seq_cst);
+    return .{ .id = 99 };
+}
+fn depotToLeft(depot: Depot, sink: Left, _: u32) void {
+    sink.seen.add(depot.id);
+}
+fn depotToRight(depot: Depot, sink: Right, _: u32) void {
+    sink.seen.add(depot.id);
+}
+
+test "what a system is given replaces program defaults, and a resource among it is acquired once" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var opened: Opened = .{};
+    const a = program(fromValue(@as(u32, 1)), .{forEach(depotToLeft)}).provide(.{zrx.resource(openOwn, null)});
+    const b = program(fromValue(@as(u32, 2)), .{forEach(depotToRight)}).provide(.{zrx.resource(openOwn, null)});
+
+    // By itself, a program acquires its default.
+    try a.run(.{ Left{ .seen = &left }, &opened });
+    try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
+
+    // In the system, both use the one depot the system was given.
+    try system(.{ a, b }).run(.{ zrx.resource(openShared, closeShared), io, &opened, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{ 99, 10 });
+    try right.expect(&.{10});
+    try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
+    try std.testing.expectEqual(@as(u32, 1), opened.shared.load(.seq_cst));
+    try std.testing.expectEqual(@as(u32, 1), opened.closed.load(.seq_cst));
+}
+
+/// A value that happens to have the shape of a binding.
+const Shaped = struct {
+    tag: u32,
+
+    pub const zrx_resource = {};
+    pub const Provides = u64;
+    pub const needs: []const type = &.{};
+
+    pub fn bind(self: Shaped, _: anytype, next: anytype) !void {
+        return next.call(@as(u64, self.tag));
+    }
+};
+
+fn shape() Shaped {
+    return .{ .tag = 7 };
+}
+
+fn tagToLeft(sink: Left, shaped: Shaped, _: u32) void {
+    sink.seen.add(shaped.tag);
+}
+fn tagToRight(sink: Right, shaped: Shaped, _: u32) void {
+    sink.seen.add(shaped.tag);
+}
+
+test "what a resource provides reaches the programs of a system as the value it is" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const a = program(fromValue(@as(u32, 1)), .{forEach(tagToLeft)});
+    const b = program(fromValue(@as(u32, 2)), .{forEach(tagToRight)});
+    const sinks = .{ Left{ .seen = &left }, Right{ .seen = &right } };
+
+    // The resource provides a `Shaped`. A program takes it for that value...
+    try a.run(.{zrx.resource(shape, null)} ++ sinks);
+    // ...and so do the programs of a system, of one member and of two,
+    // which are handed what the system resolved.
+    try system(.{a}).run(.{zrx.resource(shape, null)} ++ sinks);
+    try system(.{ a, system(.{b}) }).run(.{ io, zrx.resource(shape, null) } ++ sinks);
+    try left.expect(&.{ 7, 7, 7 });
+    try right.expect(&.{7});
+}
+
+/// A runnable that is not a zrx program: a system asks only for the mark
+/// and for `run`, which is given the dependencies as a tuple.
+const Custom = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const Custom, deps: anytype) !void {
+        zrx.di.get(deps, Left).seen.add(@intCast(deps.len));
+    }
+};
+
+test "a runnable of the caller's own is given a system's dependencies as a tuple" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
+    try system(.{Custom{}}).run(.{Left{ .seen = &left }});
+    try system(.{ Custom{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    // What it counted: one dependency, then three.
+    try left.expect(&.{ 1, 3 });
+    try right.expect(&.{2});
+}
+
 fn patiently(clock: std.Io, out: anytype) !void {
     var value: u32 = 0;
     while (value < 200) : (value += 1) {

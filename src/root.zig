@@ -57,6 +57,11 @@ pub const when = flow.when;
 pub const otherwise = flow.otherwise;
 pub const concurrent = @import("ops/concurrent.zig").concurrent;
 
+// Sub-pipes within one item
+const nested = @import("ops/nested.zig");
+pub const each = nested.each;
+pub const attempt = nested.attempt;
+
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;
 pub const debounce = timing.debounce;
@@ -68,6 +73,7 @@ pub const all = handlers.all;
 pub const any = handlers.any;
 pub const compose = handlers.compose;
 pub const orElse = handlers.orElse;
+pub const require = handlers.require;
 pub const reduce = handlers.reduce;
 pub const field = handlers.field;
 pub const constant = handlers.constant;
@@ -85,6 +91,7 @@ pub const Stderr = io.Stderr;
 pub const stdout = io.stdout;
 pub const stderr = io.stderr;
 pub const fileWriter = io.fileWriter;
+pub const fileReader = io.fileReader;
 pub const FileMode = io.FileMode;
 pub const FileWriterOptions = io.FileWriterOptions;
 pub const print = io.print;
@@ -93,9 +100,19 @@ pub const Line = io.Line;
 pub const lines = io.lines;
 pub const stdinLines = io.stdinLines;
 pub const fileLines = io.fileLines;
+pub const fileBytes = io.fileBytes;
+pub const FileBytes = io.FileBytes;
+
+/// Modules built on the contracts below. Each is compiled only when used.
+pub const ext = struct {
+    pub const json = @import("ext/json.zig");
+};
 
 // For writing operators, sources and handlers of your own.
 pub const Flow = @import("pipe.zig").Flow;
 pub const End = @import("pipe.zig").End;
 pub const di = @import("di.zig");
 pub const operator = @import("pipe.zig");
+
+// For testing programs: a clock the test moves.
+pub const testing = @import("testing.zig");

@@ -55,13 +55,30 @@ fn produce(factor: Scale, out: anytype) !void {
     _ = try out.push(factor.by);
 }
 
-test "program bindings shadow caller values and can be extended" {
+test "program bindings are defaults: a value given to run replaces one, the others stay" {
     var seen: Numbers = .{};
     const app = program(range(u32, 1, 3), pipe(.{ map(scaleAndShift), forEach(record) }))
         .provide(.{Scale{ .by = 2 }})
         .provide(.{Offset{ .by = 1 }});
-    try app.run(.{ Scale{ .by = 100 }, &seen });
+    try app.run(.{&seen});
     try seen.expect(&.{ 3, 5 });
+
+    seen = .{};
+    try app.run(.{ Scale{ .by = 100 }, &seen });
+    try seen.expect(&.{ 101, 201 });
+}
+
+test "provide and run are one set of bindings, wherever each is written" {
+    const work = pipe(.{ map(scaleAndShift), forEach(record) });
+    const source = range(u32, 1, 3);
+    const scale_by: Scale = .{ .by = 10 };
+    const offset_by: Offset = .{ .by = 1 };
+    var logs: [4]Numbers = @splat(.{});
+    try program(source, work).run(.{ scale_by, offset_by, &logs[0] });
+    try program(source, work).provide(.{ scale_by, offset_by }).run(.{&logs[1]});
+    try program(source, work).provide(.{offset_by}).run(.{ &logs[2], scale_by });
+    try program(source, work).provide(.{ &logs[3], offset_by, scale_by }).run(.{});
+    for (&logs) |*seen| try seen.expect(&.{ 11, 21 });
 }
 
 const Left = struct { seen: *Numbers };
@@ -110,7 +127,7 @@ fn useSession(journal: *Journal, session: Session, value: u32) u32 {
     return value + session.id;
 }
 
-test "resources are acquired in order, provided downstream, and released in reverse" {
+test "resources are acquired once what they need is there, and released in reverse" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
     const work = pipe(.{
@@ -120,6 +137,105 @@ test "resources are acquired in order, provided downstream, and released in reve
     try program(range(u32, 0, 2), work).provide(.{ resource(connect, disconnect), resource(openSession, closeSession) }).run(.{ &journal, &seen });
     try seen.expect(&.{ 8, 9 });
     try journal.expect("CS..sc");
+}
+
+test "a resource may be written before what it needs, in provide or in run" {
+    const work = pipe(.{ map(useSession), forEach(record) });
+    const source = range(u32, 0, 2);
+    const connection = resource(connect, disconnect);
+    const session = resource(openSession, closeSession);
+    var journals: [4]Journal = @splat(.{});
+    var seen: [4]Numbers = @splat(.{});
+    // The session needs the connection, and both need the journal.
+    try program(source, work).provide(.{ session, connection }).run(.{ &journals[0], &seen[0] });
+    try program(source, work).provide(.{session}).run(.{ &seen[1], connection, &journals[1] });
+    try program(source, work).provide(.{connection}).run(.{ session, &journals[2], &seen[2] });
+    try program(source, work).run(.{ session, &seen[3], connection, &journals[3] });
+    for (&journals) |*journal| try journal.expect("CS..sc");
+    for (&seen) |*log| try log.expect(&.{ 8, 9 });
+}
+
+const Cache = struct { id: u32 };
+const Report = struct { id: u32 };
+
+fn warm(journal: *Journal) Cache {
+    journal.add('W');
+    return .{ .id = 1 };
+}
+fn drop(journal: *Journal, _: Cache) void {
+    journal.add('w');
+}
+fn openReport(journal: *Journal, session: Session, cache: Cache) Report {
+    journal.add('R');
+    return .{ .id = session.id + cache.id };
+}
+fn closeReport(journal: *Journal, _: Report) void {
+    journal.add('r');
+}
+fn useReport(report: Report, value: u32) u32 {
+    return value + report.id;
+}
+
+test "independent resources are acquired in written order; one that needs others comes after them" {
+    const work = pipe(.{ map(useReport), forEach(record) });
+    const source = range(u32, 0, 1);
+    const connection = resource(connect, disconnect);
+    const session = resource(openSession, closeSession);
+    const cache = resource(warm, drop);
+    const report = resource(openReport, closeReport);
+
+    // The cache and the connection need only the journal: written order decides.
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    try program(source, work).run(.{ report, cache, session, connection, &journal, &seen });
+    try journal.expect("WCSRrscw");
+    try seen.expect(&.{9});
+
+    journal = .{};
+    try program(source, work).run(.{ report, session, connection, cache, &journal, &seen });
+    try journal.expect("CSWRrwsc");
+
+    // Defaults are written before what `run` is given.
+    journal = .{};
+    try program(source, work).provide(.{ report, connection }).run(.{ cache, session, &journal, &seen });
+    try journal.expect("CWSRrswc");
+}
+
+fn useConnection(connection: Connection, value: u32) u32 {
+    return value + connection.id;
+}
+
+test "a default resource that run replaces is not acquired" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    const direct = program(range(u32, 0, 2), pipe(.{ map(useConnection), forEach(record) }))
+        .provide(.{resource(connect, disconnect)});
+    try direct.run(.{ Connection{ .id = 40 }, &journal, &seen });
+    try seen.expect(&.{ 40, 41 });
+    try journal.expect("");
+
+    // What needs the replaced binding is built from the replacement.
+    seen = .{};
+    const through = program(range(u32, 0, 2), pipe(.{ map(useSession), forEach(record) }))
+        .provide(.{ resource(openSession, closeSession), resource(connect, disconnect) });
+    try through.run(.{ Connection{ .id = 40 }, &journal, &seen });
+    try seen.expect(&.{ 41, 42 });
+    try journal.expect("S..s");
+}
+
+fn borrow(journal: *Journal) Connection {
+    journal.add('B');
+    return .{ .id = 20 };
+}
+
+test "a resource given to run replaces a default of the same type" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    const app = program(range(u32, 0, 2), pipe(.{ map(useConnection), forEach(record) }))
+        .provide(.{resource(connect, disconnect)});
+    try app.run(.{ &seen, resource(borrow, null), &journal });
+    try seen.expect(&.{ 20, 21 });
+    try journal.expect("B");
 }
 
 fn failing(value: u32) error{Boom}!u32 {

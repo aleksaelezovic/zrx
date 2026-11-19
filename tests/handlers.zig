@@ -15,6 +15,7 @@ const all = zrx.all;
 const any = zrx.any;
 const compose = zrx.compose;
 const orElse = zrx.orElse;
+const require = zrx.require;
 const reduce = zrx.reduce;
 const field = zrx.field;
 const constant = zrx.constant;
@@ -174,6 +175,69 @@ test "a fallback need not name Canceled, which it is never given" {
     try std.testing.expectError(error.Canceled, result);
     try seen.expect(&.{ 0, 0 });
     try std.testing.expectEqual(@as(u32, 1), fallbacks);
+}
+
+// --- require --------------------------------------------------------------
+
+test "require passes the item on, or fails with the named error" {
+    var seen: Numbers = .{};
+    const values = [_]u32{ 5, 4, 2, 9 };
+    const result = program(fromSlice(&values), pipe(.{ map(require(ge(3), error.TooSmall)), forEach(record) })).run(.{&seen});
+    try std.testing.expectError(error.TooSmall, result);
+    try seen.expect(&.{ 5, 4 });
+}
+
+test "require returns the item it was given, not what the predicate looked at" {
+    var seen: Numbers = .{};
+    const orders = [_]Order{ .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 250 }, .{ .id = 3, .price = 9000 } };
+    const affordable = require(compose(.{ field(.price), all(.{ ge(100), le(1000) }) }), error.OutOfRange);
+    const result = program(fromSlice(&orders), pipe(.{ map(affordable), map(field(.id)), forEach(record) })).run(.{&seen});
+    try std.testing.expectError(error.OutOfRange, result);
+    try seen.expect(&.{ 1, 2 });
+}
+
+test "require forwards the predicate's dependencies" {
+    var seen: Numbers = .{};
+    const limited = program(range(u32, 0, 10), pipe(.{ map(require(withinLimit, error.OverLimit)), forEach(record) }));
+    try std.testing.expectError(error.OverLimit, limited.run(.{ &seen, Limit{ .max = 2 } }));
+    try seen.expect(&.{ 0, 1, 2 });
+}
+
+test "require fails with the predicate's own error when the predicate fails" {
+    const Checked = zrx.di.Result("test", require(checked, error.Rejected), &.{u32});
+    try std.testing.expect(Checked == error{ Rejected, Seven }!u32);
+    try std.testing.expect(zrx.di.Result("test", require(isEven, error.Odd), &.{u32}) == error{Odd}!u32);
+
+    var seen: Numbers = .{};
+    const result = program(range(u32, 5, 10), pipe(.{ map(require(checked, error.Rejected)), forEach(record) })).run(.{&seen});
+    try std.testing.expectError(error.Seven, result);
+    try seen.expect(&.{ 5, 6 });
+}
+
+fn priceOrZero(_: error{ Free, Cheap }, _: Order) u32 {
+    return 0;
+}
+
+test "require works inside compose and under orElse" {
+    var seen: Numbers = .{};
+    const orders = [_]Order{ .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 0 }, .{ .id = 3, .price = 50 }, .{ .id = 4, .price = 300 } };
+    const gross = compose(.{ field(.price), nonZero, require(ge(100), error.Cheap), addTax });
+    try program(fromSlice(&orders), pipe(.{ map(orElse(gross, priceOrZero)), forEach(record) })).run(.{ &seen, Tax{ .percent = 10 } });
+    try seen.expect(&.{ 110, 0, 0, 330 });
+}
+
+const Rejected = struct { odd: u32 = 0 };
+fn countOdd(rejected: *Rejected, _: error{Odd}, _: u32) void {
+    rejected.odd += 1;
+}
+
+test "an item that require fails can be skipped with recover" {
+    var seen: Numbers = .{};
+    var rejected: Rejected = .{};
+    const evens = pipe(.{ zrx.recover(countOdd), map(require(isEven, error.Odd)), forEach(record) });
+    try program(range(u32, 0, 5), evens).run(.{ &seen, &rejected });
+    try seen.expect(&.{ 0, 2, 4 });
+    try std.testing.expectEqual(@as(u32, 2), rejected.odd);
 }
 
 test "constant replaces every item" {

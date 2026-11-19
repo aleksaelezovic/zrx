@@ -138,6 +138,16 @@ test "withResource" {
     }
 }
 
+test "withBindings" {
+    for (inputs) |items| {
+        var with: struct { u32, u32, u64 } = .{ 3, 7, 99 };
+        var without: struct { u32, u32, u64 } = .{ 3, 7, 98 };
+        cases.withBindings(true, items, 5, &with[0], &with[1], &with[2]);
+        cases.withBindings(false, items, 5, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
 test "printed" {
     for (inputs) |items| {
         var with_bytes: [256]u8 = undefined;
@@ -192,4 +202,55 @@ test "fellBack" {
         cases.fellBack(false, items, &without);
         try std.testing.expectEqual(without, with);
     }
+}
+
+test "required" {
+    for (inputs) |items| {
+        var with: struct { u32, u64 } = .{ 0, 0 };
+        var without: struct { u32, u64 } = .{ 0, 0 };
+        cases.required(true, items, &with[0], &with[1]);
+        cases.required(false, items, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "nested" {
+    const values = [_]u32{ 1, 6, 7, 2, 100, 5, 6, 1000 };
+    const groups = [_]cases.Group{
+        .{ .ptr = &values, .len = 4, .weight = 3 },
+        .{ .ptr = &values, .len = 0, .weight = 7 },
+        .{ .ptr = values[2..].ptr, .len = 6, .weight = 1 },
+    };
+    for ([_][]const cases.Group{ &.{}, groups[0..1], &groups }) |some| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.nested(true, some, &with);
+        cases.nested(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "attempted" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.attempted(true, items, &with);
+        cases.attempted(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "attemptedCapped" {
+    // The last input holds values over the cap: both variants fail there
+    // and leave the result as it was.
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 99;
+        const passed = cases.attemptedCapped(false, items, &without);
+        try std.testing.expectEqual(passed, cases.attemptedCapped(true, items, &with));
+        try std.testing.expectEqual(without, with);
+    }
+    var untouched: u64 = 99;
+    try std.testing.expect(!cases.attemptedCapped(true, inputs[3], &untouched));
+    try std.testing.expectEqual(@as(u64, 99), untouched);
 }

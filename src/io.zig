@@ -114,16 +114,17 @@ fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize
     };
     return struct {
         pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
 
         pub fn bind(_: @This(), env: anytype, next: anytype) !void {
-            comptime expectProvided(@tagName(which), @TypeOf(env), Io);
             var buffer: [buffer_size]u8 = undefined;
             const file: Io.File = switch (which) {
                 .stdout => .stdout(),
                 .stderr => .stderr(),
             };
             var writer = file.writerStreaming(di.get(env, Io), &buffer);
-            return next.call(di.extend(env, Role{ .writer = &writer.interface }));
+            return next.call(Role{ .writer = &writer.interface });
         }
     };
 }
@@ -138,7 +139,7 @@ pub const FileMode = enum {
     /// the writer is flushed. A failure before publication leaves the
     /// destination untouched. If the path already exists at publication,
     /// the run returns `error.PathAlreadyExists`. With several published
-    /// files, the last one bound is named first. Any files already published
+    /// files, the last one acquired is named first. Any files already published
     /// stay in place if a later publication fails.
     publish,
 };
@@ -167,23 +168,24 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
         options: FileWriterOptions,
 
         pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
 
         pub fn bind(self: @This(), env: anytype, next: anytype) !void {
-            comptime expectProvided("fileWriter", @TypeOf(env), Io);
             const io = di.get(env, Io);
             var buffer: [buffer_size]u8 = undefined;
             if (self.options.mode == .publish) {
                 var pending = try Io.Dir.cwd().createFileAtomic(io, self.path, .{});
                 defer pending.deinit(io);
                 var writer = pending.file.writer(io, &buffer);
-                try next.call(di.extend(env, roleOf(&writer.interface)));
+                try next.call(roleOf(&writer.interface));
                 try writer.interface.flush();
                 return pending.link(io);
             }
             const file = try Io.Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
             defer file.close(io);
             var writer = file.writer(io, &buffer);
-            return next.call(di.extend(env, roleOf(&writer.interface)));
+            return next.call(roleOf(&writer.interface));
         }
 
         fn roleOf(writer: *Io.Writer) Role {
@@ -195,6 +197,40 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
+
+/// Opens the file at `path` and binds its reader as `Role` for the duration
+/// of a program, for `lines(Role, n)` to read. With `lines`, `buffer_size`
+/// must be at least the line limit plus one, for the newline.
+///
+/// A program over `lines(Role, n)` is the same value whether its reader is a
+/// file (this binding) or one a test supplies in its place. A failed read
+/// fails the run with `error.ReadFailed`, as with any reader given to `lines`.
+pub fn fileReader(comptime Role: type, path: []const u8, comptime buffer_size: usize) FileReader(Role, buffer_size) {
+    return .{ .path = path };
+}
+
+fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
+    expectReader("fileReader", Role);
+    if (Role != *Io.Reader and @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
+        "fileReader: use `*std.Io.Reader` or a role with a single `reader: *std.Io.Reader` field",
+    );
+    return struct {
+        path: []const u8,
+
+        pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
+
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            const io = di.get(env, Io);
+            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [buffer_size]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
+        }
+    };
+}
 
 /// A line with its bytes stored inline, without the newline. Also serves as
 /// owned text of bounded length: `Line(32).from(name)`.
@@ -248,6 +284,15 @@ fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
     };
 }
 
+/// `std.Io.File.Reader` reports a failed read as `error.ReadFailed` and keeps
+/// what the system said. This gives a read that just failed on `reader` that
+/// cause. Use it where the read happens: further from it, a `ReadFailed` may
+/// be another reader's, which is why `fileReader` does not translate.
+fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.File.Reader.Error) {
+    if (@as(anyerror, err) == error.ReadFailed) if (reader.err) |cause| return cause;
+    return err;
+}
+
 fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) !void {
     while (true) {
         const buffered_line = reader.peekDelimiterInclusive('\n') catch |err| switch (err) {
@@ -282,7 +327,7 @@ fn StdinLines(comptime max_line_bytes: usize) type {
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = Io.File.stdin().readerStreaming(di.get(env, Io), &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
         }
     };
 }
@@ -309,7 +354,45 @@ fn FileLines(comptime max_line_bytes: usize) type {
             // Room for the longest line and the newline that ends it.
             var buffer: [max_line_bytes + 1]u8 = undefined;
             var reader = file.reader(io, &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down);
+            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
+        }
+    };
+}
+
+/// The bytes of the file at `path`, at most `max_bytes` at a time, opened
+/// when the source runs and closed when it ends. An item is a slice into
+/// the source's own buffer: it is valid until the push that carries it
+/// returns, so a stage that keeps bytes copies them. A failed read fails
+/// the run with the error the system reported. Needs `std.Io`.
+pub fn fileBytes(path: []const u8, comptime max_bytes: usize) FileBytes(max_bytes) {
+    return .{ .path = path };
+}
+
+/// The type of `fileBytes(path, max_bytes)`, for a handler that returns one.
+pub fn FileBytes(comptime max_bytes: usize) type {
+    if (max_bytes == 0) @compileError("fileBytes: needs room for at least one byte at a time; pass a positive comptime size such as `fileBytes(path, 4096)`");
+    return struct {
+        path: []const u8,
+
+        pub const zrx_source = {};
+        pub const Item = []const u8;
+
+        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
+            comptime expectProvided("fileBytes", @TypeOf(env), Io);
+            const io = di.get(env, Io);
+            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [max_bytes]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            while (true) {
+                const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+                    error.EndOfStream => return,
+                    // The reader keeps what went wrong to itself.
+                    error.ReadFailed => return reader.err orelse err,
+                };
+                if (try down.push(bytes) == .done) return;
+                reader.interface.toss(bytes.len);
+            }
         }
     };
 }

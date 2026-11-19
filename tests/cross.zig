@@ -40,6 +40,35 @@ export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const
     return true;
 }
 
+export fn zrx_cross_json(writer: *std.Io.Writer, first: u32, end: u32) bool {
+    const numbers = program(zrx.range(u32, first, end), .{
+        zrx.map(zrx.ext.json.encode(.{})),
+        zrx.write(*std.Io.Writer, "{f}\n"),
+    });
+    numbers.run(.{writer}) catch return false;
+    return true;
+}
+
+fn bytesOf(path: []const u8) zrx.FileBytes(256) {
+    return zrx.fileBytes(path, 256);
+}
+fn count(total: u64, piece: []const u8) u64 {
+    return total +% piece.len;
+}
+fn unread(_: anyerror, path: []const u8) zrx.Tagged([]const u8, u64) {
+    return .{ .source = path, .item = 0 };
+}
+
+export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
+    const sized = pipe(.{zrx.each(bytesOf, .{zrx.fold(@as(u64, 0), count)})});
+    const sizes = program(zrx.fromValue(@as([]const u8, std.mem.span(path))), pipe(.{
+        zrx.attempt(sized, unread),
+        zrx.drain(),
+    }));
+    sizes.run(.{io.*}) catch return false;
+    return true;
+}
+
 export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     const batches = program(zrx.range(u32, first, end), pipe(.{
         zrx.batchWithin(1000, .fromSeconds(60)),
@@ -72,5 +101,20 @@ export fn zrx_cross_completion(io: *const std.Io) bool {
     const right = pipe(.{ zrx.take(1), zrx.drain() });
     const work = program(zrx.fromProducer(u32, stopAware), pipe(.{zrx.branch(.{ left, right })}));
     work.run(.{io.*}) catch return false;
+    return true;
+}
+
+/// The manual clock forwards every entry of `std.Io.VTable`, whose types
+/// differ per target.
+export fn zrx_cross_clock(io: *const std.Io, first: u32, end: u32) bool {
+    var clock: zrx.testing.Clock = .init(io.*);
+    clock.advanceTo(.fromSeconds(1));
+    const batches = program(zrx.range(u32, first, end), pipe(.{
+        zrx.batchWithin(1000, .fromSeconds(60)),
+        zrx.flatten(),
+        zrx.drain(),
+    }));
+    batches.run(.{clock.io()}) catch return false;
+    clock.waitingAt(.fromSeconds(61)) catch return false;
     return true;
 }

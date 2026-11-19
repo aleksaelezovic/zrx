@@ -46,7 +46,7 @@ pub fn get(env: anytype, comptime T: type) T {
     return env[comptime indexOf(@TypeOf(env), T).?];
 }
 
-/// The validated environment type for the tuple a user passes to `run`.
+/// The validated tuple type for the bindings a user passes to `run` or `provide`.
 pub fn Normalized(comptime Deps: type) type {
     @setEvalBranchQuota(quota);
     if (!isTuple(Deps)) @compileError("zrx: dependencies must be a tuple such as `.{ io, logger }`, got `" ++ @typeName(Deps) ++ "`");
@@ -64,12 +64,6 @@ pub fn Normalized(comptime Deps: type) type {
         );
     }
     return @Tuple(field_types);
-}
-
-pub fn normalize(deps: anytype) Normalized(@TypeOf(deps)) {
-    var env: Normalized(@TypeOf(deps)) = undefined;
-    inline for (0..comptime types(@TypeOf(deps)).len) |i| env[i] = deps[i];
-    return env;
 }
 
 /// `Env` with `T` added, or unchanged when `T` is already a key (the new value shadows it).
@@ -126,6 +120,9 @@ fn expectHandler(comptime who: []const u8, comptime handler: anytype, comptime a
     if (isComposite(handler)) return;
     const info = @typeInfo(@TypeOf(handler)).@"fn";
     if (info.attrs.varargs) @compileError(who ++ ": handler `" ++ describe(handler) ++ "` must not be variadic");
+    if (info.return_type == type) @compileError(
+        who ++ ": `" ++ describe(handler) ++ "` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`",
+    );
     if (info.param_types.len < arity) @compileError(std.fmt.comptimePrint(
         "{s}: handler `{s}` must end with {d} data parameter(s); dependencies come before them",
         .{ who, describe(handler), arity },
