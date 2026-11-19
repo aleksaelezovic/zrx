@@ -95,6 +95,11 @@ pub const lines = io.lines;
 pub const stdinLines = io.stdinLines;
 pub const fileLines = io.fileLines;
 
+/// Modules built on the contracts below. Each is compiled only when used.
+pub const ext = struct {
+    pub const json = @import("ext/json.zig");
+};
+
 // For writing operators, sources and handlers of your own.
 pub const Flow = @import("pipe.zig").Flow;
 pub const End = @import("pipe.zig").End;

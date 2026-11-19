@@ -40,6 +40,15 @@ export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const
     return true;
 }
 
+export fn zrx_cross_json(writer: *std.Io.Writer, first: u32, end: u32) bool {
+    const numbers = program(zrx.range(u32, first, end), .{
+        zrx.map(zrx.ext.json.encode(.{})),
+        zrx.write(*std.Io.Writer, "{f}\n"),
+    });
+    numbers.run(.{writer}) catch return false;
+    return true;
+}
+
 export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     const batches = program(zrx.range(u32, first, end), pipe(.{
         zrx.batchWithin(1000, .fromSeconds(60)),

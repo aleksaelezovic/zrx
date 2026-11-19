@@ -543,6 +543,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `write(Role, "fmt")` | Terminal. Like `print`, but flushes only at the end of the stream. |
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
 | `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
+| `ext.json.encode(options)` | Handler: the item as JSON text, to be formatted with `{f}`. |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
 
@@ -576,18 +577,23 @@ program(source, work).provide(.{
 })
 ```
 
-To write JSON lines, map each item to `std.json.fmt` and format it with `{f}`:
+To write JSON lines, map each item with `json.encode` from the extension
+`zrx.ext.json` and format the result with `{f}`:
 
 ```zig
-fn json(event: Event) std.json.Formatter(Event) {
-    return std.json.fmt(event, .{});
-}
+const json = zrx.ext.json;
 
 const archive = pipe(.{
-    map(json),
+    map(json.encode(.{})),
     write(Archive, "{f}\n"),
 });
 ```
+
+`json.encode(options)` is a handler that returns `std.json.fmt(item, options)`,
+a value holding a copy of the item. The options are
+`std.json.Stringify.Options` and are always given, `.{}` for the defaults:
+`json.encode(.{ .emit_null_optional_fields = false })` leaves out optional
+fields that are null.
 
 Line sources emit `Line(n)`. Each value carries up to `n` bytes inline,
 plus its length. Use `line.text()` to inspect the bytes while the line is

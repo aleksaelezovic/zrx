@@ -139,6 +139,13 @@ to this file; edit `AGENTS.md`, not copies.
   wrapped to mark what they push; the scope knows nothing of it. Do not
   add a way to put operators on a source before a merge: operators live in
   the program's pipe.
+- **JSON is an extension named after its format.** `src/ext/json.zig`,
+  exported as `zrx.ext.json` and analyzed only when referenced, holds one
+  handler: `map(json.encode(.{}))` returns `std.json.fmt(item, options)`,
+  which `print` or `write` formats with `{f}`. One spelling: `encode` is
+  always called with its options, and there is no sink that hides
+  `write(Role, "{f}\n")`. No general serialization layer for one format.
+  Decoding is not there.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`

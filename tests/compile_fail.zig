@@ -55,6 +55,10 @@ pub const cases = .{
     .{ "reduce_arity", "reduce: handler `fn (u32) u32` must end with 2 data parameter(s); dependencies come before them" },
     .{ "missing_dependency", "map: handler `fn (missing_dependency.Scale, u32) u32` asks for dependency `missing_dependency.Scale`, which is not provided here; provided: (nothing). Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
     .{ "not_handler", "map: expected a handler (a comptime-known function), got `comptime_int`" },
+    .{ "json_encode_uncalled", "map: `fn (comptime json.Stringify.Options) type` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`" },
+    // `encode` declares its options as `std.json.Stringify.Options`, so these two are Zig's own messages, at the call.
+    .{ "json_encode_options", "expected type 'json.Stringify.Options', found 'comptime_int'" },
+    .{ "json_encode_field", "no field named 'pretty' in struct 'json.Stringify.Options'" },
     .{ "not_operator", "pipe: element 1 is not an operator (got `fn (u32) u32`); a pipe holds operators such as map(...), filter(...) or another pipe" },
     .{ "predicates_result", "all: every predicate must return `bool` or `E!bool`, got `u32`" },
     .{ "or_else_fallback_errors", "orElse: the fallback takes `error{Odd}` but the handler can fail with `error{Odd,TooBig}`" },

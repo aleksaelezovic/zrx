@@ -126,6 +126,9 @@ fn expectHandler(comptime who: []const u8, comptime handler: anytype, comptime a
     if (isComposite(handler)) return;
     const info = @typeInfo(@TypeOf(handler)).@"fn";
     if (info.attrs.varargs) @compileError(who ++ ": handler `" ++ describe(handler) ++ "` must not be variadic");
+    if (info.return_type == type) @compileError(
+        who ++ ": `" ++ describe(handler) ++ "` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`",
+    );
     if (info.param_types.len < arity) @compileError(std.fmt.comptimePrint(
         "{s}: handler `{s}` must end with {d} data parameter(s); dependencies come before them",
         .{ who, describe(handler), arity },
