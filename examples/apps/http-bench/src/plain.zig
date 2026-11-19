@@ -141,7 +141,9 @@ fn baseline(request: *Request) !void {
 
 fn json(request: *Request) !void {
     if (request.head.method != .GET) return reject(request, .method_not_allowed);
-    if (hasBody(request)) return reject(request, .bad_request);
+    // A body is not looked at, as in the zrx server, and no request can be
+    // found behind one: the connection ends with this answer.
+    if (hasBody(request)) request.head.keep_alive = false;
     var buffer: [64]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try std.json.Stringify.value(.{ .message = "Hello, World!" }, .{}, &writer);

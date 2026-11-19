@@ -131,6 +131,11 @@ def main():
         if not shlex.split(command):
             parser.error("--reference must contain a command")
         variants.append((name, shlex.split(command)))
+    names = [name for name, _ in variants]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        # Samples are kept by name: two servers under one name would be reported as one.
+        parser.error(f"every server needs a name of its own; given more than once: {', '.join(repeated)}")
     samples = {name: [] for name, _ in variants}
     rng = random.Random(0)
     for _ in range(args.runs):
@@ -143,6 +148,10 @@ def main():
     sent = f", {args.pipeline} per write" if args.pipeline else ""
     print(f"{args.workload}: {args.requests:,} OK responses per trial, {args.runs} runs, "
           f"{args.connections} keep-alive connections{sent}")
+    # The CPU time is that of the server's whole life, so both figures below
+    # are taken over everything it served: the warm-up and the trial. The
+    # cores are an estimate, which takes the warm-up to have run at the
+    # trial's rate.
     served = args.requests + warm_up(args)
     what = "batch" if args.pipeline > 1 else "request"
     for name, rows in sorted(samples.items(), key=lambda entry: -statistics.median(row[0] for row in entry[1])):
@@ -151,7 +160,7 @@ def main():
         print(f"{name:10} median {statistics.median(rate):>9,.0f} req/s "
               f"({min(rate):,.0f}–{max(rate):,.0f}), p99 per {what} {statistics.median(p99):.2f} ms, "
               f"CPU {seconds / served * 1e6:.1f} µs/request "
-              f"({seconds * statistics.median(rate) / args.requests:.1f} cores), "
+              f"({seconds * statistics.median(rate) / served:.1f} cores), "
               f"max peak RSS {max(rss) / 2**20:.1f} MiB")
 
 if __name__ == "__main__":

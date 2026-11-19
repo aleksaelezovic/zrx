@@ -65,6 +65,11 @@ test "both refuse a body they cannot take and close the connection" {
     try expectBoth(closed("417 Expectation Failed"), "POST /baseline11 HTTP/1.1\r\n" ++ host ++ "Content-Length: 2\r\nExpect: luck\r\n\r\n20" ++ get);
 }
 
+test "both answer a GET of the greeting that carries a body, and close the connection" {
+    // Neither looks at the body, and neither can find a request behind it.
+    try expectBoth(last_greeting, "GET /json HTTP/1.1\r\n" ++ host ++ "Content-Length: 2\r\n\r\n20" ++ get);
+}
+
 test "neither reads a chunked body" {
     try expectBoth(
         closed("411 Length Required"),

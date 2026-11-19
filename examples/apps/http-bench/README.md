@@ -92,7 +92,9 @@ response. It is the comparison, so it is written the way `std` suggests and
 not as a pipe.
 
 The two servers answer the workloads byte for byte alike, and refuse a body
-they cannot take with the same status. They differ where zrx is stricter or
+they cannot take with the same status. A `GET` of `/json` that carries a
+body is answered by both, with the body left alone and the connection
+closed. They differ where zrx is stricter or
 keeps a connection:
 
 - After a 404 or 405 without a body the baseline closes the connection and
@@ -130,7 +132,7 @@ pipelining. Keep `--connections` (8 unless given) well below the worker
 count: a load generator that briefly opens one connection more than there
 are workers waits for a worker until its timeout. `--reference NAME=COMMAND`
 adds a server that accepts `serve PORT` and prints its port; it can be given
-several times.
+several times, each with a name of its own.
 
 ## Measured
 
