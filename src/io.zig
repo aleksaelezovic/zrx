@@ -203,7 +203,8 @@ fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
 /// must be at least the line limit plus one, for the newline.
 ///
 /// A program over `lines(Role, n)` is the same value whether its reader is a
-/// file (this binding) or one a test supplies in its place.
+/// file (this binding) or one a test supplies in its place. A failed read
+/// fails the run with `error.ReadFailed`, as with any reader given to `lines`.
 pub fn fileReader(comptime Role: type, path: []const u8, comptime buffer_size: usize) FileReader(Role, buffer_size) {
     return .{ .path = path };
 }
@@ -226,8 +227,7 @@ fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
             defer file.close(io);
             var buffer: [buffer_size]u8 = undefined;
             var reader = file.reader(io, &buffer);
-            const role: Role = if (Role == *Io.Reader) &reader.interface else .{ .reader = &reader.interface };
-            return next.call(role) catch |err| readCause(&reader, err);
+            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
         }
     };
 }
@@ -285,7 +285,9 @@ fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
 }
 
 /// `std.Io.File.Reader` reports a failed read as `error.ReadFailed` and keeps
-/// what the system said. This gives a run that failed on `reader` that cause.
+/// what the system said. This gives a read that just failed on `reader` that
+/// cause. Use it where the read happens: further from it, a `ReadFailed` may
+/// be another reader's, which is why `fileReader` does not translate.
 fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.File.Reader.Error) {
     if (@as(anyerror, err) == error.ReadFailed) if (reader.err) |cause| return cause;
     return err;

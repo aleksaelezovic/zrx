@@ -815,10 +815,10 @@ across a `queue` or keep it in a `batch`. An empty file emits nothing.
 `zrx.FileBytes(n)` names the source's type, for a handler that returns one.
 
 When reading a file fails, the run fails with the error the system reported,
-such as `error.InputOutput`. That holds for `fileBytes`, `fileLines`,
-`stdinLines` and a reader bound by `fileReader`. A reader of your own given
-to `lines(Role, n)` fails the run with what it reports, which for
-`std.Io.Reader` is `error.ReadFailed`.
+such as `error.InputOutput`. That holds for `fileBytes`, `fileLines` and
+`stdinLines`, which own their reader. A reader given to `lines(Role, n)`,
+one of your own or one bound by `fileReader`, fails the run with what it
+reports, which for `std.Io.Reader` is `error.ReadFailed`.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
