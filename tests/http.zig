@@ -27,6 +27,7 @@ const concurrent = zrx.concurrent;
 const forEach = zrx.forEach;
 const resource = zrx.resource;
 const all = zrx.all;
+const not = zrx.not;
 const constant = zrx.constant;
 
 // ---------------------------------------------------------------------------
@@ -949,6 +950,107 @@ test "with room for one waiting connection, every connection is still served" {
         try std.testing.expectEqualStrings(closed, got[0..try answering.interface.readSliceShort(&got)]);
     }
     try server.await(io);
+}
+
+const Arrivals = struct {
+    seen: usize = 0,
+    /// How many of the first connections are not to be served.
+    unwelcome: usize,
+};
+
+/// A predicate: the connection is one of the first `unwelcome`.
+fn unwelcome(arrivals: *Arrivals, _: http.Connection) bool {
+    arrivals.seen += 1;
+    return arrivals.seen <= arrivals.unwelcome;
+}
+
+test "a rejected connection is closed, and its room is free for the next" {
+    const on = Sockets.over(io, 3);
+    const Server = struct {
+        // Room for one: a rejected connection that kept it would be the
+        // last one accepted.
+        const served = program(http.connections(), .{
+            take(3),
+            route(.{
+                when(unwelcome, .{http.reject()}),
+                otherwise(.{http.serve(api)}),
+            }),
+        }).provide(.{
+            http.listen(loopback, .{ .pending = 1 }),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready, arrivals: *Arrivals) !void {
+            return served.run(.{ with, ready, arrivals });
+        }
+    };
+    var ready: Ready = .{};
+    var arrivals: Arrivals = .{ .unwelcome = 2 };
+    var server = try io.concurrent(Server.run, .{ on, &ready, &arrivals });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    var peers: [3]Io.net.Stream = undefined;
+    var opened: usize = 0;
+    defer for (peers[0..opened]) |peer| peer.close(io);
+    for (&peers) |*peer| {
+        peer.* = try address.connect(io, .{ .mode = .stream });
+        opened += 1;
+    }
+    var out = peers[2].writer(io, &.{});
+    try out.interface.writeAll("GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n");
+    // The third connection has been served: the first two made room for it.
+    try server.await(io);
+    try std.testing.expectEqual(@as(usize, 3), Sockets.closed.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), Sockets.closed_twice.load(.seq_cst));
+    var got: [256]u8 = undefined;
+    for (peers[0..2]) |peer| {
+        var in = peer.reader(io, &.{});
+        try std.testing.expectEqual(@as(usize, 0), try in.interface.readSliceShort(&got));
+    }
+    var in = peers[2].reader(io, &.{});
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
+        got[0..try in.interface.readSliceShort(&got)],
+    );
+}
+
+test "a connection a stage dropped is closed by the listener when the run is over" {
+    const on = Sockets.over(io, 2);
+    const Server = struct {
+        const served = program(http.connections(), .{
+            take(2),
+            filter(not(unwelcome)),
+            http.serve(api),
+        }).provide(.{
+            http.listen(loopback, .{}),
+            resource(announce, null),
+        });
+
+        fn run(with: Io, ready: *Ready, arrivals: *Arrivals) !void {
+            return served.run(.{ with, ready, arrivals });
+        }
+    };
+    var ready: Ready = .{};
+    var arrivals: Arrivals = .{ .unwelcome = 1 };
+    var server = try io.concurrent(Server.run, .{ on, &ready, &arrivals });
+    defer server.cancel(io) catch {};
+    try ready.listening.wait(io);
+
+    const address: Io.net.IpAddress = .{ .ip4 = .loopback(ready.port) };
+    const dropped = try address.connect(io, .{ .mode = .stream });
+    defer dropped.close(io);
+    var answer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55",
+        try ask(ready.port, "GET /sum?a=13&b=42 HTTP/1.1\r\nConnection: close\r\n\r\n", &answer),
+    );
+    try server.await(io);
+    try std.testing.expectEqual(@as(usize, 2), Sockets.closed.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 0), Sockets.closed_twice.load(.seq_cst));
+    var in = dropped.reader(io, &.{});
+    try std.testing.expectEqual(@as(usize, 0), try in.interface.readSliceShort(&answer));
 }
 
 /// An `Io` whose first accept finds that the peer has already given up.

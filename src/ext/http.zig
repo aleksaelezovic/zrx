@@ -18,7 +18,8 @@
 //! constructs for that connection, with a `Response` added to the
 //! dependencies. The responders (`text`, `json`, `status`) and `fail` find
 //! the request to answer through that dependency, so they only work inside
-//! the pipe given to `serve`.
+//! the pipe given to `serve`. A connection that is not to be served goes to
+//! `reject`, which closes it.
 //!
 //! Nothing here is known to the core: `serve` holds a sub-pipe the way
 //! `concurrent` does and runs it by direct call on the task it is pushed on.
@@ -76,9 +77,9 @@ pub const Listener = struct {
 };
 
 pub const ListenOptions = struct {
-    /// How many accepted connections may wait for a worker at once. The
-    /// listener holds them in a table of this size; while it is full,
-    /// `connections` accepts no more.
+    /// How many accepted connections may wait for a `serve` or a `reject`
+    /// at once. The listener holds them in a table of this size; while it
+    /// is full, `connections` accepts no more.
     pending: usize = 64,
     /// Sets SO_REUSEADDR (and SO_REUSEPORT on POSIX) on the listening socket.
     reuse_address: bool = false,
@@ -90,7 +91,8 @@ pub const ListenOptions = struct {
 /// `Listener`. Pass it to `provide` or `run`. Needs `std.Io`.
 ///
 /// The listener owns every connection `connections` accepted until a
-/// `serve` takes it, and closes those nobody took once the run is over.
+/// `serve` or a `reject` takes it, and closes those nobody took once the
+/// run is over.
 pub fn listen(address: Io.net.IpAddress, comptime options: ListenOptions) Listen(options) {
     return .{ .address = address };
 }
@@ -117,9 +119,11 @@ fn Listen(comptime options: ListenOptions) type {
     };
 }
 
-/// The connections that were accepted and that no `serve` has taken yet.
-/// A connection in a queue, or in the hands of a source whose push was
-/// cancelled, would otherwise be closed by nobody.
+/// The connections that were accepted and that neither a `serve` nor a
+/// `reject` has taken yet. A connection in a queue, or in the hands of a
+/// source whose push was cancelled, would otherwise be closed by nobody.
+/// One that a stage dropped or keeps stays here as well: nothing tells the
+/// listener that it will never be taken.
 const Waiting = struct {
     mutex: Io.Mutex = .init,
     freed: Io.Condition = .init,
@@ -181,16 +185,20 @@ const Waiting = struct {
     }
 };
 
-/// An accepted connection. The listener owns it until a `serve` is pushed
-/// it; `serve` then closes it when the conversation is over, however it ended.
+/// An accepted connection. The listener owns it until it is pushed to a
+/// `serve`, which closes it when the conversation is over, however it
+/// ended, or to a `reject`, which closes it at once. Every connection has
+/// to end in one of the two: one that a stage drops or keeps back stays
+/// open, and counts as waiting (`pending`), until the run is over.
 ///
-/// It is handed over once. A copy that reaches a `serve` after the
-/// connection was taken (a `branch` into two of them) fails that push with
-/// `error.ConnectionTaken`, and the socket is left to whoever took it.
+/// It is handed over once. A copy that reaches a `serve` or a `reject`
+/// after the connection was taken (a `branch` into two of them) fails that
+/// push with `error.ConnectionTaken`, and the socket is left to whoever
+/// took it.
 pub const Connection = struct {
     stream: Io.net.Stream,
     /// Where the listener holds it until then. Null for a stream of your
-    /// own, which nothing keeps track of: push it to one `serve`.
+    /// own, which nothing keeps track of: push it to one `serve` or `reject`.
     held: ?Held = null,
 
     const Held = struct { by: *Waiting, slot: *Waiting.Slot, generation: u64 };
@@ -210,7 +218,8 @@ pub const Transport = struct { reader: *Io.Reader, writer: *Io.Writer };
 /// The connections accepted from the `Listener`, until a push answers
 /// `.done`. A connection the peer gave up before it was accepted is skipped;
 /// any other failure to accept fails the run. While as many connections wait
-/// for a worker as the listener has room for (`pending`), no more are accepted.
+/// for a `serve` or a `reject` as the listener has room for (`pending`), no
+/// more are accepted.
 pub fn connections() Connections {
     return .{};
 }
@@ -240,6 +249,49 @@ const Connections = struct {
             const held = waiting.hold(io, stream);
             if (try down.push(Connection{ .stream = stream, .held = held }) == .done) return;
         }
+    }
+};
+
+/// Turns away each connection it is given: closes it without reading or
+/// answering anything, which frees its room with the listener. Terminal.
+///
+/// This is how a pipe lets go of a connection it will not serve:
+///
+///     route(.{
+///         when(unwelcome, .{http.reject()}),
+///         otherwise(.{http.serve(api)}),
+///     })
+pub fn reject() Reject {
+    return .{};
+}
+
+const Reject = struct {
+    pub const zrx_operator = {};
+    pub const name = "http.reject";
+
+    pub fn Out(comptime Env: type, comptime In: type) type {
+        if (In != Connection) @compileError(
+            "http.reject: items must be `http.Connection` (from `http.connections()`), got `" ++ @typeName(In) ++ "`",
+        );
+        expectProvided(Env, Io, "http.reject: needs `std.Io` to close a connection; pass `io` to `run(.{ io, ... })`");
+        return End;
+    }
+
+    pub fn Stage(comptime Env: type, comptime In: type) type {
+        _ = Out(Env, In);
+        return struct {
+            io: Io,
+
+            pub fn init(self: *@This(), _: *const Reject, env: Env) void {
+                self.io = di.get(env, Io);
+            }
+
+            pub fn push(self: *@This(), connection: In, _: anytype) error{ConnectionTaken}!Flow {
+                try connection.claim(self.io);
+                connection.stream.close(self.io);
+                return .more;
+            }
+        };
     }
 };
 

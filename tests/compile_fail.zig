@@ -27,6 +27,8 @@ pub const cases = .{
     .{ "http_serve_open", "http.serve: the pipe must answer every request, but it still emits `http.Method`; end it with http.text(...), http.json(), http.status(...) or another terminal operator" },
     .{ "http_serve_item", "http.serve: items must be `http.Connection` (from `http.connections()`) or `http.Transport`, got `u32`" },
     .{ "http_serve_without_io", "http.serve: needs `std.Io` to read and write a connection; pass `io` to `run(.{ io, ... })`" },
+    .{ "http_reject_item", "http.reject: items must be `http.Connection` (from `http.connections()`), got `u32`" },
+    .{ "http_reject_without_io", "http.reject: needs `std.Io` to close a connection; pass `io` to `run(.{ io, ... })`" },
     .{ "http_connections_listener", "http.connections: needs a listener; bind one with `program(...).provide(.{ http.listen(address, .{}) })`" },
     .{ "http_listen_pending", "http.listen: `pending` must be at least 1; it is how many accepted connections may wait for a worker" },
     .{ "http_listen_without_io", "` needs dependency `Io`, which is not provided; provided: (nothing). Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },

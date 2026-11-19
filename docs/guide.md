@@ -867,6 +867,7 @@ to `serve` carries the requests of one connection.
 | `http.listen(address, options)` | Binding. Listens for the run and provides the `http.Listener`; `listener.port()` is the bound port. Options: `pending` (64), `reuse_address`, `kernel_backlog`. Needs `std.Io`. |
 | `http.connections()` | Source: the connections accepted from the listener. |
 | `http.serve(sub)` | Terminal. Holds the conversation on each connection with `sub`, an operator tuple or `pipe(...)` of `http.Request` items that ends in a terminal operator. |
+| `http.reject()` | Terminal. Closes each connection it is given without reading or answering anything. |
 | `http.text("fmt")` | Terminal, in `sub`. Answers 200 with the item formatted as `text/plain`; a tuple supplies several arguments. |
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
 | `http.status(code)` | Terminal, in `sub`. Answers `code` with an empty body; a 204 or 1xx carries no length. |
@@ -956,18 +957,34 @@ error still does. `fail` does not answer them either: they pass through it.
 
 ### Connections and writes
 
-The listener owns a connection from the moment it is accepted until a
-`serve` is pushed it; `serve` then closes it when the conversation ends,
-whatever ended it. A connection that is still waiting for a worker when the
-run is over (in a queue, or with the source) is closed by the listener once
-the run's tasks have returned. The listener has room for `pending` such
-connections, 64 unless `listen` is told otherwise, and `connections` accepts
-no more while it is full.
+The listener owns a connection from the moment it is accepted until it is
+pushed to a `serve`, which closes it when the conversation ends, whatever
+ended it, or to `http.reject()`, which closes it at once. A connection that
+is still waiting when the run is over (in a queue, or with the source) is
+closed by the listener once the run's tasks have returned. The listener has
+room for `pending` waiting connections, 64 unless `listen` is told
+otherwise, and `connections` accepts no more while it is full.
+
+Every connection has to end in a `serve` or a `reject`. On its way there it
+may wait at a boundary (`queue`, `concurrent`) and pass through stages that
+hand on every item they are given (`route`, `tap`, `take`). A stage that
+drops a connection or keeps it back (`filter`, `batch`, any other terminal,
+a `recover` that handles a failure before `serve`) does not close it and
+does not free its place: it stays open and counts as waiting until the run
+is over. So do not filter connections. Route the ones you will not serve to
+`reject`, which frees the place:
+
+```zig
+const admitted = route(.{
+    when(unwelcome, .{http.reject()}),
+    otherwise(.{http.serve(api)}),
+});
+```
 
 A connection is handed over once. A copy of it that reaches a second
-`serve` (a `branch` into two of them) fails that push with
+`serve` or `reject` (a `branch` into two of them) fails that push with
 `error.ConnectionTaken`, which fails the run like any other error, and the
-socket stays with the `serve` that took it.
+socket stays with whoever took it.
 
 Answers are collected in a 4 KiB buffer per connection and written before
 `serve` reads something that may not have arrived yet (a request head, or a

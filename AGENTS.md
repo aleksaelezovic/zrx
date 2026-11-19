@@ -188,9 +188,14 @@ to this file; edit `AGENTS.md`, not copies.
   compiles freestanding). `serve` holds a synchronous sub-pipe as
   `concurrent` does and constructs it per connection with that connection's
   `Response` added to the environment; a boundary inside it is a compile
-  error. The listener owns an accepted `Connection` until a `serve` takes
-  it and closes what nobody took after the run's tasks have returned;
-  `serve` closes what it took. A connection is handed over once, and the
+  error. The listener owns an accepted `Connection` until a `serve` or a
+  `reject` takes it and closes what nobody took after the run's tasks have
+  returned; whoever took it closes it. A `pending` slot measures "accepted
+  and not taken", and the listener cannot tell a connection that waits in a
+  queue from one a stage dropped, so `reject` is the one way to let go of a
+  connection and a dropped one keeps its slot until the run is over. That
+  is the rule the guide states; do not make the table evict, or the source
+  guess, to hide a pipe that drops. A connection is handed over once, and the
   listener checks that its slot still holds that connection (a generation
   per slot): a copy that comes second fails with `error.ConnectionTaken`
   and touches neither the slot nor the socket. Do not compare sockets for
