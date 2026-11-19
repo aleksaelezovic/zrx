@@ -85,6 +85,21 @@ to this file; edit `AGENTS.md`, not copies.
   The boundary registers workers through `Tasks` and `tasks` in the existing
   scope. Its `work` coordinates their ends; no nested supervisor or selective
   cancellation is used for successful completion.
+- **A sub-pipe may live for one item.** `each(source_of, sub)` is a nested
+  program per item: its stage keeps the environment and a pointer to its
+  operator, and for every item constructs `sub`'s stages, runs the item's
+  source into them and finishes them, all inside that item's `push`. That is
+  construction per item, not a lookup per item: a stage still copies what it
+  asked for when it is constructed. `attempt(sub, fallback)` is `orElse` for
+  a sub-pipe and follows its rules. Its tail puts a failure of the pipe
+  after it aside, answers `.done`, and `push` returns the failure once the
+  sub-pipe has returned: inside the sub-pipe it could not be told from the
+  sub-pipe's own, and a flag for it goes stale when a `recover` in there
+  swallows it. Neither may contain a task boundary, neither adds to the
+  stage contract, and both live in `src/ops/nested.zig` on the operator and
+  source contracts. `each` pairs what it emits with the item as
+  `Tagged(Item, T)`, where `Item` is the parameter type `source_of`
+  declares, as `fold` takes its state type from its reducer.
 - **A boundary splits a pipe into segments, each with a task.**
   [docs/spec-segments.md](docs/spec-segments.md) is the design record.
   Segment 0 is the source and the stages up to the first boundary. A program

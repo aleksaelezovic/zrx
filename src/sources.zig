@@ -230,8 +230,9 @@ fn Merge(comptime Ss: type) type {
     };
 }
 
-/// What `mergeTagged` emits when it is given an enum: an item and the source
-/// it came from.
+/// An item and where it came from. `mergeTagged` emits it when given an enum
+/// (`source` is the tag of the source); `each` emits it for what its sub-pipe
+/// emits (`source` is the item the sub-pipe ran for).
 pub fn Tagged(comptime Tag: type, comptime T: type) type {
     return struct { source: Tag, item: T };
 }

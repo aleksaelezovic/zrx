@@ -315,6 +315,22 @@ pub const WriteHeld = struct {
     }
 };
 
+/// An `Io` whose positional file reads fail with `error.InputOutput`, for
+/// showing what a source makes of a read that fails.
+pub const ReadFails = struct {
+    var vtable: std.Io.VTable = undefined;
+
+    pub fn over(io: std.Io) std.Io {
+        vtable = io.vtable.*;
+        vtable.fileReadPositional = fail;
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn fail(_: ?*anyopaque, _: std.Io.File, _: []const []u8, _: u64) std.Io.File.ReadPositionalError!usize {
+        return error.InputOutput;
+    }
+};
+
 /// An `Io` that holds the `nth` start of a task in a group until the task
 /// starting it has been asked to cancel, and leaves the request in place.
 /// One at a time: its state is global.

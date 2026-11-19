@@ -49,6 +49,26 @@ export fn zrx_cross_json(writer: *std.Io.Writer, first: u32, end: u32) bool {
     return true;
 }
 
+fn bytesOf(path: []const u8) zrx.FileBytes(256) {
+    return zrx.fileBytes(path, 256);
+}
+fn count(total: u64, piece: []const u8) u64 {
+    return total +% piece.len;
+}
+fn unread(_: anyerror, path: []const u8) zrx.Tagged([]const u8, u64) {
+    return .{ .source = path, .item = 0 };
+}
+
+export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
+    const sized = pipe(.{zrx.each(bytesOf, .{zrx.fold(@as(u64, 0), count)})});
+    const sizes = program(zrx.fromValue(@as([]const u8, std.mem.span(path))), pipe(.{
+        zrx.attempt(sized, unread),
+        zrx.drain(),
+    }));
+    sizes.run(.{io.*}) catch return false;
+    return true;
+}
+
 export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     const batches = program(zrx.range(u32, first, end), pipe(.{
         zrx.batchWithin(1000, .fromSeconds(60)),
