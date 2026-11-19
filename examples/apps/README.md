@@ -12,6 +12,7 @@ library's root build.
 | [Multi-file log analyzer](multi-file-log-analyzer/README.md) | Two logs read together, failures to an alerts file and counters per log (`mergeTagged`) |
 | [Offline telemetry](offline-telemetry/README.md) | Two sensor feeds as two programs, alerts as they are seen and timed windows archived (`system`, `route`, `batchWithin`) |
 | [HTTP benchmark](http-bench/README.md) | A zrx HTTP server and the same server on `std` alone, measured against each other (`zrx.ext.http`) |
+| [One Billion Row Challenge](one-billion-rows/README.md) | The station aggregate as two zrx programs and as a plain `std` loop, measured against each other |
 
 ## Project boundary
 
