@@ -76,6 +76,26 @@ fn describe(comptime B: type) []const u8 {
     return if (isResource(B)) "`" ++ @typeName(B) ++ "`" else "a value";
 }
 
+/// An environment handed on as it is: every element is a value, whatever
+/// its type looks like. A system gives its programs what it resolved this
+/// way; sorting those values into values and resources a second time would
+/// take a value that has the shape of a binding for a binding.
+pub fn Resolved(comptime Env: type) type {
+    return struct {
+        env: Env,
+
+        pub const zrx_resolved = {};
+    };
+}
+
+pub fn resolved(env: anytype) Resolved(@TypeOf(env)) {
+    return .{ .env = env };
+}
+
+fn isResolved(comptime Given: type) bool {
+    return @typeInfo(Given) == .@"struct" and @hasDecl(Given, "zrx_resolved");
+}
+
 /// Positions in `defaults ++ given`: the values, then the resources in the
 /// order they are acquired.
 const Plan = struct {
@@ -86,9 +106,9 @@ const Plan = struct {
 /// Plain values come first. Then, again and again, the first resource in
 /// written order whose needs are all there. A default whose type is also
 /// given is left out: it is neither provided nor acquired.
-fn plan(comptime Defaults: type, comptime Given: type) Plan {
+fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bool) Plan {
     @setEvalBranchQuota(di.quota);
-    const given = di.types(Bindings(Given));
+    const given = if (given_values) di.types(Given) else di.types(Bindings(Given));
     const all = di.types(Defaults) ++ given;
     const overridable = di.types(Defaults).len;
 
@@ -96,8 +116,10 @@ fn plan(comptime Defaults: type, comptime Given: type) Plan {
     var pending: []const usize = &.{};
     var available: []const type = &.{};
     next: for (all, 0..) |B, i| {
-        if (i < overridable) for (given) |Over| if (Provided(Over) == Provided(B)) continue :next;
-        if (isResource(B)) {
+        if (i < overridable) for (given) |Over| {
+            if ((if (given_values) Over else Provided(Over)) == Provided(B)) continue :next;
+        };
+        if (isResource(B) and (i < overridable or !given_values)) {
             pending = pending ++ [_]usize{i};
         } else {
             values = values ++ [_]usize{i};
@@ -160,9 +182,14 @@ fn stuck(comptime all: []const type, comptime pending: []const usize, comptime a
 /// from the `defaults` it does not replace. Resources are held around the
 /// call and released in the reverse of the order they were acquired in.
 pub fn run(defaults: anytype, given: anytype, program: anytype) !void {
+    if (comptime isResolved(@TypeOf(given))) return runWith(defaults, given.env, true, program);
+    return runWith(defaults, given, false, program);
+}
+
+fn runWith(defaults: anytype, given: anytype, comptime given_values: bool, program: anytype) !void {
     const Defaults = @TypeOf(defaults);
     const Given = @TypeOf(given);
-    const order = comptime plan(Defaults, Given);
+    const order = comptime plan(Defaults, Given, given_values);
     const types = comptime di.types(Defaults) ++ di.types(Given);
     const all: @Tuple(types) = defaults ++ given;
 

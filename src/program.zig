@@ -193,7 +193,7 @@ pub fn System(comptime Ps: type) type {
 
         fn runBound(self: *const @This(), env: anytype) !void {
             const Env = @TypeOf(env);
-            if (members.len == 1) return self.programs[0].run(env);
+            if (members.len == 1) return self.programs[0].run(resources.resolved(env));
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");
 
             const list = comptime blk: {
@@ -215,7 +215,7 @@ fn Member(comptime P: type, comptime Env: type) type {
         env: Env,
 
         pub fn run(self: @This()) !void {
-            return self.program.run(self.env);
+            return self.program.run(resources.resolved(self.env));
         }
     };
 }

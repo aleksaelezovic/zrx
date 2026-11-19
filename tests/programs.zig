@@ -301,6 +301,47 @@ test "what a system is given replaces program defaults, and a resource among it 
     try std.testing.expectEqual(@as(u32, 1), opened.closed.load(.seq_cst));
 }
 
+/// A value that happens to have the shape of a binding.
+const Shaped = struct {
+    tag: u32,
+
+    pub const zrx_resource = {};
+    pub const Provides = u64;
+    pub const needs: []const type = &.{};
+
+    pub fn bind(self: Shaped, _: anytype, next: anytype) !void {
+        return next.call(@as(u64, self.tag));
+    }
+};
+
+fn shape() Shaped {
+    return .{ .tag = 7 };
+}
+
+fn tagToLeft(sink: Left, shaped: Shaped, _: u32) void {
+    sink.seen.add(shaped.tag);
+}
+fn tagToRight(sink: Right, shaped: Shaped, _: u32) void {
+    sink.seen.add(shaped.tag);
+}
+
+test "what a resource provides reaches the programs of a system as the value it is" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const a = program(fromValue(@as(u32, 1)), .{forEach(tagToLeft)});
+    const b = program(fromValue(@as(u32, 2)), .{forEach(tagToRight)});
+    const sinks = .{ Left{ .seen = &left }, Right{ .seen = &right } };
+
+    // The resource provides a `Shaped`. A program takes it for that value...
+    try a.run(.{zrx.resource(shape, null)} ++ sinks);
+    // ...and so do the programs of a system, of one member and of two,
+    // which are handed what the system resolved.
+    try system(.{a}).run(.{zrx.resource(shape, null)} ++ sinks);
+    try system(.{ a, system(.{b}) }).run(.{ io, zrx.resource(shape, null) } ++ sinks);
+    try left.expect(&.{ 7, 7, 7 });
+    try right.expect(&.{7});
+}
+
 fn patiently(clock: std.Io, out: anytype) !void {
     var value: u32 = 0;
     while (value < 200) : (value += 1) {
