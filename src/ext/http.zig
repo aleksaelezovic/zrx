@@ -244,8 +244,9 @@ const Connections = struct {
                     else => |e| return e,
                 }
             };
-            // From here the listener closes the connection if no `serve`
-            // gets to: also when this push fails or is answered `.done`.
+            // From here the listener closes the connection unless a `serve`
+            // or a `reject` takes it: also when this push fails or is
+            // answered `.done`.
             const held = waiting.hold(io, stream);
             if (try down.push(Connection{ .stream = stream, .held = held }) == .done) return;
         }

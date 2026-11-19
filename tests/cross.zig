@@ -123,6 +123,10 @@ fn requestMethod(request: zrx.ext.http.Request) zrx.ext.http.Method {
     return request.method();
 }
 
+fn unwelcome(_: zrx.ext.http.Connection) bool {
+    return false;
+}
+
 export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
     const http = zrx.ext.http;
     const api = pipe(.{
@@ -134,7 +138,10 @@ export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
         }),
     });
     const server = program(http.connections(), .{
-        zrx.concurrent(2, .{ zrx.recover(http.disconnected), http.serve(api) }),
+        zrx.concurrent(2, .{zrx.route(.{
+            zrx.when(unwelcome, .{http.reject()}),
+            zrx.otherwise(.{ zrx.recover(http.disconnected), http.serve(api) }),
+        })}),
     }).provide(.{http.listen(.{ .ip4 = .loopback(port) }, .{})});
     server.run(.{io.*}) catch return false;
     return true;

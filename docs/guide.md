@@ -978,9 +978,9 @@ Every connection has to end in a `serve` or a `reject`. On its way there it
 may wait at a boundary (`queue`, `concurrent`) and pass through stages that
 hand on every item they are given (`route`, `tap`, `take`). A stage that
 drops a connection or keeps it back (`filter`, `batch`, any other terminal,
-a `recover` that handles a failure before `serve`) does not close it and
-does not free its place: it stays open and counts as waiting until the run
-is over. So do not filter connections. Route the ones you will not serve to
+a `recover` handling the failure of a stage the connection had not yet
+left for `serve`) does not close it and does not free its place: it stays
+open and counts as waiting until the run is over. So do not filter connections. Route the ones you will not serve to
 `reject`, which frees the place:
 
 ```zig
