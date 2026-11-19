@@ -94,7 +94,8 @@ not as a pipe.
 The two servers answer the workloads byte for byte alike, and refuse a body
 they cannot take with the same status. A `GET` of `/json` that carries a
 body is answered by both, with the body left alone and the connection
-closed. They differ where zrx is stricter or
+closed, and neither answers or judges an `Expect` on a request whose body
+it does not read. They differ where zrx is stricter or
 keeps a connection:
 
 - After a 404 or 405 without a body the baseline closes the connection and

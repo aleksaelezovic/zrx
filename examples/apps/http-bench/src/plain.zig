@@ -103,6 +103,15 @@ fn hasBody(request: *const Request) bool {
     return (request.head.content_length orelse 0) != 0;
 }
 
+/// For a request whose body is not read, as in the zrx server: an
+/// expectation about that body is neither answered nor judged, and since no
+/// request can be found behind such a body, the connection ends with the
+/// answer.
+fn leaveBody(request: *Request) void {
+    if (hasBody(request) or request.head.expect != null) request.head.keep_alive = false;
+    request.head.expect = null;
+}
+
 fn querySum(target: []const u8) i128 {
     const start = std.mem.findScalar(u8, target, '?') orelse return 0;
     var pairs = std.mem.splitScalar(u8, target[start + 1 ..], '&');
@@ -119,7 +128,10 @@ fn querySum(target: []const u8) i128 {
 fn baseline(request: *Request) !void {
     var sum = querySum(request.head.target);
     switch (request.head.method) {
-        .GET => if (hasBody(request)) return reject(request, .bad_request),
+        .GET => {
+            if (hasBody(request)) return reject(request, .bad_request);
+            leaveBody(request);
+        },
         .POST => {
             const length = request.head.content_length orelse return reject(request, .length_required);
             if (length > 32) return reject(request, .payload_too_large);
@@ -141,9 +153,7 @@ fn baseline(request: *Request) !void {
 
 fn json(request: *Request) !void {
     if (request.head.method != .GET) return reject(request, .method_not_allowed);
-    // A body is not looked at, as in the zrx server, and no request can be
-    // found behind one: the connection ends with this answer.
-    if (hasBody(request)) request.head.keep_alive = false;
+    leaveBody(request);
     var buffer: [64]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
     try std.json.Stringify.value(.{ .message = "Hello, World!" }, .{}, &writer);

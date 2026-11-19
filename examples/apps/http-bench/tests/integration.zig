@@ -70,6 +70,17 @@ test "both answer a GET of the greeting that carries a body, and close the conne
     try expectBoth(last_greeting, "GET /json HTTP/1.1\r\n" ++ host ++ "Content-Length: 2\r\n\r\n20" ++ get);
 }
 
+test "both leave an expectation unanswered where the body is not read, and close the connection" {
+    const last_sum = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\ncontent-type: text/plain\r\n\r\n55";
+    // No `100 Continue` for a body nobody is going to read, with or without
+    // one announced, and no judgement of an expectation nobody acts on.
+    try expectBoth(last_greeting, "GET /json HTTP/1.1\r\n" ++ host ++ "Content-Length: 2\r\nExpect: 100-continue\r\n\r\n20" ++ get);
+    try expectBoth(last_greeting, "GET /json HTTP/1.1\r\n" ++ host ++ "Expect: 100-continue\r\n\r\n" ++ get);
+    try expectBoth(last_greeting, "GET /json HTTP/1.1\r\n" ++ host ++ "Content-Length: 2\r\nExpect: luck\r\n\r\n20" ++ get);
+    try expectBoth(last_sum, "GET /baseline11?a=13&b=42 HTTP/1.1\r\n" ++ host ++ "Expect: 100-continue\r\n\r\n" ++ get);
+    try expectBoth(last_sum, "GET /baseline11?a=13&b=42 HTTP/1.1\r\n" ++ host ++ "Expect: luck\r\n\r\n" ++ get);
+}
+
 test "neither reads a chunked body" {
     try expectBoth(
         closed("411 Length Required"),
