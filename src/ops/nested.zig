@@ -147,6 +147,12 @@ fn Handled(comptime who: []const u8, comptime example: []const u8, comptime hand
             (if (@TypeOf(handled) == type) @typeName(handled) else @typeName(@TypeOf(handled))) ++
             "`; write `" ++ example ++ "`, where `" ++ handler ++ "` takes a `Failed(ParseError, Item)`",
     );
+    // Said where the set is written: what the guarded operators can fail
+    // with is not always known, but a set that takes nothing takes nothing.
+    if (!failure.takesAny(handled, .passes, anyerror)) @compileError(
+        who ++ ": `" ++ @typeName(handled) ++ "` holds no error an error path takes, so its path would never be taken. `error.Canceled` always passes, " ++
+            "whatever the set says; name the errors to take, such as `ParseError`, or `anyerror`",
+    );
     return handled;
 }
 

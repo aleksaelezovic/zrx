@@ -78,18 +78,16 @@ fn Rescue(comptime handler: anytype, comptime Own: type) type {
     @setEvalBranchQuota(di.quota);
     if (!di.isHandler(handler)) @compileError("rescue: expected a handler `fn (deps..., err) void`, got `" ++ @typeName(@TypeOf(handler)) ++ "`");
     const Declared: ?type = di.Param(handler, 1, 0);
-    if (Declared) |E| {
-        if (@typeInfo(E) != .error_set) @compileError(
-            "rescue: the handler's data parameter is the failure of the run, so it must be an error set, `anyerror` or `anytype`, got `" ++ @typeName(E) ++ "`",
-        );
-        // Checked here, where the rescue is written, and not where it is
-        // called: a run that cannot fail never calls it.
-        expectNothing(di.Result("rescue", handler, &.{E}));
-    }
+    if (Declared) |E| if (@typeInfo(E) != .error_set) @compileError(
+        "rescue: the handler's data parameter is the failure of the run, so it must be an error set, `anyerror` or `anytype`, got `" ++ @typeName(E) ++ "`",
+    );
+    // Checked here, where the rescue is written, and not where it is
+    // called: a run that cannot fail never calls it.
+    if (declaredReturn(handler)) |Returned| expectNothing(Returned);
     return struct {
         bindings: Own,
 
-        pub const zrx_rescue = {};
+        pub const zrx_rescue: Mark = .{};
 
         const Self = @This();
 
@@ -110,7 +108,12 @@ fn Rescue(comptime handler: anytype, comptime Own: type) type {
         /// that cannot fail.
         fn check(comptime Values: type, comptime Possible: type, comptime held: []const type) void {
             @setEvalBranchQuota(di.quota);
-            expectNothing(di.Result("rescue", handler, &.{Taken(Possible)}));
+            // A return type that is not declared exists only for the errors
+            // the handler is called with. With none, there is no call to
+            // ask about, and asking would have the handler's body checked
+            // against errors that cannot occur.
+            if (declaredReturn(handler) == null and callable(Taken(Possible)))
+                expectNothing(di.Result("rescue", handler, &.{Taken(Possible)}));
             // Its own bindings must be acquirable from the values alone.
             const own = plan(Own, Values, true, true);
             var provided: []const type = di.types(Values);
@@ -154,6 +157,19 @@ fn Rescue(comptime handler: anytype, comptime Own: type) type {
     };
 }
 
+/// What `handler` says it returns, where that does not depend on what it
+/// is called with. Read from its type: nothing of its body is looked at.
+fn declaredReturn(comptime handler: anytype) ?type {
+    if (@typeInfo(@TypeOf(handler)) != .@"fn") return null; // a composite handler
+    return @typeInfo(@TypeOf(handler)).@"fn".return_type;
+}
+
+/// Whether a handler that takes `Taken` can be called at all.
+fn callable(comptime Taken: type) bool {
+    const names = @typeInfo(Taken).error_set.error_names orelse return true; // anyerror
+    return names.len != 0;
+}
+
 fn expectNothing(comptime Returned: type) void {
     if (Returned != void) @compileError(
         "rescue: the handler must return `void`, got `" ++ @typeName(Returned) ++ "`; it is the last to be given the failure, and `run` returns nothing. " ++
@@ -170,8 +186,19 @@ fn OwnBindings(comptime A: type, comptime B: type) type {
     return Bindings(@Tuple(di.types(A) ++ di.types(B)));
 }
 
+/// Marks what only this file makes: a rescue, and an environment handed on
+/// as resolved. The type is private, so nothing a caller declares carries
+/// it, whatever the caller names its declarations. A resource is told by
+/// `zrx_resource` alone because that is the contract a caller writes one
+/// against; these two have no such contract.
+const Mark = struct {};
+
+fn isMarked(comptime B: type, comptime mark: []const u8) bool {
+    return @typeInfo(B) == .@"struct" and @hasDecl(B, mark) and @TypeOf(@field(B, mark)) == Mark;
+}
+
 fn isRescue(comptime B: type) bool {
-    return @typeInfo(B) == .@"struct" and @hasDecl(B, "zrx_rescue");
+    return isMarked(B, "zrx_rescue");
 }
 
 fn isResource(comptime B: type) bool {
@@ -219,7 +246,7 @@ pub fn Resolved(comptime Env: type, comptime is_rescued: bool) type {
     return struct {
         env: Env,
 
-        pub const zrx_resolved = {};
+        pub const zrx_resolved: Mark = .{};
         pub const rescued = is_rescued;
     };
 }
@@ -229,7 +256,7 @@ pub fn resolved(env: anytype, comptime rescued: bool) Resolved(@TypeOf(env), res
 }
 
 fn isResolved(comptime Given: type) bool {
-    return @typeInfo(Given) == .@"struct" and @hasDecl(Given, "zrx_resolved");
+    return isMarked(Given, "zrx_resolved");
 }
 
 /// Positions in `defaults ++ given`: the values, then the resources in the

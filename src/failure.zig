@@ -59,9 +59,16 @@ pub fn Named(comptime Possible: type) type {
 }
 
 /// Whether `E` takes at least one error that `Possible` holds. Where
-/// `Possible` is `anyerror` it may.
+/// `Possible` is `anyerror`, that is whether `E` takes anything at all: a
+/// set of nothing but a cancellation takes nothing where one passes.
 pub fn takesAny(comptime E: type, comptime cancellation: Cancellation, comptime Possible: type) bool {
-    const possible = @typeInfo(Possible).error_set.error_names orelse return true;
+    const possible = @typeInfo(Possible).error_set.error_names orelse {
+        const own = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+        inline for (own) |error_name| {
+            if (comptime takes(E, cancellation, error_name)) return true;
+        }
+        return false;
+    };
     inline for (possible) |error_name| {
         if (comptime takes(E, cancellation, error_name)) return true;
     }

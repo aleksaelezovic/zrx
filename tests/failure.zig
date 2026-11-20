@@ -92,5 +92,12 @@ test "a set takes any of what is possible, or it would never be asked" {
     try std.testing.expect(!failure.takesAny(error{Canceled}, .passes, Known));
     try std.testing.expect(failure.takesAny(error{Canceled}, .taken, Known));
     try std.testing.expect(!failure.takesAny(anyerror, .passes, error{Canceled}));
+    // Where anything is possible, a set takes some of it unless it takes
+    // nothing at all.
     try std.testing.expect(failure.takesAny(error{Never}, .passes, anyerror));
+    try std.testing.expect(failure.takesAny(anyerror, .passes, anyerror));
+    try std.testing.expect(!failure.takesAny(error{Canceled}, .passes, anyerror));
+    try std.testing.expect(!failure.takesAny(error{}, .passes, anyerror));
+    try std.testing.expect(failure.takesAny(error{Canceled}, .taken, anyerror));
+    try std.testing.expect(!failure.takesAny(error{}, .taken, anyerror));
 }

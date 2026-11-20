@@ -414,8 +414,9 @@ const manifest = pipe(.{
 
 - `E` selects what the path takes: an error set takes its members and lets
   every other error of `sub` fail the run; `anyerror` takes everything.
-  `error.Canceled` is never taken. What the path takes is no longer among
-  what the run can fail with.
+  `error.Canceled` is never taken, so a set that holds nothing else is a
+  compile error, as is one none of whose errors `sub` can fail with. What
+  the path takes is no longer among what the run can fail with.
 - The path emits what the sub-pipe emits. It keeps its state for the whole
   stream and has an end of the stream of its own, after the sub-pipe's. A
   path that wants no more ends the stream; a path that fails fails the run.
@@ -536,7 +537,9 @@ pub fn main(init: std.process.Init) u8 {
 - The handler's error parameter says what it takes: `anyerror`, an error
   set that holds every error the run can fail with, or `anytype`, with
   which it is given exactly those errors, so that a `switch` over them is
-  checked by the compiler.
+  checked by the compiler. For a run that cannot fail it is not checked
+  at all: a program's rescue stays valid when a test replaces the one
+  resource that could fail.
 - A cancellation is given to it like any failure. An error path never takes
   one, because it is no item's, but this is where the run ends. The request
   to cancel is used up by then: a handler whose caller is itself a task that

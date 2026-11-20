@@ -428,6 +428,48 @@ test "a rescue given to run replaces the one a program provides" {
     try journal.expect("!");
 }
 
+/// Names the one error it can be given.
+fn noteRefused(failure: *Failure, err: anytype) void {
+    failure.err = switch (err) {
+        error.Refused => error.Refused,
+    };
+    failure.calls += 1;
+}
+
+test "a rescue stays valid for a run that what it is given makes unable to fail" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const app = program(range(u32, 0, 2), pipe(.{ map(useSession), forEach(record) }))
+        .provide(.{ resource(connect, disconnect), resource(sessionOrRefuse, closeSession), rescue(noteRefused) });
+    app.run(.{ &journal, &seen, &failure });
+    // A session given as a value: nothing is left that can fail, and the
+    // handler is never called. Its body names an error that cannot occur
+    // here, and is not held against that.
+    app.run(.{ &journal, &seen, &failure, Session{ .id = 100 } });
+    try std.testing.expectEqual(Failure{}, failure);
+    try seen.expect(&.{ 8, 9, 100, 101 });
+}
+
+/// A dependency of the caller's own, with declarations named like the ones
+/// this library marks a rescue and a resolved environment with.
+const Lookalike = struct {
+    by: u32,
+
+    pub const zrx_rescue = {};
+    pub const zrx_resolved = {};
+    pub const rescued = true;
+};
+fn scaleLike(like: Lookalike, value: u32) u32 {
+    return value * like.by;
+}
+
+test "a dependency is a dependency, whatever it names its declarations" {
+    var seen: Numbers = .{};
+    program(range(u32, 1, 3), pipe(.{ map(scaleLike), forEach(record) })).run(.{ &seen, Lookalike{ .by = 5 } });
+    try seen.expect(&.{ 5, 10 });
+}
+
 const Notes = struct { text: []const u8 };
 fn noteText(journal: *Journal, notes: Notes, _: anyerror) void {
     for (notes.text) |byte| journal.add(byte);

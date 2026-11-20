@@ -127,6 +127,27 @@ to this file; edit `AGENTS.md`, not copies.
   code every run reaches. Inside a `catch`, or a branch a particular
   program never takes, it is not a check: a rescue whose handler returned
   a value compiled on every run that could not fail.
+- **Check by reading a type, not by calling the handler into being.** The
+  fix for the above asked a generic handler for its result with the
+  errors of the run, and for a run that cannot fail those are none: the
+  handler's body was then checked against an empty set, and a valid
+  `switch` over the one error it was written for no longer compiled.
+  `declaredReturn` reads the return type off the function type. Only a
+  return type that depends on the argument is asked for by a call, and
+  only with errors that can occur.
+- **What only this library makes is marked by a private type, not a
+  name.** A rescue and a resolved environment carry a declaration of the
+  type `Mark`, private to `src/resources.zig`, as a program carries
+  `Own`. A declaration merely named `zrx_rescue` on a caller's
+  dependency once had that dependency taken out of the environment.
+  `zrx_resource`, `zrx_operator` and the like are told by name because
+  they are contracts a caller writes against.
+- **A set that can take nothing is refused where it is written.**
+  `recover(error{Canceled}, ...)` and `attempt(sub, error{Canceled}, ...)`
+  have a path nobody can reach, since a cancellation always passes. The
+  overlap check of `attempt` used to say "it may" whenever the sub-pipe
+  could fail with anything; `takesAny` now asks whether the set takes
+  anything at all.
 - **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and

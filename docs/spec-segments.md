@@ -207,7 +207,8 @@ nothing has no rescue to call.
     rescue is given exactly the errors of the run, and a cancellation like
     any of them", "a rescue given to run replaces the one a program
     provides", "a value given to run replaces what a rescue was given for
-    itself" (`tests/di.zig`), "a rescue takes a failure from beyond a
+    itself", "a rescue stays valid for a run that what it is given makes
+    unable to fail" (`tests/di.zig`), "a rescue takes a failure from beyond a
     queue", "a rescue of a program with a task boundary is given exactly
     its errors", "a system's rescue takes the failure of a member, in place
     of the member's own", "a system of one program leaves the failure to
@@ -216,7 +217,8 @@ nothing has no rescue to call.
     (`tests/programs.zig`), and the compile-fail cases `run_leaves`,
     `run_leaves_any`, `rescue_leaves`, `rescue_needs_resource`,
     `rescue_own_fails`, `rescue_fails`, `rescue_returns`,
-    `rescue_returns_generic` and `system_leaves`.*
+    `rescue_returns_generic`, `rescue_returns_dependent` and
+    `system_leaves`.*
 
 ## Not promised
 
