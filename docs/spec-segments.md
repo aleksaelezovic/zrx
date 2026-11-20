@@ -179,6 +179,31 @@ moment inside the run.
     sub-pipe fails becomes one value" (`tests/nested.zig`), and the four
     "invariants" with an `each` or an `attempt` (`tests/flow.zig`).*
 
+15. **A rescued failure.** With a `rescue(handler)` among its bindings, a
+    run does not return a failure the handler takes. The handler is called
+    once with it, after every task of the program has returned and what
+    was acquired after the rescue has been released, and before what the
+    handler needs is released; `run` returns what the handler returns. A
+    rescue is acquired before every resource it does not need, wherever it
+    is written. `run` still returns a failure the handler does not take,
+    `error.Canceled`, and a failure of acquiring what the handler needs.
+    A rescue given to a system takes the failure that ends the system; a
+    member's own rescue, in a system that is given none, takes that
+    member's failure, and the system does not fail.
+    *Tests: "a rescue is called once with the failure of the run, which
+    then is not what run returns", "a rescue is not called for a run that
+    succeeds", "a rescue is given a failure once what was acquired after it
+    is released, and holds what it needs", "a rescue guards all it can,
+    wherever it is written", "a failure of acquiring what a rescue needs is
+    what run returns", "a rescue with an error set lets other errors
+    through", "a rescue that takes anytype is given exactly the errors of
+    the run, and never a cancellation", "a rescue given to run replaces the
+    one a program provides", "a rescue that fails fails the run with its
+    own error" (`tests/di.zig`), "a rescue takes a failure from beyond a
+    queue", "a system's rescue takes the failure of a member, in place of
+    the member's own", "a member with a rescue of its own does not fail its
+    system" (`tests/programs.zig`).*
+
 ## Not promised
 
 A review finding against one of these is answered by pointing here.

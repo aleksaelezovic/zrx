@@ -116,7 +116,8 @@ given, a type has one provider; a second one is a compile error. The
 resulting environment is shared by the source and all stages, including
 branch and route cases.
 
-A binding is a value, which provides its own type, or a *resource*.
+A binding is a value, which provides its own type, a *resource*, or a
+[`rescue`](#the-failure-of-a-run).
 `resource(acquire, release)` calls `acquire(deps...)` once per run and
 provides what it returns. `release(deps..., value)` returns `void`. Use
 `null` for a computed binding that needs no release. `stdout`, `stderr` and
@@ -376,7 +377,8 @@ after every resource has been released. `run`'s error set is inferred from your
 handlers and the operators you used: it is `anyerror` only if a handler's is,
 and a program whose handlers cannot fail has an empty one.
 
-There are three ways to handle an error instead. To keep the item as a value
+There are three ways to handle an item's error instead, and one for a
+failure of the run itself (see [below](#the-failure-of-a-run)). To keep the item as a value
 of your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `rejected(deps..., err, item)` when `parse` fails and passes its result on.
 `require` goes the other way, from a value to an error:
@@ -470,6 +472,50 @@ What the path does with a failure decides how it ends:
   fail the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
+
+### The failure of a run
+
+Some failures belong to no item: a source that cannot read, a flush at the
+end of the stream, a resource that cannot be acquired, anything beyond a
+task boundary. An error path cannot take them. They are what `run` returns,
+unless a `rescue` is among the bindings:
+
+```zig
+const Exit = enum(u8) { ok, failed };
+
+/// Whatever ends the run: a line on stderr and a status for `main`.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.* = .failed;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
+
+const app = program(source, records).provide(.{
+    stderr(256),
+    rescue(fatal),
+    fileWriter(Accepted, path, 4096, .{ .mode = .create_new }),
+});
+```
+
+`rescue(handler)` is a binding, like a resource. `handler(deps..., err)` is
+called once with the failure, and `run` returns what the handler returns:
+nothing, or an error of the handler's own.
+
+- It guards what is acquired after it and the run itself. Their failures
+  reach the handler once they have been released, while what the handler
+  needs is still held: above, the file is closed and stderr is open.
+- It is acquired as soon as what its handler needs is there, wherever it is
+  written. A failure of acquiring what the handler itself needs (the
+  `stderr` above) is not guarded and is what `run` returns.
+- The handler's error parameter selects what it takes, as the `E` of a
+  `recover` does: an error set, or `anyerror`. With `anytype` it is given
+  exactly the errors the run can fail with, so a `switch` over them is
+  checked by the compiler. `error.Canceled` is never given to it. What it
+  takes is no longer in `run`'s error set.
+- A run has one rescue. Given to `run`, it replaces the one a program
+  provides; given to a `system`, it takes the failure that ends the system,
+  in place of the members' own. A member with a rescue of its own, in a
+  system without one, takes its own failure and the other programs go on.
 
 ## Stopping early
 

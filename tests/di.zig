@@ -10,6 +10,7 @@ const map = zrx.map;
 const filter = zrx.filter;
 const tap = zrx.tap;
 const resource = zrx.resource;
+const rescue = zrx.rescue;
 const branch = zrx.branch;
 const forEach = zrx.forEach;
 
@@ -274,6 +275,184 @@ test "a resource without release is a dependency computed from others" {
     const work = pipe(.{ map(shift), forEach(record) });
     try program(range(u32, 1, 3), work).provide(.{resource(derive, null)}).run(.{ Scale{ .by = 2 }, &seen });
     try seen.expect(&.{ 201, 202 });
+}
+
+// --- rescue ---------------------------------------------------------------
+
+/// What a rescue was called with, and how often.
+const Failure = struct { err: ?anyerror = null, calls: u32 = 0 };
+
+fn noteFailure(journal: *Journal, failure: *Failure, err: anyerror) void {
+    journal.add('!');
+    failure.err = err;
+    failure.calls += 1;
+}
+
+/// The errors a run can still return, from the type of its result: their
+/// names, each followed by a space.
+fn remaining(comptime Result: type) []const u8 {
+    comptime var text: []const u8 = "";
+    inline for (@typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names.?) |error_name| text = text ++ error_name ++ " ";
+    return text;
+}
+
+test "a rescue is called once with the failure of the run, which then is not what run returns" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const work = pipe(.{ map(failing), forEach(record) });
+    const guarded = program(range(u32, 0, 3), work);
+    const deps = .{ &journal, &seen, &failure, rescue(noteFailure) };
+    try std.testing.expectEqualStrings("", comptime remaining(@TypeOf(guarded.run(deps))));
+    try guarded.run(deps);
+    try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
+    try seen.expect(&.{0});
+}
+
+test "a rescue is not called for a run that succeeds" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    try program(range(u32, 2, 4), pipe(.{ map(failing), forEach(record) })).run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    try std.testing.expectEqual(Failure{}, failure);
+    try seen.expect(&.{ 2, 3 });
+}
+
+fn noteHoldingConnection(journal: *Journal, _: Connection, failure: *Failure, err: anyerror) void {
+    noteFailure(journal, failure, err);
+}
+
+test "a rescue is given a failure once what was acquired after it is released, and holds what it needs" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const bindings = .{ resource(connect, disconnect), resource(openSession, closeSession), rescue(noteHoldingConnection) };
+    try program(range(u32, 0, 3), pipe(.{ map(failing), map(useSession), forEach(record) })).provide(bindings).run(.{ &journal, &seen, &failure });
+    // The connection, the session, one item, the session closed, the
+    // rescue, the connection closed.
+    try journal.expect("CS.s!c");
+    try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
+
+    // A resource that cannot be acquired after it fails the run as well.
+    journal = .{};
+    failure = .{};
+    const refusing = .{ resource(connect, disconnect), resource(refuse, closeSession), rescue(noteHoldingConnection) };
+    try program(range(u32, 0, 3), pipe(.{ map(useSession), forEach(record) })).provide(refusing).run(.{ &journal, &seen, &failure });
+    try journal.expect("CX!c");
+    try std.testing.expectEqual(Failure{ .err = error.Refused, .calls = 1 }, failure);
+}
+
+test "a rescue guards all it can, wherever it is written" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    // Given to `run`, it is written after the program's own resources. It
+    // needs none of them, so it is there before they are acquired.
+    const app = program(range(u32, 0, 3), pipe(.{ map(useSession), forEach(record) }))
+        .provide(.{ resource(connect, disconnect), resource(refuse, closeSession) });
+    try app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    try journal.expect("CXc!");
+    try std.testing.expectEqual(Failure{ .err = error.Refused, .calls = 1 }, failure);
+}
+
+fn noNetwork(journal: *Journal) error{NoNetwork}!Connection {
+    journal.add('N');
+    return error.NoNetwork;
+}
+
+test "a failure of acquiring what a rescue needs is what run returns" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const app = program(range(u32, 0, 3), pipe(.{forEach(record)})).provide(.{ resource(noNetwork, disconnect), rescue(noteHoldingConnection) });
+    try std.testing.expectError(error.NoNetwork, app.run(.{ &journal, &seen, &failure }));
+    try journal.expect("N");
+    try std.testing.expectEqual(Failure{}, failure);
+}
+
+fn noteBoom(failure: *Failure, err: error{Boom}) void {
+    failure.err = err;
+    failure.calls += 1;
+}
+
+test "a rescue with an error set lets other errors through" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const refusing = program(range(u32, 0, 3), pipe(.{ map(failing), map(useSession), forEach(record) }))
+        .provide(.{ resource(connect, disconnect), resource(refuse, closeSession), rescue(noteBoom) });
+    const deps = .{ &journal, &seen, &failure };
+    try std.testing.expectEqualStrings("Refused ", comptime remaining(@TypeOf(refusing.run(deps))));
+    try std.testing.expectError(error.Refused, refusing.run(deps));
+    try std.testing.expectEqual(Failure{}, failure);
+
+    const failing_later = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) })).provide(.{rescue(noteBoom)});
+    try failing_later.run(deps);
+    try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
+}
+
+/// Names every error it can be given: this compiles only if those are
+/// exactly the errors of the run, a cancellation left out.
+fn noteExactly(failure: *Failure, err: anytype) void {
+    failure.err = switch (err) {
+        error.Boom => error.Boom,
+        error.Refused => error.Refused,
+    };
+    failure.calls += 1;
+}
+
+fn interrupted(value: u32) error{ Boom, Canceled }!u32 {
+    if (value == 1) return error.Canceled;
+    if (value == 2) return error.Boom;
+    return value;
+}
+fn sessionOrRefuse(journal: *Journal, connection: Connection) error{Refused}!Session {
+    return openSession(journal, connection);
+}
+
+test "a rescue that takes anytype is given exactly the errors of the run, and never a cancellation" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    inline for (.{ noteExactly, noteFailure }) |handler| {
+        const app = program(range(u32, 0, 3), pipe(.{ map(interrupted), forEach(record) }));
+        const deps = .{ &journal, &seen, &failure, rescue(handler), resource(connect, disconnect), resource(sessionOrRefuse, closeSession) };
+        try std.testing.expectEqualStrings("Canceled ", comptime remaining(@TypeOf(app.run(deps))));
+        try std.testing.expectError(error.Canceled, app.run(deps));
+        try std.testing.expectEqual(Failure{}, failure);
+    }
+}
+
+fn noteDefault(journal: *Journal, _: anyerror) void {
+    journal.add('d');
+}
+
+test "a rescue given to run replaces the one a program provides" {
+    var journal: Journal = .{};
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const app = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) })).provide(.{rescue(noteDefault)});
+    try app.run(.{ &journal, &seen });
+    try journal.expect("d");
+    journal = .{};
+    try app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    try journal.expect("!");
+}
+
+fn giveUp(failure: *Failure, err: anyerror) error{Lost}!void {
+    failure.err = err;
+    failure.calls += 1;
+    return error.Lost;
+}
+
+test "a rescue that fails fails the run with its own error" {
+    var seen: Numbers = .{};
+    var failure: Failure = .{};
+    const app = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) }));
+    const deps = .{ &seen, &failure, rescue(giveUp) };
+    try std.testing.expectEqualStrings("Lost ", comptime remaining(@TypeOf(app.run(deps))));
+    try std.testing.expectError(error.Lost, app.run(deps));
+    try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
 }
 
 // --- generic handlers -----------------------------------------------------

@@ -406,6 +406,74 @@ test "the first failure in a system is returned" {
     try left.expect(&.{ 0, 1 });
 }
 
+/// What a rescue was called with, and how often. One for a program and one
+/// for the system it is in: they are called on different tasks.
+const Failure = struct { err: ?anyerror = null, calls: u32 = 0 };
+const SystemFailure = struct { err: ?anyerror = null, calls: u32 = 0 };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+    failure.calls += 1;
+}
+fn noteSystemFailure(failure: *SystemFailure, err: anyerror) void {
+    failure.err = err;
+    failure.calls += 1;
+}
+
+test "a rescue takes a failure from beyond a queue" {
+    var left: Numbers = .{};
+    var failure: Failure = .{};
+    const queued = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    try queued.run(.{ io, Left{ .seen = &left }, &failure, zrx.rescue(noteFailure) });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, failure);
+    try left.expect(&.{ 0, 1 });
+}
+
+/// Names every error it can be given. The run can also be cancelled, which
+/// is not one of them.
+fn noteQueued(failure: *Failure, err: anytype) void {
+    failure.err = switch (err) {
+        error.Two => error.Two,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+    };
+    failure.calls += 1;
+}
+
+test "a rescue of a program with a task boundary need not name a cancellation" {
+    var left: Numbers = .{};
+    var failure: Failure = .{};
+    const queued = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    try queued.run(.{ io, Left{ .seen = &left }, &failure, zrx.rescue(noteQueued) });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, failure);
+}
+
+test "a system's rescue takes the failure of a member, in place of the member's own" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var member: Failure = .{};
+    var whole: SystemFailure = .{};
+    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), forEach(toLeft) })).provide(.{zrx.rescue(noteFailure)});
+    const slow = program(fromProducer(u32, patiently), pipe(.{forEach(toRight)}));
+    try system(.{ failing, slow }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, &member, &whole, zrx.rescue(noteSystemFailure) });
+    // What the system is given replaces a member's default: the failure
+    // ended the system, and the system's rescue was given it.
+    try std.testing.expectEqual(SystemFailure{ .err = error.Two, .calls = 1 }, whole);
+    try std.testing.expectEqual(Failure{}, member);
+    try left.expect(&.{ 0, 1 });
+}
+
+test "a member with a rescue of its own does not fail its system" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    var member: Failure = .{};
+    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), forEach(toLeft) })).provide(.{zrx.rescue(noteFailure)});
+    const steady = program(range(u32, 0, 5), pipe(.{forEach(toRight)}));
+    try system(.{ failing, steady }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, &member });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, member);
+    try left.expect(&.{ 0, 1 });
+    try right.expect(&.{ 0, 1, 2, 3, 4 });
+}
+
 fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
     for (names) |name| if (std.mem.eql(u8, name, wanted)) return true;
     return false;

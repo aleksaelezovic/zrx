@@ -74,6 +74,16 @@ test "recoveredOrFailed" {
     }
 }
 
+test "rescued" {
+    for (inputs) |items| {
+        var with: struct { u32, u64, bool } = .{ 0, 0, false };
+        var without: struct { u32, u64, bool } = .{ 0, 0, false };
+        cases.rescued(true, items, &with[0], &with[1], &with[2]);
+        cases.rescued(false, items, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
 test "combined" {
     const orders = [_]cases.Order{
         .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 500 }, .{ .id = 3, .price = 99 },

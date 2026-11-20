@@ -88,6 +88,21 @@ to this file; edit `AGENTS.md`, not copies.
   handler before; that is a path of `forEach(handler)`, and there is no
   second spelling. A path cannot contain a task boundary: that would make
   `recover` one more shape for the scope to be tested with.
+- **The failure of a run goes to a binding, not to a path.** Failures that
+  belong to no item (a source, the end of the stream, a resource, another
+  task) are outside every pipe. `rescue(handler)` is where they go instead
+  of into what `run` returns: a resource in every respect but one,
+  written against the binding contract in `src/resources.zig`. Its `bind`
+  calls `next` and catches what comes back, so it guards what is acquired
+  after it and runs while what it needs is held, and its `needs` are its
+  handler's. The one thing the planner knows about it: of the bindings
+  that are ready, a rescue is acquired first, so that where it is written
+  decides nothing. It provides the marker type `Rescued`, which is what
+  makes a run have one rescue and lets `run` replace a program's. It takes
+  a handler and not a pipe on purpose: it is given one value once, and a
+  pipe does not say what it needs, which a binding must. It selects by
+  its error parameter as `recover` does by `E`, never takes
+  `error.Canceled`, and returns what it does not take by name.
 - **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and

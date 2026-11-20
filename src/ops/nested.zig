@@ -206,7 +206,7 @@ fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
             if (@typeInfo(Own).error_set.error_names) |names| {
                 if (names.len == 0) @compileError("attempt: the sub-pipe cannot fail; there is nothing to fall back from");
                 for (names) |error_name| {
-                    if (takes(E, error_name)) break;
+                    if (di.takesError(E, error_name)) break;
                 } else @compileError(
                     "attempt: the sub-pipe cannot fail with an error in `" ++ @typeName(E) ++ "`, so the error path would never be taken; it can fail with `" ++ errorNames(Own) ++ "`",
                 );
@@ -293,7 +293,7 @@ fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
                             // take is returned by its name.
                             inline for (possible) |error_name| {
                                 if (any == @field(anyerror, error_name)) {
-                                    if (comptime !takes(E, error_name)) return @field(anyerror, error_name);
+                                    if (comptime !di.takesError(E, error_name)) return @field(anyerror, error_name);
                                     return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
                                 }
                             }
@@ -302,7 +302,7 @@ fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
                         if (any == error.Canceled) return err;
                         if (comptime @typeInfo(E).error_set.error_names) |names| {
                             inline for (names) |error_name| {
-                                if (comptime takes(E, error_name)) {
+                                if (comptime di.takesError(E, error_name)) {
                                     if (any == @field(anyerror, error_name)) return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
                                 }
                             }
@@ -366,15 +366,6 @@ fn Handled(comptime who: []const u8, comptime example: []const u8, comptime hand
     return handled;
 }
 
-/// Whether an error path for `E` takes the error of this name. A
-/// cancellation is not a failure to take.
-fn takes(comptime E: type, comptime error_name: []const u8) bool {
-    if (std.mem.eql(u8, error_name, "Canceled")) return false;
-    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
-    for (names) |have| if (std.mem.eql(u8, have, error_name)) return true;
-    return false;
-}
-
 fn Recover(comptime E: type, comptime P: type) type {
     return struct {
         path: P,
@@ -418,7 +409,7 @@ fn Recover(comptime E: type, comptime P: type) type {
                             // error set of this push.
                             inline for (possible) |error_name| {
                                 if (any == @field(anyerror, error_name)) {
-                                    if (comptime !takes(E, error_name)) return @field(anyerror, error_name);
+                                    if (comptime !di.takesError(E, error_name)) return @field(anyerror, error_name);
                                     return self.divert(@errorCast(any), item);
                                 }
                             }
@@ -427,7 +418,7 @@ fn Recover(comptime E: type, comptime P: type) type {
                         if (any == error.Canceled) return err;
                         if (comptime @typeInfo(E).error_set.error_names) |names| {
                             inline for (names) |error_name| {
-                                if (comptime takes(E, error_name)) {
+                                if (comptime di.takesError(E, error_name)) {
                                     if (any == @field(anyerror, error_name)) return self.divert(@errorCast(any), item);
                                 }
                             }

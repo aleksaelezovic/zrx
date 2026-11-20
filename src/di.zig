@@ -162,6 +162,16 @@ pub fn Param(comptime handler: anytype, comptime arity: usize, comptime i: usize
 
 /// Whether a value of type `Arg` may be passed where `Want` is declared.
 /// Deliberately small: exact match, optional wrapping, and adding `const`.
+/// Whether something that takes the failures in `E` (an error set, or
+/// `anyerror`) takes the error of this name. A cancellation is not a
+/// failure: nothing takes it.
+pub fn takesError(comptime E: type, comptime error_name: []const u8) bool {
+    if (std.mem.eql(u8, error_name, "Canceled")) return false;
+    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+    for (names) |have| if (std.mem.eql(u8, have, error_name)) return true;
+    return false;
+}
+
 pub fn accepts(comptime Want: type, comptime Arg: type) bool {
     if (Want == Arg) return true;
     switch (@typeInfo(Want)) {

@@ -301,6 +301,46 @@ export fn same_recover_fail(ptr: [*]const u32, len: usize, rejected: *u32, out: 
     return recoveredOrFailed(exported_with_zrx, ptr[0..len], rejected, out);
 }
 
+// --- rescue -----------------------------------------------------------------------------
+
+const Failure = struct { seen: *bool };
+
+/// Names every error of the run: with it bound, nothing is left to return.
+fn noteFailure(failure: Failure, err: anytype) void {
+    switch (err) {
+        error.Zero => failure.seen.* = true,
+    }
+}
+
+/// The failure of the run goes to a binding instead of to the caller.
+pub fn rescued(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64, failed: *bool) void {
+    if (with_zrx) {
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countOrFail)}), map(checked), tap(accumulate), drain() });
+        run(program(fromSlice(items), total), .{
+            Rejected{ .count = rejected },
+            Result{ .out = out },
+            Failure{ .seen = failed },
+            zrx.rescue(noteFailure),
+        });
+    } else {
+        for (items) |value| {
+            if (value < 10) {
+                if (value == 0) {
+                    failed.* = true;
+                    return;
+                }
+                rejected.* +%= 1;
+            } else {
+                out.* +%= value;
+            }
+        }
+    }
+}
+
+export fn same_rescue(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64, failed: *bool) void {
+    rescued(exported_with_zrx, ptr[0..len], rejected, out, failed);
+}
+
 // --- handler combinators ----------------------------------------------------------------
 
 pub const Order = extern struct { id: u32, price: u32 };

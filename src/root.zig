@@ -46,6 +46,7 @@ pub const drain = sink.drain;
 
 // Program resources
 pub const resource = @import("resources.zig").resource;
+pub const rescue = @import("resources.zig").rescue;
 
 // Flow operators
 const flow = @import("ops/flow.zig");
