@@ -18,16 +18,12 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
 
-fn isOdd(_: error{Odd}, _: u32) bool {
-    return true;
-}
-
-// The fallback stands in for what the sub-pipe emits.
+// The errors to take stand between the sub-pipe and the error path.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, isOdd), forEach(ignore) }).run(.{});
+    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, zero, .{map(zero)}), forEach(ignore) }).run(.{});
 }

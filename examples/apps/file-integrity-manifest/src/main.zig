@@ -89,9 +89,10 @@ fn described(file: zrx.Tagged([]const u8, Hash)) Entry {
     return .{ .path = file.source, .bytes = file.item.bytes, .sha256 = std.fmt.bytesToHex(sha.finalResult(), .lower) };
 }
 
-/// A file that cannot be hashed is still a row.
-fn failed(err: anyerror, path: []const u8) Entry {
-    return .{ .path = path, .failure = @errorName(err) };
+/// A file that cannot be hashed is still a row. It is given a
+/// `Failed(anyerror, Path)`, whatever type the paths of this run have.
+fn failed(failure: anytype) Entry {
+    return .{ .path = failure.item, .failure = @errorName(failure.err) };
 }
 
 fn remember(exit: *Exit, outcome: Exit) void {
@@ -120,7 +121,7 @@ const exit_status = pipe(.{
 
 /// Needs `std.Io`, `Manifest` and the `*Exit` the outcome is stored in.
 pub const manifest = pipe(.{
-    concurrent(workers, .{attempt(hashed, failed)}),
+    concurrent(workers, .{attempt(hashed, anyerror, .{map(failed)})}),
     branch(.{
         rows,
         exit_status,

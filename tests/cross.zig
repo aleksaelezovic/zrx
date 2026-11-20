@@ -55,14 +55,14 @@ fn bytesOf(path: []const u8) zrx.FileBytes(256) {
 fn count(total: u64, piece: []const u8) u64 {
     return total +% piece.len;
 }
-fn unread(_: anyerror, path: []const u8) zrx.Tagged([]const u8, u64) {
-    return .{ .source = path, .item = 0 };
+fn unread(failed: zrx.Failed(anyerror, []const u8)) zrx.Tagged([]const u8, u64) {
+    return .{ .source = failed.item, .item = 0 };
 }
 
 export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
     const sized = pipe(.{zrx.each(bytesOf, .{zrx.fold(@as(u64, 0), count)})});
     const sizes = program(zrx.fromValue(@as([]const u8, std.mem.span(path))), pipe(.{
-        zrx.attempt(sized, unread),
+        zrx.attempt(sized, anyerror, .{zrx.map(unread)}),
         zrx.drain(),
     }));
     sizes.run(.{io.*}) catch return false;

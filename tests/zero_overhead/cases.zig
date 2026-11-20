@@ -618,6 +618,10 @@ export fn same_reduce(ptr: [*]const [4]u32, len: usize, out: *u64) void {
 fn halved(_: error{TooSmall}, value: u32) u32 {
     return value / 2;
 }
+/// The same, as the end of an error path.
+fn halvedFailure(failed: TooSmall) u32 {
+    return failed.item / 2;
+}
 
 /// Small values count for half instead of being dropped.
 pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
@@ -707,7 +711,7 @@ export fn same_each(ptr: [*]const Group, len: usize, out: *u64) void {
 pub fn attempted(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
         const total = pipe(.{
-            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            zrx.attempt(.{ map(checked), map(triple) }, error{TooSmall}, .{map(halvedFailure)}),
             fold(@as(u64, 0), add),
             forEach(store),
         });
@@ -720,7 +724,7 @@ pub fn attempted(comptime with_zrx: bool, items: []const u32, out: *u64) void {
 }
 
 /// `lean`, not `same`: the pipeline pushes on from two places, the sub-pipe
-/// and the fallback, and the optimizer keeps the branch between them where
+/// and the error path, and the optimizer keeps the branch between them where
 /// the loop's one expression becomes a select. Three instructions more.
 export fn lean_attempt(ptr: [*]const u32, len: usize, out: *u64) void {
     attempted(exported_with_zrx, ptr[0..len], out);
@@ -736,7 +740,7 @@ fn capped(value: u32) error{TooLarge}!u32 {
 pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
     if (with_zrx) {
         const total = pipe(.{
-            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            zrx.attempt(.{ map(checked), map(triple) }, error{TooSmall}, .{map(halvedFailure)}),
             map(capped),
             fold(@as(u64, 0), add),
             forEach(store),

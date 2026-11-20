@@ -246,7 +246,7 @@ Within one item:
 | Operator | Effect |
 |---|---|
 | `each(source_of, sub)` | Runs a fresh `sub` over the source that `source_of(deps..., item)` returns, and emits what `sub` emits, paired with the item. See [each](#each). |
-| `attempt(sub, fallback)` | Runs `sub`; when it fails for an item, emits `fallback(deps..., err, item)` in its place. See [Errors](#errors). |
+| `attempt(sub, E, path)` | Runs `sub`; when it fails for an item with an error in `E`, what `path` makes of the `Failed(E, T)` goes on in its place. See [Errors](#errors). |
 
 Terminal:
 
@@ -383,42 +383,49 @@ of your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `map(require(isPlausible, error.InvalidReading))` fails an item that
 `filter(isPlausible)` would drop without a trace.
 
-When what fails is not one handler but several operators, wrap them:
-`attempt(sub, fallback)` is `orElse` for a sub-pipe. When `sub` fails for an
-item, `fallback(deps..., err, item)` is emitted in its place, with the item
-as it was at the `attempt`.
+When what fails is not one handler but several operators, the failure
+becomes an item and is sent down an *error path*, a pipe of its own. A
+`Failed(E, Item)` is that item: `.err` is the error, and `.item` the item as
+it was where the failure was caught. Two operators catch one.
+
+`attempt(sub, E, path)` keeps the item. When `sub` fails for an item with an
+error in `E`, the failure goes down `path`, and what the path emits goes on
+in place of what `sub` would have.
 
 ```zig
 /// A file that cannot be hashed is still a row.
-fn failed(err: anyerror, path: []const u8) Row { ... }
+fn failed(failure: zrx.Failed(anyerror, []const u8)) Row { ... }
 
 const manifest = pipe(.{
-    concurrent(4, .{attempt(hashed, failed)}),
+    concurrent(4, .{attempt(hashed, anyerror, .{map(failed)})}),
     forEach(save),
 });
 ```
 
-- The rules are `orElse`'s. The fallback returns what the sub-pipe emits.
-  Its error parameter must take every error the sub-pipe can fail with
-  (`anyerror` always does); `error.Canceled` is never handed to it. What it
-  handles is no longer in `run`'s error set.
+- `E` selects what the path takes: an error set takes its members and lets
+  every other error of `sub` fail the run; `anyerror` takes everything.
+  `error.Canceled` is never taken. What the path takes is no longer in
+  `run`'s error set.
+- The path emits what the sub-pipe emits. It keeps its state for the whole
+  stream and has an end of the stream of its own, after the sub-pipe's. A
+  path that wants no more ends the stream; a path that fails fails the run.
+- A handler that names its failure names it exactly: the `E` of the
+  operator and the item's own type. `anytype` takes any.
 - What the sub-pipe had already emitted for the item is not taken back, and
   its stages keep whatever state the item gave them.
 - A failure of the pipe *after* the `attempt` is not the sub-pipe's. It
-  fails the run as it would without the `attempt`, the fallback is not
-  asked, and a `recover` inside the sub-pipe does not see it.
+  fails the run as it would without the `attempt`, the path is not asked,
+  and a `recover` inside the sub-pipe does not see it.
 - The sub-pipe keeps its state for the whole stream, like a case of a
   `route`. A failure at its end of the stream does not belong to an item and
   fails the run.
-- The sub-pipe cannot contain a task boundary: a failure beyond one happens
-  on another task.
+- Neither the sub-pipe nor the path can contain a task boundary: a failure
+  beyond one happens on another task.
 
-To take the item out of the pipe, put `recover(E, path)` before the
-operators that may fail. When one of them fails for an item with an error in
-`E`, the item leaves the pipe and a `Failed(E, Item)` goes down `path`
-instead: `.err` is the error and `.item` the item as it was at the
-`recover`. The path is a terminated pipe like any other, with stages, state
-and an end of the stream of its own.
+`recover(E, path)` takes the item out of the pipe. Put it before the
+operators that may fail: when one of them fails for an item with an error in
+`E`, the item leaves the pipe and the failure goes down `path` instead, a
+terminated pipe with stages, state and an end of the stream of its own.
 
 ```zig
 const Rejected = zrx.Failed(ParseError, []const u8);

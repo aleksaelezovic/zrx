@@ -471,7 +471,7 @@ test "a downstream limit wakes a producer without another item and all segments 
         pipe(.{ mark(0), concurrent(1, .{end}) }),
         // Sub-pipes within one item are constructed in a pipe that tracks demand.
         pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), end }),
-        pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), end }),
+        pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), end }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -1676,9 +1676,9 @@ fn untagged(pair: zrx.Tagged(u32, u32)) u32 {
 fn neverFails(value: u32) error{Never}!u32 {
     return value;
 }
-fn countFallback(fallbacks: *Fallbacks, _: error{Never}, value: u32) u32 {
+fn countFallback(fallbacks: *Fallbacks, failed: zrx.Failed(error{Never}, u32)) u32 {
     _ = fallbacks.count.fetchAdd(1, .seq_cst);
-    return value;
+    return failed.item;
 }
 
 /// The sub-pipe of an `each` behind a queue: every item gives two values, of
@@ -1730,8 +1730,8 @@ const EachInWorkers = struct {
 
 /// The pipe after an `attempt`: its failure is not the sub-pipe's.
 const AfterAttempt = struct {
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) })) {
-        return pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), mark(1), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), mark(1), ender(ending), forEach(toLeft) });
     }
     fn ended() usize {
         return item_count;

@@ -1,6 +1,7 @@
 //! Sub-pipes that run inside one push: `each` runs a fresh one over a source
-//! made from every item, `attempt` turns the failure of one into a value,
-//! and `recover` sends the failure of what follows it down a path of its own.
+//! made from every item, and two send a failure down an error path, a
+//! sub-pipe of `Failed` items: `attempt` to turn the failure of a sub-pipe
+//! into a value, `recover` to take a failed item out of the pipe.
 //!
 //! None is a task boundary and none may contain one: what the sub-pipe
 //! does for an item is over when the push of that item returns.
@@ -10,7 +11,6 @@ const core = @import("../pipe.zig");
 const program = @import("../program.zig");
 const sources = @import("../sources.zig");
 const completion = @import("../completion.zig");
-const handlers = @import("../handlers.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -138,23 +138,43 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
 // attempt
 // ---------------------------------------------------------------------------
 
-/// `orElse` for a sub-pipe: when `sub` fails for an item,
-/// `fallback(deps..., err, item)` is emitted in its place, with the item as
-/// it was at the `attempt`. The rules are `orElse`'s: the fallback returns
-/// what `sub` emits, its error parameter takes every error `sub` can fail
-/// with, and `error.Canceled` is never handed over.
+/// `sub`, with a failure turned into a value. When `sub` fails for an item
+/// with an error in `handled`, a `Failed(handled, Item)` goes down `path`,
+/// with the item as it was at the `attempt`, and what `path` emits takes the
+/// place of what `sub` would have. Where `recover` takes a failed item out
+/// of the pipe, this keeps it, as whatever the path makes of the failure.
+///
+/// `handled` selects what the path takes, as it does for `recover`: an error
+/// set, or `anyerror`. Every other error of `sub` fails the run, and
+/// `error.Canceled` is never taken. The path has stages and state of its own
+/// for the whole stream, and is finished after `sub`.
 ///
 /// What `sub` had already emitted for the item is not taken back, and its
 /// stages keep the state the item gave them. A failure of the pipe *after*
 /// the `attempt` is not the sub-pipe's: it fails the run as it would without
 /// the `attempt`. So does a failure of `sub`'s own end of stream.
-pub fn attempt(sub: anytype, comptime fallback: anytype) Attempt(core.NormalizedPipe("attempt", @TypeOf(sub)), fallback) {
-    return .{ .pipe = core.normalizePipe("attempt", sub) };
+pub fn attempt(sub: anytype, comptime handled: anytype, path: anytype) Attempt(
+    core.NormalizedPipe("attempt", @TypeOf(sub)),
+    Handled("attempt", "attempt(sub, ParseError, .{ map(fallback) })", "fallback", handled),
+    ErrorPath(@TypeOf(path)),
+) {
+    return .{ .pipe = core.normalizePipe("attempt", sub), .path = core.normalizePipe("attempt", path) };
 }
 
-fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
+/// The type of an `attempt`'s error path. A handler is what stood here before
+/// the path did.
+fn ErrorPath(comptime Given: type) type {
+    if (Given == type or @typeInfo(Given) == .@"fn") @compileError(
+        "attempt: the last argument is the error path, a pipe from the failure to what the sub-pipe emits, not a handler; " ++
+            "write `attempt(sub, ParseError, .{ map(fallback) })`, where `fallback` takes a `Failed(ParseError, Item)`",
+    );
+    return core.NormalizedPipe("attempt", Given);
+}
+
+fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
     return struct {
         pipe: Sub,
+        path: Path,
 
         const Op = @This();
         pub const zrx_operator = {};
@@ -171,7 +191,7 @@ fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
 
         fn Emitted(comptime Env: type, comptime In: type) type {
             const T = Sub.Out(Env, In);
-            if (T == End) @compileError("attempt: the sub-pipe ends with a terminal operator, so there is nothing to emit a fallback in place of; remove it and end the pipe after attempt(...)");
+            if (T == End) @compileError("attempt: the sub-pipe ends with a terminal operator, so it emits nothing an error path could take the place of; remove it and end the pipe after attempt(...)");
             if (Sub.Stage(Env, In).has_boundary)
                 @compileError("attempt: the sub-pipe contains a task boundary, and a failure beyond it is not the item's; put the boundary outside attempt(...)");
             return T;
@@ -182,53 +202,51 @@ fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
         fn Failure(comptime Env: type, comptime In: type) type {
             const Chain = Sub.Stage(Env, In);
             const Pushed = @TypeOf(@as(*Chain, undefined).push(@as(In, undefined), Taking(Emitted(Env, In)){}));
-            const E = @typeInfo(Pushed).error_union.error_set;
-            if (@typeInfo(E).error_set.error_names) |names| {
+            const Own = @typeInfo(Pushed).error_union.error_set;
+            if (@typeInfo(Own).error_set.error_names) |names| {
                 if (names.len == 0) @compileError("attempt: the sub-pipe cannot fail; there is nothing to fall back from");
+                for (names) |error_name| {
+                    if (takes(E, error_name)) break;
+                } else @compileError(
+                    "attempt: the sub-pipe cannot fail with an error in `" ++ @typeName(E) ++ "`, so the error path would never be taken; it can fail with `" ++ errorNames(Own) ++ "`",
+                );
             }
-            return E;
+            return Own;
         }
 
-        /// `E` as one would write it: an inferred error set has no such name.
-        fn errorNames(comptime E: type) []const u8 {
-            const names = @typeInfo(E).error_set.error_names orelse return "anyerror";
+        /// `Own` as one would write it: an inferred error set has no such name.
+        fn errorNames(comptime Own: type) []const u8 {
+            const names = @typeInfo(Own).error_set.error_names orelse return "anyerror";
             var text: []const u8 = "error{";
             for (names, 0..) |error_name, i| text = text ++ (if (i == 0) "" else ",") ++ error_name;
             return text ++ "}";
         }
 
-        /// The type the fallback's error parameter is given: the one it
-        /// declares, or the sub-pipe's whole error set when it is generic.
-        fn Given(comptime Env: type, comptime In: type) type {
-            if (!di.isHandler(fallback)) @compileError("attempt: expected a fallback `fn (deps..., err, item) T`, got `" ++ @typeName(@TypeOf(fallback)) ++ "`");
-            return di.Param(fallback, 2, 0) orelse Failure(Env, In);
-        }
-
         pub fn Out(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
             const T = Emitted(Env, In);
-            const E = Failure(Env, In);
-            const Takes = Given(Env, In);
-            if (!handlers.takesAll(Takes, E)) @compileError(
-                "attempt: the fallback takes `" ++ @typeName(Takes) ++ "` but the sub-pipe can fail with `" ++ errorNames(E) ++ "`",
+            _ = Failure(Env, In);
+            const R = Path.Out(Env, Failed(E, In));
+            if (R == End) @compileError(
+                "attempt: the error path ends with a terminal operator, but the item is kept: the path must emit `" ++ @typeName(T) ++
+                    "` like the sub-pipe; to take a failed item out of the pipe, use recover(...)",
             );
-            const R = di.Bound(name, fallback, Env, &.{ Takes, In }).Return;
-            if (di.Payload(R) != T) @compileError(
-                "attempt: the fallback must return `" ++ @typeName(T) ++ "` like the sub-pipe, got `" ++ @typeName(R) ++ "`",
+            if (R != T) @compileError(
+                "attempt: the error path must emit `" ++ @typeName(T) ++ "` like the sub-pipe, got `" ++ @typeName(R) ++ "`",
             );
+            if (Path.Stage(Env, Failed(E, In)).has_boundary)
+                @compileError("attempt: the error path contains a task boundary, and a failure taken beyond it is no longer the item's; keep the path synchronous");
             return T;
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
             const T = Out(Env, In);
-            const E = Failure(Env, In);
-            const Takes = Given(Env, In);
             const Chain = Sub.Stage(Env, In);
-            const Rescue = di.Bound(name, fallback, Env, &.{ Takes, In });
+            const Fallback = Path.Stage(Env, Failed(E, In));
             return struct {
                 chain: Chain,
-                rescue: Rescue,
+                fallback: Fallback,
 
                 const Self = @This();
 
@@ -258,8 +276,8 @@ fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
                 }
 
                 pub fn init(self: *Self, op: *const Op, env: Env) void {
-                    self.rescue = .init(env);
                     self.chain.init(&op.pipe, env);
+                    self.fallback.init(&op.path, env);
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
@@ -269,13 +287,28 @@ fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
                         // The run has failed already, whatever the sub-pipe
                         // made of being told to stop.
                         if (outside != null) break :failed true;
-                        if (comptime handlers.canCancel(E)) {
-                            if (@as(anyerror, err) == error.Canceled) return error.Canceled;
+                        const any: anyerror = err;
+                        if (comptime @typeInfo(@TypeOf(err)).error_set.error_names) |possible| {
+                            // As in `recover`: an error the path does not
+                            // take is returned by its name.
+                            inline for (possible) |error_name| {
+                                if (any == @field(anyerror, error_name)) {
+                                    if (comptime !takes(E, error_name)) return @field(anyerror, error_name);
+                                    return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
+                                }
+                            }
+                            unreachable;
                         }
-                        // A cancellation never gets here, so the error fits the
-                        // fallback's parameter even when that leaves `Canceled` out.
-                        const given: Takes = if (comptime Takes == E) err else @errorCast(err);
-                        return down.push(try lift(self.rescue.call(.{ given, item })));
+                        if (any == error.Canceled) return err;
+                        if (comptime @typeInfo(E).error_set.error_names) |names| {
+                            inline for (names) |error_name| {
+                                if (comptime takes(E, error_name)) {
+                                    if (any == @field(anyerror, error_name)) return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
+                                }
+                            }
+                            return err;
+                        }
+                        return self.fallback.push(.{ .err = any, .item = item }, down);
                     };
                     if (outside) |err| return err;
                     return if (done) .done else .more;
@@ -283,7 +316,8 @@ fn Attempt(comptime Sub: type, comptime fallback: anytype) type {
 
                 /// The end of the stream is not an item: nothing is caught here.
                 pub fn finish(self: *Self, down: anytype) !void {
-                    return self.chain.finish(down);
+                    try self.chain.finish(down);
+                    return self.fallback.finish(down);
                 }
             };
         }
@@ -315,17 +349,30 @@ pub fn Failed(comptime E: type, comptime Item: type) type {
 /// A value that a stage *before* the `recover` emits at the end of the stream
 /// is an item like any other. Errors of a later stage's own `finish`, or
 /// beyond a `queue`, are not per-item and fail the run.
-pub fn recover(comptime handled: anytype, path: anytype) Recover(Handled(handled), core.NormalizedPipe("recover", @TypeOf(path))) {
+pub fn recover(comptime handled: anytype, path: anytype) Recover(
+    Handled("recover", "recover(ParseError, .{ forEach(report) })", "report", handled),
+    core.NormalizedPipe("recover", @TypeOf(path)),
+) {
     return .{ .path = core.normalizePipe("recover", path) };
 }
 
-fn Handled(comptime handled: anytype) type {
+/// The error set an error path is for, checked where the operator is written.
+fn Handled(comptime who: []const u8, comptime example: []const u8, comptime handler: []const u8, comptime handled: anytype) type {
     if (@TypeOf(handled) != type or @typeInfo(handled) != .error_set) @compileError(
-        "recover: the first argument must be an error set such as `ParseError`, or `anyerror`, got `" ++
+        who ++ ": the errors to take must be an error set such as `ParseError`, or `anyerror`, got `" ++
             (if (@TypeOf(handled) == type) @typeName(handled) else @typeName(@TypeOf(handled))) ++
-            "`; write `recover(ParseError, .{ forEach(report) })`, where `report` takes a `Failed(ParseError, Item)`",
+            "`; write `" ++ example ++ "`, where `" ++ handler ++ "` takes a `Failed(ParseError, Item)`",
     );
     return handled;
+}
+
+/// Whether an error path for `E` takes the error of this name. A
+/// cancellation is not a failure to take.
+fn takes(comptime E: type, comptime error_name: []const u8) bool {
+    if (std.mem.eql(u8, error_name, "Canceled")) return false;
+    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+    for (names) |have| if (std.mem.eql(u8, have, error_name)) return true;
+    return false;
 }
 
 fn Recover(comptime E: type, comptime P: type) type {
@@ -335,14 +382,6 @@ fn Recover(comptime E: type, comptime P: type) type {
         const Op = @This();
         pub const zrx_operator = {};
         pub const name = "recover";
-
-        /// Whether the path takes the error of this name.
-        fn takes(comptime error_name: []const u8) bool {
-            if (std.mem.eql(u8, error_name, "Canceled")) return false;
-            const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
-            for (names) |have| if (std.mem.eql(u8, have, error_name)) return true;
-            return false;
-        }
 
         pub fn Out(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
@@ -379,7 +418,7 @@ fn Recover(comptime E: type, comptime P: type) type {
                             // error set of this push.
                             inline for (possible) |error_name| {
                                 if (any == @field(anyerror, error_name)) {
-                                    if (comptime !takes(error_name)) return @field(anyerror, error_name);
+                                    if (comptime !takes(E, error_name)) return @field(anyerror, error_name);
                                     return self.divert(@errorCast(any), item);
                                 }
                             }
@@ -388,7 +427,7 @@ fn Recover(comptime E: type, comptime P: type) type {
                         if (any == error.Canceled) return err;
                         if (comptime @typeInfo(E).error_set.error_names) |names| {
                             inline for (names) |error_name| {
-                                if (comptime takes(error_name)) {
+                                if (comptime takes(E, error_name)) {
                                     if (any == @field(anyerror, error_name)) return self.divert(@errorCast(any), item);
                                 }
                             }

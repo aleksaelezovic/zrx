@@ -103,9 +103,15 @@ to this file; edit `AGENTS.md`, not copies.
   operator, and for every item constructs `sub`'s stages, runs the item's
   source into them and finishes them, all inside that item's `push`. That is
   construction per item, not a lookup per item: a stage still copies what it
-  asked for when it is constructed. `attempt(sub, fallback)` is `orElse` for
-  a sub-pipe and follows its rules. Its tail puts a failure of the pipe
-  after it aside, answers `.done`, and `push` returns the failure once the
+  asked for when it is constructed. `attempt(sub, E, path)` keeps a failed
+  item, as whatever its error path makes of the `Failed(E, Item)`: the
+  path rejoins, where the path of a `recover` terminates, and both select
+  by `E` with the same code. It took a fallback handler before; that is a
+  path of `map(fallback)`, and there is no second spelling. `E` is written
+  out although the sub-pipe's own errors are known: a path handler has to
+  be able to name its item, and an inferred set has no name. Its tail puts
+  a failure of the pipe after it aside, answers `.done`, and `push`
+  returns the failure once the
   sub-pipe has returned: inside the sub-pipe it could not be told from the
   sub-pipe's own, and a flag for it goes stale when a `recover` in there
   swallows it. Neither may contain a task boundary, neither adds to the

@@ -41,7 +41,7 @@ const exit_status = pipe(.{
 });
 
 pub const manifest = pipe(.{
-    concurrent(workers, .{attempt(hashed, failed)}),
+    concurrent(workers, .{attempt(hashed, anyerror, .{map(failed)})}),
     branch(.{
         rows,
         exit_status,
@@ -60,9 +60,10 @@ return @backingInt(exit);
   `fileBytes`, which reads it 32 KiB at a time; `digest` folds the pieces
   into one `Hash`; `described` makes the row. The sub-pipe starts afresh for
   every file.
-- **A file that cannot be hashed is data, not a failed run.** `attempt` emits
-  `failed(err, path)` in place of whatever `hashed` failed with, such as a
-  missing file or a directory.
+- **A file that cannot be hashed is data, not a failed run.** Whatever
+  `hashed` fails with, such as a missing file or a directory, `attempt`
+  sends down its error path, and the row `failed` makes of it goes on in
+  place of the file's.
 - **Four files at a time.** Each worker of `concurrent` has its own copy of
   `hashed`; they take turns pushing rows into the rest of the pipe.
 - **Every row goes to both sub-pipes of `branch`.** `rows` writes it;
@@ -116,6 +117,12 @@ Not here, on purpose:
 Nothing beyond what it has. `each`, `attempt` and `fileBytes` came out of an
 earlier version of this app, where hashing a file was one handler that opened
 it, read it and built the row.
+
+One thing reads less well than it could: `failed` takes its failure as
+`anytype`. The paths are `[:0]const u8` in `main` and `[]const u8` in the
+tests, and a handler that names its item takes both as a `[]const u8`. A
+failure is a `Failed(anyerror, Path)`, whose field does not coerce, so a
+handler that named it could serve only one of the two.
 
 Two things stay in `main` rather than in a pipe, and neither is a gap:
 

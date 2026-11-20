@@ -161,16 +161,17 @@ moment inside the run.
     are not finished, also when a `recover` or an `attempt` then handles the
     failure. A sub-pipe that is done ends its item only; when the pipe after
     the `each` is done, the item's source is answered `.done` and so is the
-    stage before the `each`. `attempt(sub, fallback)` emits the fallback for
-    an item `sub` fails on, except for `error.Canceled`; a failure of the
-    pipe after it, or of `sub`'s own end of stream, is what `run` returns,
-    and the fallback is not asked.
+    stage before the `each`. `attempt(sub, E, path)` emits what `path` makes
+    of an item `sub` fails on with an error in `E`, never for
+    `error.Canceled`; a failure of the pipe after it, or of `sub`'s own end
+    of stream, is what `run` returns, and the path is not asked.
     *Tests: "each runs a fresh sub-pipe over the source made from every
     item", "a sub-pipe that is done ends its item, not the stream", "once the
     pipe after each is done, the item's source stops and so does the stream",
     "a failure in the sub-pipe fails the run, and that item's sub-pipe is not
-    finished", "attempt emits the fallback in place of an item its sub-pipe
-    fails on", "a failure of the pipe after an attempt passes through,
+    finished", "attempt emits what its error path makes of an item its
+    sub-pipe fails on", "attempt with an error set lets other errors
+    through", "a failure of the pipe after an attempt passes through,
     whatever its name", "a recover inside the sub-pipe does not see a failure
     of the pipe after the attempt", "attempt falls back from failures but
     never from a cancellation", "a failure of the sub-pipe's own end of

@@ -18,17 +18,12 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
 
-fn parse(value: u32) error{ Odd, TooBig }!u32 {
-    if (value > 100) return error.TooBig;
-    return evenOnly(value);
-}
-
-// The fallback must take every error the sub-pipe can fail with.
+// The item is kept: to take it out of the pipe is what recover is for.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(parse)}, zero), forEach(ignore) }).run(.{});
+    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{forEach(ignore)}), forEach(ignore) }).run(.{});
 }

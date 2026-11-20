@@ -604,8 +604,8 @@ fn described(file: zrx.Tagged([]const u8, Hash)) Row {
     var sha = file.item.sha;
     return .{ .path = file.source, .bytes = file.item.bytes, .sha256 = sha.finalResult() };
 }
-fn failed(err: anyerror, path: []const u8) Row {
-    return .{ .path = path, .failure = err };
+fn failed(failure: zrx.Failed(anyerror, []const u8)) Row {
+    return .{ .path = failure.item, .failure = failure.err };
 }
 
 const digest = pipe(.{fold(Hash{}, Hash.update)});
@@ -638,7 +638,7 @@ test "files of several sizes are hashed by concurrent workers, and a missing one
 
     var rows: support.Recorder(Row) = .{};
     const manifest = pipe(.{
-        concurrent(4, .{attempt(hashed, failed)}),
+        concurrent(4, .{attempt(hashed, anyerror, .{map(failed)})}),
         forEach(support.record(Row)),
     });
     // Twice over, so that workers have files of every size to share.
