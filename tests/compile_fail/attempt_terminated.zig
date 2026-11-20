@@ -25,5 +25,5 @@ fn ignore(_: anytype) void {}
 
 // What the error path emits stands in for what the sub-pipe emits.
 test {
-    try program(range(u32, 0, 3), .{attempt(.{ map(evenOnly), forEach(ignore) }, error{Odd}, .{map(zero)})}).run(.{});
+    program(range(u32, 0, 3), .{attempt(.{ map(evenOnly), forEach(ignore) }, error{Odd}, .{map(zero)})}).run(.{});
 }

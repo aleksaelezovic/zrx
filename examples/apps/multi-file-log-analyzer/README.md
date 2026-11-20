@@ -54,8 +54,11 @@ pub const analyzer = program(logs, .{
 `execute` runs it with the files the arguments name:
 
 ```zig
-try analyzer.run(.{
+analyzer.run(.{
     io,
+    exit,
+    stderr(256),
+    rescue(fatal),
     fileReader(Left, args[0], max_line + 1),
     fileReader(Right, args[1], max_line + 1),
     fileWriter(Alerts, args[2], 4096, .{ .mode = .publish }),
@@ -77,7 +80,9 @@ try analyzer.run(.{
   `run`. The tests run the same `analyzer` with fixed readers and writers.
 
 [`src/events.zig`](src/events.zig) holds the record format and the counters;
-[`src/main.zig`](src/main.zig) owns the exit status.
+[`src/main.zig`](src/main.zig) returns the exit status. A run returns
+nothing: what fails it goes to `rescue(fatal)`, which writes the `fatal:`
+line and stores the status, once the files are closed.
 
 ## Format
 

@@ -25,5 +25,5 @@ fn ignore(_: anytype) void {}
 
 // A sub-pipe is an operator tuple or a pipe, also when it is one operator.
 test {
-    try program(range(u32, 0, 3), .{ each(below, fold(@as(u32, 0), add)), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ each(below, fold(@as(u32, 0), add)), forEach(ignore) }).run(.{});
 }

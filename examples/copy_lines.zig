@@ -10,6 +10,8 @@ const fold = zrx.fold;
 const branch = zrx.branch;
 const fileWriter = zrx.fileWriter;
 const stdout = zrx.stdout;
+const stderr = zrx.stderr;
+const rescue = zrx.rescue;
 const print = zrx.print;
 
 const Line = zrx.Line(4096);
@@ -22,12 +24,23 @@ fn count(lines: usize, _: Line) usize {
     return lines + 1;
 }
 
-pub fn main(init: std.process.Init) !void {
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+const Exit = struct { code: u8 = 0 };
+
+/// Whatever ends the run, such as an output that already exists: one line
+/// on stderr and a status for `main`. The output is closed by then.
+fn fatal(err_out: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.code = 1;
+    err_out.writer.print("error: {s}\n", .{@errorName(err)}) catch return;
+    err_out.writer.flush() catch {};
+}
+
+pub fn main(init: std.process.Init) u8 {
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch return 2;
     if (args.len != 3) {
         std.debug.print("usage: copy-lines INPUT NEW_OUTPUT\n", .{});
-        std.process.exit(2);
+        return 2;
     }
+    var exit: Exit = .{};
     const input = args[1];
     const output = args[2];
 
@@ -44,6 +57,12 @@ pub fn main(init: std.process.Init) !void {
             write,
             report,
         }),
-    })).provide(.{ fileWriter(Copy, output, 4096, .{ .mode = .create_new }), stdout(64) });
-    try copy.run(.{init.io});
+    })).provide(.{
+        stdout(64),
+        stderr(128),
+        rescue(fatal),
+        fileWriter(Copy, output, 4096, .{ .mode = .create_new }),
+    });
+    copy.run(.{ init.io, &exit });
+    return exit.code;
 }

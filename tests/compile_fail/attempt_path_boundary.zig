@@ -24,5 +24,5 @@ fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
 fn ignore(_: anytype) void {}
 
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{ zrx.queue(2), map(zero) }), forEach(ignore) }).run(.{std.testing.io});
+    program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{ zrx.queue(2), map(zero) }), forEach(ignore) }).run(.{std.testing.io});
 }

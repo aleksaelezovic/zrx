@@ -16,5 +16,5 @@ const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
 const Log = struct { lines: u32 };
 fn note(_: *Log, _: anyerror) void {}
 test {
-    try failing.run(.{rescue(note)});
+    failing.run(.{rescue(note)});
 }

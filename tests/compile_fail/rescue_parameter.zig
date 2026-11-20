@@ -16,5 +16,5 @@ const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
 // The one thing a rescue is given is the failure of the run.
 fn note(_: u32) void {}
 test {
-    try failing.run(.{rescue(note)});
+    failing.run(.{rescue(note)});
 }

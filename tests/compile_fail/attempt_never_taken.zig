@@ -29,5 +29,5 @@ fn hundred(_: zrx.Failed(error{TooBig}, u32)) u32 {
 
 // The sub-pipe fails with `Odd` only: a path for `TooBig` is never taken.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{TooBig}, .{map(hundred)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{TooBig}, .{map(hundred)}), forEach(ignore) }).run(.{});
 }

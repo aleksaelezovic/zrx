@@ -14,5 +14,5 @@ fn ignore(_: anytype) void {}
 const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
 
 test {
-    try failing.run(.{rescue(0)});
+    failing.run(.{rescue(0)});
 }

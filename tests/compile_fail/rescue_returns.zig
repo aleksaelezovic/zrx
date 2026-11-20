@@ -18,5 +18,5 @@ fn status(_: anyerror) u8 {
     return 1;
 }
 test {
-    try failing.run(.{rescue(status)});
+    failing.run(.{rescue(status)});
 }

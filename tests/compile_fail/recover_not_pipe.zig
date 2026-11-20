@@ -13,5 +13,5 @@ fn evenOnly(value: u32) error{Odd}!u32 {
 fn ignore(_: anytype) void {}
 
 test {
-    try program(range(u32, 0, 3), .{ recover(anyerror, forEach(ignore)), map(evenOnly), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ recover(anyerror, forEach(ignore)), map(evenOnly), forEach(ignore) }).run(.{});
 }

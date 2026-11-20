@@ -16,5 +16,5 @@ fn ignore(_: u32) void {}
 
 test {
     const values = [_]u32{ 1, 2 };
-    try program(&values, pipe(.{forEach(ignore)})).run(.{});
+    program(&values, pipe(.{forEach(ignore)})).run(.{});
 }

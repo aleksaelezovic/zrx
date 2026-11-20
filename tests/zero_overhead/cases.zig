@@ -52,9 +52,25 @@ fn storeSecond(result: Second, value: u64) void {
     result.out.* = value;
 }
 
-/// These programs cannot fail; say so, so that no error path is compiled in.
+/// A run returns nothing. For a program that cannot fail that is all there
+/// is to it: with anything left to fail with, this would not compile.
 fn run(runnable: anytype, deps: anytype) void {
-    runnable.run(deps) catch unreachable;
+    runnable.run(deps);
+}
+
+/// Where a fixture that can fail says so: a flag its rescue sets, as the
+/// hand-written loop sets it where it fails.
+const Outcome = struct { failed: *bool };
+
+fn noteFailed(outcome: Outcome, _: anyerror) void {
+    outcome.failed.* = true;
+}
+
+/// Runs a program that can fail and says whether it came to its end.
+fn ran(runnable: anytype, deps: anytype) bool {
+    var failed = false;
+    runnable.run(deps ++ .{ Outcome{ .failed = &failed }, zrx.rescue(noteFailed) });
+    return !failed;
 }
 
 // --- injected map, filter, fold ---------------------------------------------
@@ -282,8 +298,7 @@ fn countOrFail(rejected: Rejected, failed: TooSmall) error{Zero}!void {
 pub fn recoveredOrFailed(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) bool {
     if (with_zrx) {
         const total = pipe(.{ recover(error{TooSmall}, .{forEach(countOrFail)}), map(checked), tap(accumulate), drain() });
-        program(fromSlice(items), total).run(.{ Rejected{ .count = rejected }, Result{ .out = out } }) catch return true;
-        return false;
+        return !ran(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
     } else {
         for (items) |value| {
             if (value < 10) {
@@ -585,46 +600,58 @@ export fn same_bindings(ptr: [*]const u32, len: usize, by: u32, opened: *u32, cl
 // --- print --------------------------------------------------------------------------------------
 
 /// Formatting is a call into `std.Io.Writer` in both variants; what must match
-/// is everything around it.
-pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+/// is everything around it. A failed write is noted in `failed`: by the
+/// rescue of the run, and by hand where it happens.
+pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer, failed: *bool) void {
     if (with_zrx) {
         const lines = pipe(.{ filter(isEven), zrx.print(*std.Io.Writer, "{d}\n") });
-        program(fromSlice(items), lines).run(.{writer}) catch return false;
+        program(fromSlice(items), lines).run(.{ writer, Outcome{ .failed = failed }, zrx.rescue(noteFailed) });
     } else {
         for (items) |value| {
             if (value % 2 != 0) continue;
-            writer.print("{d}\n", .{value}) catch return false;
-            writer.flush() catch return false;
+            writer.print("{d}\n", .{value}) catch {
+                failed.* = true;
+                return;
+            };
+            writer.flush() catch {
+                failed.* = true;
+                return;
+            };
         }
-        writer.flush() catch return false;
+        writer.flush() catch {
+            failed.* = true;
+        };
     }
-    return true;
 }
 
-export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
-    return printed(exported_with_zrx, ptr[0..len], writer);
+export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer, failed: *bool) void {
+    printed(exported_with_zrx, ptr[0..len], writer, failed);
 }
 
 /// `write` is `print` without the flush after each item. Its format differs
 /// from the one in `printed` on purpose: two callers of one instantiation of
 /// `std.Io.Writer.print` keep it out of line under a compiler-chosen name,
 /// which differs between the two variants.
-pub fn written(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+pub fn written(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer, failed: *bool) void {
     if (with_zrx) {
         const lines = pipe(.{ filter(isEven), zrx.write(*std.Io.Writer, "{d},") });
-        program(fromSlice(items), lines).run(.{writer}) catch return false;
+        program(fromSlice(items), lines).run(.{ writer, Outcome{ .failed = failed }, zrx.rescue(noteFailed) });
     } else {
         for (items) |value| {
             if (value % 2 != 0) continue;
-            writer.print("{d},", .{value}) catch return false;
+            writer.print("{d},", .{value}) catch {
+                failed.* = true;
+                return;
+            };
         }
-        writer.flush() catch return false;
+        writer.flush() catch {
+            failed.* = true;
+        };
     }
-    return true;
 }
 
-export fn same_write(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
-    return written(exported_with_zrx, ptr[0..len], writer);
+export fn same_write(ptr: [*]const u32, len: usize, writer: *std.Io.Writer, failed: *bool) void {
+    written(exported_with_zrx, ptr[0..len], writer, failed);
 }
 
 // --- reduce -------------------------------------------------------------------------------------
@@ -785,7 +812,7 @@ pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) b
             fold(@as(u64, 0), add),
             forEach(store),
         });
-        program(fromSlice(items), total).run(.{Result{ .out = out }}) catch return false;
+        if (!ran(program(fromSlice(items), total), .{Result{ .out = out }})) return false;
     } else {
         var sum: u64 = 0;
         for (items) |value| {

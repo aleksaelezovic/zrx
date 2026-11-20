@@ -50,18 +50,22 @@ fn Resource(comptime acquire: anytype, comptime release: anytype) type {
     };
 }
 
-/// Where the failure of a run goes instead of into what `run` returns.
-/// `handler(deps..., err)` is called once with it, and `run` returns what
-/// the handler returns. It is a binding: it needs what its handler asks
+/// Where the failure of a run goes: `run` returns nothing.
+/// `handler(deps..., err)` is called once with it and returns nothing
+/// either. It is a binding: it needs what its handler asks
 /// for, and guards everything acquired after that is there, which is every
 /// other resource and the run itself. Their failures reach the handler
 /// after they have been released, while what it needs is still held.
 ///
-/// The handler's error parameter selects what it takes, as the error set of
-/// a `recover` does: an error set, `anyerror`, or `anytype` for exactly the
-/// errors the run can fail with. `error.Canceled` is never given to it.
-/// What it does not take, `run` still returns; so it does a failure of
-/// acquiring what the handler itself needs.
+/// The handler's error parameter selects what it takes: an error set,
+/// `anyerror`, or `anytype` for exactly the errors the run can fail with.
+/// A cancellation is one of them: an error path never takes one, but this
+/// is where the run ends, and `run` has no other way to say so. A handler
+/// whose caller must stay cancellable calls `io.recancel()` for it.
+///
+/// What the handler does not take is left over, and so is a failure of
+/// acquiring what the handler itself needs. A run with anything left over
+/// does not compile: `run` returns nothing.
 pub fn rescue(comptime handler: anytype) Rescue(handler) {
     return .{};
 }
@@ -88,46 +92,58 @@ fn Rescue(comptime handler: anytype) type {
                 const any: anyerror = err;
                 const Taken = comptime Declared orelse Named(@TypeOf(err));
                 const Call = di.Bound("rescue", handler, @TypeOf(env), &.{Taken});
-                if (comptime di.Payload(Call.Return) != void) @compileError(
-                    "rescue: the handler must return `void` or `E!void`, got `" ++ @typeName(Call.Return) ++ "`; what a run leaves behind is an effect, such as a status written through a dependency",
+                if (comptime Call.Return != void) @compileError(
+                    "rescue: the handler must return `void`, got `" ++ @typeName(Call.Return) ++ "`; it is the last to be given the failure, and `run` returns nothing. " ++
+                        "What a run leaves behind is an effect, such as a status written through a dependency",
                 );
                 const call: Call = .init(env);
                 if (comptime @typeInfo(@TypeOf(err)).error_set.error_names) |possible| {
                     // Every error the run can fail with is known: one the
                     // handler does not take is returned by its name, so that
                     // only those are left in the error set of the run.
-                    inline for (possible) |error_name| {
-                        if (any == @field(anyerror, error_name)) {
-                            if (comptime !di.takesError(Taken, error_name)) return @field(anyerror, error_name);
-                            return lift(call.call(.{@as(Taken, @errorCast(any))}));
+                    // The last of them needs no asking: it is the one left.
+                    inline for (possible, 1..) |error_name, nth| {
+                        if (nth == possible.len or any == @field(anyerror, error_name)) {
+                            if (comptime !holds(Taken, error_name)) return @field(anyerror, error_name);
+                            return call.call(.{@as(Taken, @errorCast(any))});
                         }
                     }
-                    unreachable;
+                    comptime unreachable;
                 }
-                if (any == error.Canceled) return err;
                 if (comptime @typeInfo(Taken).error_set.error_names) |names| {
                     inline for (names) |error_name| {
-                        if (comptime di.takesError(Taken, error_name)) {
-                            if (any == @field(anyerror, error_name)) return lift(call.call(.{@as(Taken, @errorCast(any))}));
-                        }
+                        if (any == @field(anyerror, error_name)) return call.call(.{@as(Taken, @errorCast(any))});
                     }
                     return err;
                 }
-                return lift(call.call(.{any}));
+                return call.call(.{any});
             };
         }
     };
 }
 
-/// `E` as one would write it, without a cancellation: an inferred error set
-/// is a type of its own, which a handler could not name or switch over.
+/// `E` as one would write it: an inferred error set is a type of its own,
+/// which a handler could not name.
 fn Named(comptime E: type) type {
     const names = @typeInfo(E).error_set.error_names orelse return anyerror;
     var Set = error{};
-    for (names) |error_name| {
-        if (di.takesError(anyerror, error_name)) Set = Set || @TypeOf(@field(anyerror, error_name));
-    }
+    for (names) |error_name| Set = Set || @TypeOf(@field(anyerror, error_name));
     return Set;
+}
+
+/// Whether the error set `E`, or `anyerror`, holds the error of this name.
+/// A cancellation is one of them here: an error path leaves it alone
+/// because it is no item's, but a rescue is where the run ends.
+fn holds(comptime E: type, comptime error_name: []const u8) bool {
+    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
+    for (names) |have| if (eql(have, error_name)) return true;
+    return false;
+}
+
+fn eql(comptime a: []const u8, comptime b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (x != y) return false;
+    return true;
 }
 
 fn isRescue(comptime B: type) bool {

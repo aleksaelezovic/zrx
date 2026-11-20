@@ -138,7 +138,7 @@ pub const FileMode = enum {
     /// once everything this binding wraps has returned without an error and
     /// the writer is flushed. A failure before publication leaves the
     /// destination untouched. If the path already exists at publication,
-    /// the run returns `error.PathAlreadyExists`. With several published
+    /// the run fails with `error.PathAlreadyExists`. With several published
     /// files, the last one acquired is named first. Any files already published
     /// stay in place if a later publication fails.
     publish,

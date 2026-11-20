@@ -25,5 +25,5 @@ fn ignore(_: anytype) void {}
 
 // The item is kept: to take it out of the pipe is what recover is for.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{forEach(ignore)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{forEach(ignore)}), forEach(ignore) }).run(.{});
 }

@@ -16,5 +16,5 @@ const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
 fn first(_: anyerror) void {}
 fn second(_: anyerror) void {}
 test {
-    try failing.run(.{ rescue(first), rescue(second) });
+    failing.run(.{ rescue(first), rescue(second) });
 }

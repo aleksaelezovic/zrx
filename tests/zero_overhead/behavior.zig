@@ -174,8 +174,10 @@ test "printed" {
         var without_bytes: [256]u8 = undefined;
         var with: std.Io.Writer = .fixed(&with_bytes);
         var without: std.Io.Writer = .fixed(&without_bytes);
-        try std.testing.expect(cases.printed(true, items, &with));
-        try std.testing.expect(cases.printed(false, items, &without));
+        var failed: [2]bool = .{ false, false };
+        cases.printed(true, items, &with, &failed[0]);
+        cases.printed(false, items, &without, &failed[1]);
+        try std.testing.expectEqual([2]bool{ false, false }, failed);
         try std.testing.expectEqualStrings(without.buffered(), with.buffered());
     }
     // A writer that runs out of room fails both the same way.
@@ -183,7 +185,10 @@ test "printed" {
     var small_without: [3]u8 = undefined;
     var with: std.Io.Writer = .fixed(&small_with);
     var without: std.Io.Writer = .fixed(&small_without);
-    try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
+    var failed: [2]bool = .{ false, false };
+    cases.printed(true, inputs[3], &with, &failed[0]);
+    cases.printed(false, inputs[3], &without, &failed[1]);
+    try std.testing.expectEqual([2]bool{ true, true }, failed);
 }
 
 test "written" {
@@ -192,15 +197,20 @@ test "written" {
         var without_bytes: [256]u8 = undefined;
         var with: std.Io.Writer = .fixed(&with_bytes);
         var without: std.Io.Writer = .fixed(&without_bytes);
-        try std.testing.expect(cases.written(true, items, &with));
-        try std.testing.expect(cases.written(false, items, &without));
+        var failed: [2]bool = .{ false, false };
+        cases.written(true, items, &with, &failed[0]);
+        cases.written(false, items, &without, &failed[1]);
+        try std.testing.expectEqual([2]bool{ false, false }, failed);
         try std.testing.expectEqualStrings(without.buffered(), with.buffered());
     }
     var small_with: [3]u8 = undefined;
     var small_without: [3]u8 = undefined;
     var with: std.Io.Writer = .fixed(&small_with);
     var without: std.Io.Writer = .fixed(&small_without);
-    try std.testing.expectEqual(cases.written(false, inputs[3], &without), cases.written(true, inputs[3], &with));
+    var failed: [2]bool = .{ false, false };
+    cases.written(true, inputs[3], &with, &failed[0]);
+    cases.written(false, inputs[3], &without, &failed[1]);
+    try std.testing.expectEqual([2]bool{ true, true }, failed);
 }
 
 test "reduced" {

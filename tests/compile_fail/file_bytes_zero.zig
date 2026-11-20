@@ -24,5 +24,5 @@ fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
 fn ignore(_: anytype) void {}
 
 test {
-    try program(zrx.fileBytes("input", 0), .{forEach(ignore)}).run(.{std.testing.io});
+    program(zrx.fileBytes("input", 0), .{forEach(ignore)}).run(.{std.testing.io});
 }

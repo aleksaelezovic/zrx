@@ -5,6 +5,7 @@
 //! are all chosen and observed by the test. Two use a loopback socket.
 const std = @import("std");
 const zrx = @import("zrx");
+const support = @import("support.zig");
 const http = zrx.ext.http;
 const Io = std.Io;
 const io = std.testing.io;
@@ -154,7 +155,7 @@ fn converse(sub: anytype, arrivals: []const std.testing.Reader.Call, wire: *Wire
     var peer: std.testing.Reader = .init(&head, arrivals);
     wire.init();
     const connection: http.Transport = .{ .reader = &peer.interface, .writer = &wire.writer };
-    try program(fromValue(connection), .{http.serve(sub)}).run(.{});
+    try support.run(program(fromValue(connection), .{http.serve(sub)}), .{});
 }
 
 /// What `api` answers to `request`, sent alone.
@@ -462,7 +463,7 @@ test "the pipe is constructed for each connection and finished when it ends" {
             forEach(note),
         },
     })});
-    try program(fromSlice(&transports), .{http.serve(counted)}).run(.{&seen});
+    try support.run(program(fromSlice(&transports), .{http.serve(counted)}), .{&seen});
     try std.testing.expectEqual(Seen{ .connections = 2, .requests = 5 }, seen);
     try std.testing.expectEqualStrings(times(3, "HTTP/1.1 204 No Content\r\n\r\n"), wires[0].text());
     try std.testing.expectEqualStrings(times(2, "HTTP/1.1 204 No Content\r\n\r\n"), wires[1].text());
@@ -684,16 +685,16 @@ test "a connection that breaks fails the run, or is dropped by disconnected" {
         .{ .reader = &ended, .writer = &wires[3].writer },
         .{ .reader = &fine, .writer = &wires[4].writer },
     };
-    try program(fromSlice(&transports), .{
+    try support.run(program(fromSlice(&transports), .{
         recover(http.Disconnected, .{zrx.drain()}),
         http.serve(api),
-    }).run(.{});
+    }), .{});
     for (wires[0..4]) |*wire| try std.testing.expectEqualStrings("", wire.text());
     try std.testing.expectEqualStrings(ok("text/plain", "55"), wires[4].text());
 
     var again = brokenAfter("GET /sum HT", &storage[3]);
     const one: http.Transport = .{ .reader = &again, .writer = &wires[0].writer };
-    try std.testing.expectError(error.ReadFailed, program(fromValue(one), .{http.serve(api)}).run(.{}));
+    try std.testing.expectError(error.ReadFailed, support.run(program(fromValue(one), .{http.serve(api)}), .{}));
 }
 
 /// A writer that takes nothing, and counts how often it was asked to.
@@ -718,7 +719,7 @@ test "a connection whose write failed is not written to again" {
     var refusing: Refusing = undefined;
     refusing.init();
     const one: http.Transport = .{ .reader = &peer, .writer = &refusing.writer };
-    try std.testing.expectError(error.WriteFailed, program(fromValue(one), .{http.serve(api)}).run(.{}));
+    try std.testing.expectError(error.WriteFailed, support.run(program(fromValue(one), .{http.serve(api)}), .{}));
     try std.testing.expectEqual(@as(usize, 1), refusing.attempts);
 }
 
@@ -751,7 +752,7 @@ fn brokenWhileSkipping(comptime sub: anytype, comptime answer: []const u8) !void
     var wire: Wire = undefined;
     wire.init();
     const connection: http.Transport = .{ .reader = &breaking.reader, .writer = &wire.writer };
-    try std.testing.expectError(error.ReadFailed, program(fromValue(connection), .{http.serve(sub)}).run(.{}));
+    try std.testing.expectError(error.ReadFailed, support.run(program(fromValue(connection), .{http.serve(sub)}), .{}));
     try std.testing.expectEqual(@as(usize, 2), breaking.reads);
     try std.testing.expectEqual(@as(usize, 1), wire.writes);
     try std.testing.expectEqualStrings(answer, wire.text());
@@ -775,15 +776,15 @@ test "an answer that cannot be written breaks the connection, not the run" {
         .{ .reader = &first, .writer = &full },
         .{ .reader = &second, .writer = &wire.writer },
     };
-    try program(fromSlice(&transports), .{
+    try support.run(program(fromSlice(&transports), .{
         recover(http.Disconnected, .{zrx.drain()}),
         http.serve(api),
-    }).run(.{});
+    }), .{});
     try std.testing.expectEqualStrings(ok("text/plain", "55"), wire.text());
 
     var again: Io.Reader = .fixed(get_sum);
     const one: http.Transport = .{ .reader = &again, .writer = &full };
-    try std.testing.expectError(error.WriteFailed, program(fromValue(one), .{http.serve(api)}).run(.{}));
+    try std.testing.expectError(error.WriteFailed, support.run(program(fromValue(one), .{http.serve(api)}), .{}));
 }
 
 test "disconnected lets every other error fail the run" {
@@ -791,10 +792,10 @@ test "disconnected lets every other error fail the run" {
     wire.init();
     var peer: Io.Reader = .fixed("GET /missing HTTP/1.1\r\nHost: test\r\n\r\n");
     const connection: http.Transport = .{ .reader = &peer, .writer = &wire.writer };
-    try std.testing.expectError(error.NotFound, program(fromValue(connection), .{
+    try std.testing.expectError(error.NotFound, support.run(program(fromValue(connection), .{
         recover(http.Disconnected, .{zrx.drain()}),
         http.serve(.{routes}),
-    }).run(.{}));
+    }), .{}));
 }
 
 // ---------------------------------------------------------------------------
@@ -842,7 +843,7 @@ test "connections are accepted from the listener and served by workers" {
         });
 
         fn run(ready: *Ready) !void {
-            return served.run(.{ io, ready });
+            return support.run(served, .{ io, ready });
         }
     };
     var ready: Ready = .{};
@@ -877,7 +878,7 @@ test "a server waiting for a request can be cancelled" {
         });
 
         fn run(ready: *Ready) !void {
-            return served.run(.{ io, ready });
+            return support.run(served, .{ io, ready });
         }
     };
     var ready: Ready = .{};
@@ -916,7 +917,7 @@ test "a server whose workers hold open connections can be cancelled" {
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -964,7 +965,7 @@ test "a server skipping a body nobody read can be cancelled" {
         });
 
         fn run(ready: *Ready, reached: *Reached) !void {
-            return served.run(.{ io, ready, reached });
+            return support.run(served, .{ io, ready, reached });
         }
     };
     var ready: Ready = .{};
@@ -1069,7 +1070,7 @@ test "cancelling a server closes the connections no worker had taken" {
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1113,7 +1114,7 @@ test "a connection that reaches a second serve fails there and is left to the fi
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1155,7 +1156,7 @@ test "a copy of a connection served earlier does not take the room of a later on
         });
 
         fn run(with: Io, ready: *Ready, kept: *Kept) !void {
-            return served.run(.{ with, ready, kept });
+            return support.run(served, .{ with, ready, kept });
         }
     };
     var ready: Ready = .{};
@@ -1194,7 +1195,7 @@ test "with room for one waiting connection, every connection is still served" {
         });
 
         fn run(ready: *Ready) !void {
-            return served.run(.{ io, ready });
+            return support.run(served, .{ io, ready });
         }
     };
     var ready: Ready = .{};
@@ -1265,7 +1266,7 @@ test "a rejected connection is closed, and its room is free for the next" {
         });
 
         fn run(with: Io, ready: *Ready, arrivals: *Arrivals) !void {
-            return served.run(.{ with, ready, arrivals });
+            return support.run(served, .{ with, ready, arrivals });
         }
     };
     var ready: Ready = .{};
@@ -1313,7 +1314,7 @@ test "a connection a stage dropped is closed by the listener when the run is ove
         });
 
         fn run(with: Io, ready: *Ready, arrivals: *Arrivals) !void {
-            return served.run(.{ with, ready, arrivals });
+            return support.run(served, .{ with, ready, arrivals });
         }
     };
     var ready: Ready = .{};
@@ -1373,7 +1374,7 @@ test "a write that was cancelled comes out as a cancellation, whatever follows o
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1410,7 +1411,7 @@ test "a handler that fails after a cancelled write does not hide the cancellatio
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1448,7 +1449,7 @@ test "a handler that shrugs off a cancelled write does not hide the cancellation
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1519,7 +1520,7 @@ fn cancelledWhileSkipping(comptime sub: anytype) !void {
         });
 
         fn run(with: Io, ready: *Ready) !void {
-            return served.run(.{ with, ready });
+            return support.run(served, .{ with, ready });
         }
     };
     var ready: Ready = .{};
@@ -1619,7 +1620,7 @@ test "a connection given up before it was accepted is skipped, and its room is f
         });
 
         fn run(ready: *Ready) !void {
-            return served.run(.{ AbortedOnce.over(io), ready });
+            return support.run(served, .{ AbortedOnce.over(io), ready });
         }
     };
     var ready: Ready = .{};

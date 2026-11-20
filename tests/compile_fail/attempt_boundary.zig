@@ -25,5 +25,5 @@ fn ignore(_: anytype) void {}
 
 // A failure beyond a queue happens on another task, for no item of this one.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{ zrx.queue(2), map(evenOnly) }, error{Odd}, .{map(zero)}), forEach(ignore) }).run(.{std.testing.io});
+    program(range(u32, 0, 3), .{ attempt(.{ zrx.queue(2), map(evenOnly) }, error{Odd}, .{map(zero)}), forEach(ignore) }).run(.{std.testing.io});
 }

@@ -9,5 +9,5 @@ fn one(value: u32) u32 {
 
 test {
     const rows = [_][2]u32{.{ 1, 2 }};
-    try program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, one)), zrx.drain() }).run(.{});
+    program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, one)), zrx.drain() }).run(.{});
 }

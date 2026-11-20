@@ -35,7 +35,7 @@ const Input = struct { reader: *std.Io.Reader };
 test "print formats every item to the writer it is given" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(range(u32, 1, 4), pipe(.{print(*std.Io.Writer, "{d};")})).run(.{&writer});
+    try support.run(program(range(u32, 1, 4), pipe(.{print(*std.Io.Writer, "{d};")})), .{&writer});
     try std.testing.expectEqualStrings("1;2;3;", writer.buffered());
 }
 
@@ -55,16 +55,16 @@ test "print reports flush errors during a push and at stream end" {
     vtable.flush = failFlush;
     writer.vtable = &vtable;
     const output = pipe(.{print(*std.Io.Writer, "{d}")});
-    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 1), output).run(.{&writer}));
+    try std.testing.expectError(error.WriteFailed, support.run(program(range(u32, 0, 1), output), .{&writer}));
     try std.testing.expectEqualStrings("0", writer.buffered());
-    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 0), output).run(.{&writer}));
+    try std.testing.expectError(error.WriteFailed, support.run(program(range(u32, 0, 0), output), .{&writer}));
 }
 
 test "a tuple item supplies several format arguments" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const entries = [_]Entry{ .{ .name = "ada", .score = 3 }, .{ .name = "bob", .score = 5 } };
-    try program(fromSlice(&entries), pipe(.{ map(fields), print(Report, "{s}={d}\n") })).run(.{Report{ .writer = &writer }});
+    try support.run(program(fromSlice(&entries), pipe(.{ map(fields), print(Report, "{s}={d}\n") })), .{Report{ .writer = &writer }});
     try std.testing.expectEqualStrings("ada=3\nbob=5\n", writer.buffered());
 }
 
@@ -81,7 +81,7 @@ test "roles keep two writers apart" {
         pipe(.{ filter(isEven), print(Report, "{d} ") }),
         pipe(.{print(Log, "saw {d}\n")}),
     })});
-    try program(range(u32, 1, 4), work).run(.{ Report{ .writer = &report }, Log{ .writer = &log } });
+    try support.run(program(range(u32, 1, 4), work), .{ Report{ .writer = &report }, Log{ .writer = &log } });
     try std.testing.expectEqualStrings("2 ", report.buffered());
     try std.testing.expectEqualStrings("saw 1\nsaw 2\nsaw 3\n", log.buffered());
 }
@@ -95,7 +95,7 @@ test "lines splits a reader on newlines, with or without a final one" {
     var writer: std.Io.Writer = .fixed(&buffer);
     var reader: std.Io.Reader = .fixed("alpha\n\nbeta\ngamma");
     const work = pipe(.{ filter(nonEmpty), print(Report, "[{f}]") });
-    try program(lines(Input, 8), work).run(.{ Input{ .reader = &reader }, Report{ .writer = &writer } });
+    try support.run(program(lines(Input, 8), work), .{ Input{ .reader = &reader }, Report{ .writer = &writer } });
     try std.testing.expectEqualStrings("[alpha][beta][gamma]", writer.buffered());
 }
 
@@ -103,7 +103,7 @@ test "lines stops reading when the pipe is done" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     var reader: std.Io.Reader = .fixed("one\ntwo\nthree\n");
-    try program(lines(*std.Io.Reader, 8), pipe(.{ take(1), print(*std.Io.Writer, "{f}") })).run(.{ &reader, &writer });
+    try support.run(program(lines(*std.Io.Reader, 8), pipe(.{ take(1), print(*std.Io.Writer, "{f}") })), .{ &reader, &writer });
     try std.testing.expectEqualStrings("one", writer.buffered());
     try std.testing.expectEqualStrings("two\nthree\n", reader.buffered());
 }
@@ -121,11 +121,11 @@ test "fileWriter and fileLines round-trip through the file system" {
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/lines.txt", .{tmp.sub_path});
 
     const words = [_][]const u8{ "red", "green", "blue" };
-    try program(fromSlice(&words), pipe(.{ queue(1), print(Report, "{s}\n") })).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
+    try support.run(program(fromSlice(&words), pipe(.{ queue(1), print(Report, "{s}\n") })).provide(.{fileWriter(Report, path, 16, .{})}), .{io});
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), pipe(.{ map(shout), print(Log, "{f},") })).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(path, 64), pipe(.{ map(shout), print(Log, "{f},") })), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("RED,GREEN,BLUE,", writer.buffered());
 }
 
@@ -142,11 +142,11 @@ test "printed items stay written when a later item fails" {
 
     // Each successful print flushes its output before the later failure.
     const failing = program(range(u32, 0, 10), pipe(.{ map(failAtThree), print(Report, "{d}\n") })).provide(.{fileWriter(Report, path, 64, .{})});
-    try std.testing.expectError(error.Three, failing.run(.{io}));
+    try std.testing.expectError(error.Three, support.run(failing, .{io}));
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(path, 64), pipe(.{print(Log, "{f},")})), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
@@ -159,14 +159,14 @@ test "fileWriter replaces an existing file unless asked to create a new file" {
     const second = [_][]const u8{"new"};
     const third = [_][]const u8{"never written"};
 
-    try program(fromSlice(&first), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
-    try program(fromSlice(&second), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}).run(.{io});
+    try support.run(program(fromSlice(&first), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}), .{io});
+    try support.run(program(fromSlice(&second), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{})}), .{io});
     const exclusive = program(fromSlice(&third), pipe(.{print(Report, "{s}\n")})).provide(.{fileWriter(Report, path, 16, .{ .mode = .create_new })});
-    try std.testing.expectError(error.PathAlreadyExists, exclusive.run(.{io}));
+    try std.testing.expectError(error.PathAlreadyExists, support.run(exclusive, .{io}));
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(path, 64), pipe(.{print(Log, "{f},")})), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("new,", writer.buffered());
 }
 
@@ -184,12 +184,12 @@ test "write flushes once, at the end of the stream, where print flushes every it
     writer.vtable = &vtable;
 
     flushes = 0;
-    try program(range(u32, 1, 4), .{write(*std.Io.Writer, "{d};")}).run(.{&writer});
+    try support.run(program(range(u32, 1, 4), .{write(*std.Io.Writer, "{d};")}), .{&writer});
     try std.testing.expectEqualStrings("1;2;3;", writer.buffered());
     try std.testing.expectEqual(@as(usize, 1), flushes);
 
     flushes = 0;
-    try program(range(u32, 1, 4), .{print(*std.Io.Writer, "{d};")}).run(.{&writer});
+    try support.run(program(range(u32, 1, 4), .{print(*std.Io.Writer, "{d};")}), .{&writer});
     try std.testing.expectEqual(@as(usize, 4), flushes);
 }
 
@@ -199,7 +199,7 @@ test "write reports a flush error at stream end" {
     var vtable = writer.vtable.*;
     vtable.flush = failFlush;
     writer.vtable = &vtable;
-    try std.testing.expectError(error.WriteFailed, program(range(u32, 0, 2), .{write(*std.Io.Writer, "{d}")}).run(.{&writer}));
+    try std.testing.expectError(error.WriteFailed, support.run(program(range(u32, 0, 2), .{write(*std.Io.Writer, "{d}")}), .{&writer}));
     try std.testing.expectEqualStrings("01", writer.buffered());
 }
 
@@ -219,21 +219,21 @@ test "a published file appears only when the run succeeds, and replaces nothing"
 
     // A failed run leaves nothing behind, not even its temporary file.
     const failing = program(range(u32, 0, 10), .{ map(failAtThree), write(Report, "{d}\n") }).provide(.{published});
-    try std.testing.expectError(error.Three, failing.run(.{io}));
+    try std.testing.expectError(error.Three, support.run(failing, .{io}));
     try std.testing.expectEqual(@as(usize, 0), try filesIn(tmp.dir));
 
     // A successful one publishes everything, including what was still buffered.
-    try program(range(u32, 0, 3), .{write(Report, "{d}\n")}).provide(.{published}).run(.{io});
+    try support.run(program(range(u32, 0, 3), .{write(Report, "{d}\n")}).provide(.{published}), .{io});
     try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
 
     // The path is now taken: a second run fails and the file is as it was.
     const again = program(range(u32, 7, 9), .{write(Report, "{d}\n")}).provide(.{published});
-    try std.testing.expectError(error.PathAlreadyExists, again.run(.{io}));
+    try std.testing.expectError(error.PathAlreadyExists, support.run(again, .{io}));
     try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(path, 64), .{print(Log, "{f},")}), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
@@ -246,12 +246,12 @@ test "a writer given to run replaces a file default, and no file is created" {
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try report.run(.{ Report{ .writer = &writer }, io });
+    try support.run(report, .{ Report{ .writer = &writer }, io });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
     try std.testing.expectEqual(@as(usize, 0), try filesIn(tmp.dir));
 
     // A file given to `run` may come before the `Io` it needs.
-    try program(range(u32, 0, 3), .{write(Report, "{d},")}).run(.{ fileWriter(Report, path, 16, .{}), io });
+    try support.run(program(range(u32, 0, 3), .{write(Report, "{d},")}), .{ fileWriter(Report, path, 16, .{}), io });
     try std.testing.expectEqual(@as(usize, 1), try filesIn(tmp.dir));
 }
 
@@ -270,7 +270,7 @@ test "a line copies bounded text and is a string to std.json" {
     var buffer: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const names = [_][]const u8{ "rex", "", "judy" };
-    try program(fromSlice(&names), .{ map(named), map(json), write(*std.Io.Writer, "{f}\n") }).run(.{&writer});
+    try support.run(program(fromSlice(&names), .{ map(named), map(json), write(*std.Io.Writer, "{f}\n") }), .{&writer});
     try std.testing.expectEqualStrings(
         \\{"name":"rex","legs":4}
         \\{"name":"","legs":4}
@@ -308,13 +308,13 @@ test "published files are named one by one, the last bound first, and one failin
         fileWriter(Report, report_path, 64, .{ .mode = .publish }),
         fileWriter(Log, log_path, 64, .{ .mode = .publish }),
     });
-    try std.testing.expectError(error.PathAlreadyExists, both.run(.{io}));
+    try std.testing.expectError(error.PathAlreadyExists, support.run(both, .{io}));
 
     // The run failed, and the file named before the failure is there, whole.
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(log_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
-    try program(fileLines(report_path, 64), .{print(*std.Io.Writer, "{f},")}).run(.{ io, &writer });
+    try support.run(program(fileLines(log_path, 64), .{print(*std.Io.Writer, "{f},")}), .{ io, &writer });
+    try support.run(program(fileLines(report_path, 64), .{print(*std.Io.Writer, "{f},")}), .{ io, &writer });
     try std.testing.expectEqualStrings("saw 0,saw 1,taken,", writer.buffered());
 }
 
@@ -328,11 +328,11 @@ test "a published file holds what a handler wrote without flushing" {
     var path_bytes: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/direct.txt", .{tmp.sub_path});
     // The buffer holds everything: nothing reaches the file before the publish.
-    try program(range(u32, 0, 3), .{zrx.forEach(unflushed)}).provide(.{fileWriter(Report, path, 64, .{ .mode = .publish })}).run(.{io});
+    try support.run(program(range(u32, 0, 3), .{zrx.forEach(unflushed)}).provide(.{fileWriter(Report, path, 64, .{ .mode = .publish })}), .{io});
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(fileLines(path, 64), .{print(Log, "{f},")}).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(path, 64), .{print(Log, "{f},")}), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("0,1,2,", writer.buffered());
 }
 
@@ -357,8 +357,8 @@ test "fileReader binds a file for lines, given to provide or to run" {
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try shouted.run(.{ io, fileReader(Input, path, 9), Log{ .writer = &writer } });
-    try shouted.provide(.{fileReader(Input, path, 9)}).run(.{ io, Log{ .writer = &writer } });
+    try support.run(shouted, .{ io, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    try support.run(shouted.provide(.{fileReader(Input, path, 9)}), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("RED,GREEN,BLUE,RED,GREEN,BLUE,", writer.buffered());
 }
 
@@ -367,11 +367,11 @@ test "a reader given to run replaces a fileReader default, and its file is not o
     var writer: std.Io.Writer = .fixed(&buffer);
     var reader: std.Io.Reader = .fixed("in\nmemory");
     const from_file = shouted.provide(.{fileReader(Input, ".zig-cache/tmp/zrx-no-such-file", 9)});
-    try from_file.run(.{ io, Input{ .reader = &reader }, Log{ .writer = &writer } });
+    try support.run(from_file, .{ io, Input{ .reader = &reader }, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
 
     // Left to its default, the same program fails before any item.
-    try std.testing.expectError(error.FileNotFound, from_file.run(.{ io, Log{ .writer = &writer } }));
+    try std.testing.expectError(error.FileNotFound, support.run(from_file, .{ io, Log{ .writer = &writer } }));
     try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
 }
 
@@ -385,13 +385,13 @@ test "the line limit counts the line, not its newline" {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const fits = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/fits", .{tmp.sub_path});
-    try program(fileLines(fits, 4), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &writer } });
+    try support.run(program(fileLines(fits, 4), pipe(.{print(Log, "{f},")})), .{ io, Log{ .writer = &writer } });
     try std.testing.expectEqualStrings("ABCD,EF,GHIJ,", writer.buffered());
 
     var second: [64]u8 = undefined;
     var rejected: std.Io.Writer = .fixed(&second);
     const too_long = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/too-long", .{tmp.sub_path});
-    const result = program(fileLines(too_long, 4), pipe(.{print(Log, "{f},")})).run(.{ io, Log{ .writer = &rejected } });
+    const result = support.run(program(fileLines(too_long, 4), pipe(.{print(Log, "{f},")})), .{ io, Log{ .writer = &rejected } });
     try std.testing.expectError(error.StreamTooLong, result);
     try std.testing.expectEqualStrings("AB,", rejected.buffered());
 }
@@ -405,11 +405,11 @@ test "a larger line limit can retry on the same reader, including at EOF" {
     const retry = program(lines(*std.Io.Reader, 5), pipe(.{print(*std.Io.Writer, "[{f}]")}));
     for (cases) |case| {
         var reader: std.Io.Reader = .fixed(case.input);
-        try std.testing.expectError(error.StreamTooLong, first.run(.{&reader}));
+        try std.testing.expectError(error.StreamTooLong, support.run(first, .{&reader}));
 
         var buffer: [32]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buffer);
-        try retry.run(.{ &reader, &writer });
+        try support.run(retry, .{ &reader, &writer });
         try std.testing.expectEqualStrings(case.output, writer.buffered());
     }
 }
@@ -429,7 +429,7 @@ test "file lines survive batching and a queue, including the final partial batch
         zrx.flatten(),
         print(*std.Io.Writer, "[{f}]"),
     });
-    try program(fileLines(path, 4), work).run(.{ io, &writer });
+    try support.run(program(fileLines(path, 4), work), .{ io, &writer });
     try std.testing.expectEqualStrings("[AAAA][BBBB][CCCC]", writer.buffered());
 }
 
@@ -448,7 +448,7 @@ fn checkLargeLineQueue() !void {
         queue(&large_line_slots),
         print(*std.Io.Writer, "{f};"),
     });
-    try program(lines(*std.Io.Reader, 32 * 1024), work).run(.{ io, &reader, &writer });
+    try support.run(program(lines(*std.Io.Reader, 32 * 1024), work), .{ io, &reader, &writer });
     try std.testing.expectEqualStrings("one;two;three;", writer.buffered());
 }
 
@@ -462,7 +462,7 @@ test "a borrowed queue of large lines fits a small caller stack without an alloc
 test "a missing file fails the run before any item" {
     var buffer: [8]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    const result = program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{f}")})).run(.{ io, &writer });
+    const result = support.run(program(fileLines(".zig-cache/tmp/zrx-no-such-file", 64), pipe(.{print(*std.Io.Writer, "{f}")})), .{ io, &writer });
     try std.testing.expectError(error.FileNotFound, result);
 }
 
@@ -496,7 +496,7 @@ test "fileBytes gives the bytes of a file in order, at most n at a time" {
     for ([_]usize{ 0, 1, 7, 8, 9, 16, 36 }) |size| {
         try tmp.dir.writeFile(io, .{ .sub_path = "bytes", .data = content[0..size] });
         var pieces: Pieces = .{};
-        try program(fileBytes(path, 8), .{forEach(Pieces.add)}).run(.{ io, &pieces });
+        try support.run(program(fileBytes(path, 8), .{forEach(Pieces.add)}), .{ io, &pieces });
         try std.testing.expectEqualStrings(content[0..size], pieces.bytes[0..pieces.len]);
         try std.testing.expectEqual(try std.math.divCeil(usize, size, 8), pieces.count);
         try std.testing.expect(pieces.longest <= 8);
@@ -506,7 +506,7 @@ test "fileBytes gives the bytes of a file in order, at most n at a time" {
     // It stops when the pipe is done: no piece is pushed after that.
     var first: Pieces = .{};
     var pushed: usize = 0;
-    try program(fileBytes(path, 8), .{ zrx.tap(countPiece), take(1), forEach(Pieces.add) }).run(.{ io, &first, &pushed });
+    try support.run(program(fileBytes(path, 8), .{ zrx.tap(countPiece), take(1), forEach(Pieces.add) }), .{ io, &first, &pushed });
     try std.testing.expectEqualStrings(content[0..8], first.bytes[0..first.len]);
     try std.testing.expectEqual(@as(usize, 1), pushed);
 }
@@ -523,10 +523,10 @@ test "a file that cannot be opened or read fails the run with the error the syst
     const path = try std.fmt.bufPrint(&path_bytes, ".zig-cache/tmp/{s}/bytes", .{tmp.sub_path});
 
     var pieces: Pieces = .{};
-    const missing = program(fileBytes(".zig-cache/tmp/zrx-no-such-file", 8), .{forEach(Pieces.add)}).run(.{ io, &pieces });
+    const missing = support.run(program(fileBytes(".zig-cache/tmp/zrx-no-such-file", 8), .{forEach(Pieces.add)}), .{ io, &pieces });
     try std.testing.expectError(error.FileNotFound, missing);
     // `std.Io.File.Reader` reports `error.ReadFailed` and keeps the cause.
-    const unreadable = program(fileBytes(path, 8), .{forEach(Pieces.add)}).run(.{ support.ReadFails.over(io), &pieces });
+    const unreadable = support.run(program(fileBytes(path, 8), .{forEach(Pieces.add)}), .{ support.ReadFails.over(io), &pieces });
     try std.testing.expectError(error.InputOutput, unreadable);
     try std.testing.expectEqual(@as(usize, 0), pieces.count);
 }
@@ -541,7 +541,7 @@ test "fileLines fails the run with the error the system gave when a read fails" 
     var buffer: [16]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const failing = support.ReadFails.over(io);
-    const from_source = program(fileLines(path, 8), .{print(Log, "{f},")}).run(.{ failing, Log{ .writer = &writer } });
+    const from_source = support.run(program(fileLines(path, 8), .{print(Log, "{f},")}), .{ failing, Log{ .writer = &writer } });
     try std.testing.expectError(error.InputOutput, from_source);
     try std.testing.expectEqualStrings("", writer.buffered());
 }
@@ -563,11 +563,11 @@ test "a reader bound by fileReader reports ReadFailed, its own and anyone else's
     var buffer: [16]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const failing = support.ReadFails.over(io);
-    const own = program(lines(Input, 8), .{print(Log, "{f},")}).run(.{ failing, fileReader(Input, path, 9), Log{ .writer = &writer } });
+    const own = support.run(program(lines(Input, 8), .{print(Log, "{f},")}), .{ failing, fileReader(Input, path, 9), Log{ .writer = &writer } });
     try std.testing.expectError(error.ReadFailed, own);
     // The binding cannot tell whose failure it is, so it names no cause:
     // the file's recorded one would be wrong here.
-    const other = program(range(u32, 0, 1), .{zrx.forEach(readThenFail)}).run(.{ failing, fileReader(Input, path, 9) });
+    const other = support.run(program(range(u32, 0, 1), .{zrx.forEach(readThenFail)}), .{ failing, fileReader(Input, path, 9) });
     try std.testing.expectError(error.ReadFailed, other);
 }
 
@@ -642,7 +642,7 @@ test "files of several sizes are hashed by concurrent workers, and a missing one
         forEach(support.record(Row)),
     });
     // Twice over, so that workers have files of every size to share.
-    for (0..2) |_| try program(fromSlice(&paths), manifest).run(.{ io, &rows });
+    for (0..2) |_| try support.run(program(fromSlice(&paths), manifest), .{ io, &rows });
 
     try std.testing.expectEqual(2 * paths.len, rows.len);
     var found: [paths.len]usize = @splat(0);
@@ -700,6 +700,6 @@ test "a failure ends the run although the segment it interrupts is printing unde
         recover(anyerror, .{forEach(skip)}),
         print(Report, "{d}\n"),
     });
-    const result = program(fromProducer(u32, pushThenFailOnceWriting), work).provide(.{fileWriter(Report, path, 1, .{})}).run(.{ support.WriteHeld.over(io), &skipped });
+    const result = support.run(program(fromProducer(u32, pushThenFailOnceWriting), work).provide(.{fileWriter(Report, path, 1, .{})}), .{ support.WriteHeld.over(io), &skipped });
     try std.testing.expectError(error.SourceFailed, result);
 }

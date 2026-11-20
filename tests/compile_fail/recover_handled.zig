@@ -15,5 +15,5 @@ fn ignore(_: anytype) void {}
 // What `recover` took before it took a path: a handler.
 fn onError(_: anyerror, _: u32) void {}
 test {
-    try program(range(u32, 0, 3), .{ recover(onError, .{forEach(ignore)}), map(evenOnly), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ recover(onError, .{forEach(ignore)}), map(evenOnly), forEach(ignore) }).run(.{});
 }

@@ -26,7 +26,7 @@ export fn zrx_cross_tasks(io: *const std.Io, first: u32, end: u32) bool {
             pipe(.{ zrx.take(1), zrx.print(zrx.Stderr, "{d}\n") }),
         }),
     })).provide(.{ zrx.stdout(64), zrx.stderr(64) });
-    zrx.system(.{ totals, totals }).run(.{io.*}) catch return false;
+    if (!ran(zrx.system(.{ totals, totals }), .{io.*})) return false;
     return true;
 }
 
@@ -35,8 +35,8 @@ export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const
         zrx.print(Copy, "{f}\n"),
     })).provide(.{zrx.fileWriter(Copy, std.mem.span(to), 256, .{})});
     const measure = program(zrx.stdinLines(256), pipe(.{ zrx.map(length), zrx.drain() }));
-    copy.run(.{io.*}) catch return false;
-    measure.run(.{io.*}) catch return false;
+    if (!ran(copy, .{io.*})) return false;
+    if (!ran(measure, .{io.*})) return false;
     return true;
 }
 
@@ -45,7 +45,7 @@ export fn zrx_cross_json(writer: *std.Io.Writer, first: u32, end: u32) bool {
         zrx.map(zrx.ext.json.encode(.{})),
         zrx.write(*std.Io.Writer, "{f}\n"),
     });
-    numbers.run(.{writer}) catch return false;
+    if (!ran(numbers, .{writer})) return false;
     return true;
 }
 
@@ -65,7 +65,7 @@ export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
         zrx.attempt(sized, anyerror, .{zrx.map(unread)}),
         zrx.drain(),
     }));
-    sizes.run(.{io.*}) catch return false;
+    if (!ran(sizes, .{io.*})) return false;
     return true;
 }
 
@@ -79,7 +79,7 @@ export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
         zrx.debounce(.fromMilliseconds(250)),
         zrx.drain(),
     }));
-    zrx.system(.{ batches, latest }).run(.{io.*}) catch return false;
+    if (!ran(zrx.system(.{ batches, latest }), .{io.*})) return false;
     return true;
 }
 
@@ -88,7 +88,7 @@ export fn zrx_cross_concurrent(io: *const std.Io, first: u32, end: u32) bool {
         zrx.concurrent(4, .{ zrx.map(double), zrx.fold(@as(u64, 0), add) }),
         zrx.drain(),
     });
-    app.run(.{io.*}) catch return false;
+    if (!ran(app, .{io.*})) return false;
     return true;
 }
 
@@ -100,7 +100,7 @@ export fn zrx_cross_completion(io: *const std.Io) bool {
     const left = pipe(.{ zrx.queue(1), zrx.take(1), zrx.drain() });
     const right = pipe(.{ zrx.take(1), zrx.drain() });
     const work = program(zrx.fromProducer(u32, stopAware), pipe(.{zrx.branch(.{ left, right })}));
-    work.run(.{io.*}) catch return false;
+    if (!ran(work, .{io.*})) return false;
     return true;
 }
 
@@ -114,13 +114,27 @@ export fn zrx_cross_clock(io: *const std.Io, first: u32, end: u32) bool {
         zrx.flatten(),
         zrx.drain(),
     }));
-    batches.run(.{clock.io()}) catch return false;
+    if (!ran(batches, .{clock.io()})) return false;
     clock.waitingAt(.fromSeconds(61)) catch return false;
     return true;
 }
 
 fn requestMethod(request: zrx.ext.http.Request) zrx.ext.http.Method {
     return request.method();
+}
+
+/// Whether a run failed, for `ran`.
+const Outcome = struct { failed: *bool };
+
+fn noteFailure(outcome: Outcome, _: anyerror) void {
+    outcome.failed.* = true;
+}
+
+/// Runs `runnable` and says whether it came to its end without a failure.
+fn ran(runnable: anytype, deps: anytype) bool {
+    var failed = false;
+    runnable.run(deps ++ .{ Outcome{ .failed = &failed }, zrx.rescue(noteFailure) });
+    return !failed;
 }
 
 fn unwelcome(_: zrx.ext.http.Connection) bool {
@@ -143,6 +157,6 @@ export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
             zrx.otherwise(.{ zrx.recover(http.Disconnected, .{zrx.drain()}), http.serve(api) }),
         })}),
     }).provide(.{http.listen(.{ .ip4 = .loopback(port) }, .{})});
-    server.run(.{io.*}) catch return false;
+    if (!ran(server, .{io.*})) return false;
     return true;
 }

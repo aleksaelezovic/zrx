@@ -51,8 +51,10 @@ pub const manifest = pipe(.{
 program(fromSlice(args[2..]), manifest).run(.{
     init.io,
     &exit,
+    stderr(256),
+    rescue(fatal),
     fileWriter(Manifest, args[1], 8192, .{ .mode = .publish }),
-}) catch |err| return fatal(init.io, err);
+});
 return @backingInt(exit);
 ```
 
@@ -73,8 +75,9 @@ return @backingInt(exit);
   end. The `.publish` file gets its name only after the run has succeeded and
   the rows are flushed; a run that fails before that leaves the output path
   untouched.
-- A run that fails is reported by a second, one-line program:
-  `fatal: ErrorName` on stderr.
+- A run returns nothing. What fails it goes to `rescue(fatal)`:
+  `fatal: ErrorName` on stderr and the status `failed`, once the output has
+  been closed without getting its name.
 
 The handlers that remain are one to four lines each: `Hash.update`,
 `bytesOf`, `described`, `failed`, `Exit.after` and `remember`.

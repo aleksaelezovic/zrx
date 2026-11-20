@@ -1,5 +1,6 @@
 //! A handler error fails the run unless a `recover` before it takes it. Here
 //! good records go to stdout and rejected ones down a path of their own.
+//! Whatever still fails the run goes to a `rescue`.
 const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
@@ -7,6 +8,7 @@ const program = zrx.program;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const recover = zrx.recover;
+const rescue = zrx.rescue;
 const stdout = zrx.stdout;
 const stderr = zrx.stderr;
 const print = zrx.print;
@@ -42,8 +44,25 @@ pub const records = pipe(.{
     print(zrx.Stdout, "{d}\n"),
 });
 
-pub fn main(init: std.process.Init) !void {
+const Exit = struct { code: u8 = 0 };
+
+/// What belongs to no line, such as a write that fails, ends the run. A run
+/// returns nothing: the failure goes to a rescue, which reports it and
+/// leaves a status for `main`.
+fn fatal(err_out: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.code = 1;
+    err_out.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    err_out.writer.flush() catch {};
+}
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .{};
     const input = [_][]const u8{ "21", "", "4", "four" };
-    const app = program(fromSlice(&input), records).provide(.{ stdout(256), stderr(256) });
-    try app.run(.{init.io});
+    const app = program(fromSlice(&input), records).provide(.{
+        stdout(256),
+        stderr(256),
+        rescue(fatal),
+    });
+    app.run(.{ init.io, &exit });
+    return exit.code;
 }

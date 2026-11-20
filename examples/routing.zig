@@ -4,6 +4,7 @@ const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const program = zrx.program;
+const rescue = zrx.rescue;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const fold = zrx.fold;
@@ -55,7 +56,16 @@ const journal = pipe(.{
     print(zrx.Stdout, "order {d}: {d}\n"),
 });
 
-pub fn main(init: std.process.Init) !void {
+const Exit = struct { code: u8 = 0 };
+
+/// A run returns nothing: what ends it goes to a rescue, and here becomes
+/// the exit status.
+fn fail(exit: *Exit, _: anyerror) void {
+    exit.code = 1;
+}
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .{};
     const orders = [_]Order{
         .{ .id = 1, .kind = .sale, .cents = 4_000 },
         .{ .id = 2, .kind = .sale, .cents = 25_000 },
@@ -67,5 +77,6 @@ pub fn main(init: std.process.Init) !void {
             revenue,
         }),
     }).provide(.{stdout(256)});
-    try app.run(.{init.io});
+    app.run(.{ init.io, &exit, rescue(fail) });
+    return exit.code;
 }

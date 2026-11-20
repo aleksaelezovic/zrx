@@ -5,6 +5,7 @@ const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const program = zrx.program;
+const rescue = zrx.rescue;
 const system = zrx.system;
 const fromSlice = zrx.fromSlice;
 const fromProducer = zrx.fromProducer;
@@ -59,7 +60,16 @@ fn describe(alert: Alert) struct { u8, i32 } {
 
 const isHot = compose(.{ field(.celsius), gt(80) });
 
-pub fn main(init: std.process.Init) !void {
+const Exit = struct { code: u8 = 0 };
+
+/// A run returns nothing: what ends it goes to a rescue, and here becomes
+/// the exit status.
+fn fail(exit: *Exit, _: anyerror) void {
+    exit.code = 1;
+}
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .{};
     const readings = [_]Reading{
         .{ .sensor = 1, .celsius = 40 },
         .{ .sensor = 2, .celsius = 95 },
@@ -78,5 +88,6 @@ pub fn main(init: std.process.Init) !void {
         map(describe),
         print(zrx.Stdout, "sensor {d} is at {d} C\n"),
     })).provide(.{stdout(128)});
-    try system(.{ monitor, notifier }).run(.{ init.io, &mailbox });
+    system(.{ monitor, notifier }).run(.{ init.io, &mailbox, &exit, rescue(fail) });
+    return exit.code;
 }

@@ -25,5 +25,5 @@ fn ignore(_: anytype) void {}
 
 // The sub-pipe lives for one item: a task cannot outlive that.
 test {
-    try program(range(u32, 0, 3), .{ each(below, .{ zrx.queue(2), fold(@as(u32, 0), add) }), forEach(ignore) }).run(.{std.testing.io});
+    program(range(u32, 0, 3), .{ each(below, .{ zrx.queue(2), fold(@as(u32, 0), add) }), forEach(ignore) }).run(.{std.testing.io});
 }

@@ -17,6 +17,8 @@ const fileReader = zrx.fileReader;
 const fileWriter = zrx.fileWriter;
 const stdout = zrx.stdout;
 const stderr = zrx.stderr;
+const rescue = zrx.rescue;
+const forEach = zrx.forEach;
 const map = zrx.map;
 const filter = zrx.filter;
 const fold = zrx.fold;
@@ -83,24 +85,37 @@ pub const analyzer = program(logs, .{
     }),
 });
 
+/// How the app ended, for `main` to return.
+pub const Exit = struct { code: u8 = 0 };
+
+/// Whatever ends a run: one best-effort line on stderr, exit status 2.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.code = 2;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
+
+/// The same line and status for what fails before there is a run, such as
+/// a wrong argument count: a program of one item, the failure.
+pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+}
+
 /// Runs what `args` (without argv[0]) asks for: `LEFT RIGHT ALERTS`. The
-/// alerts file gets its name once the run has succeeded.
-pub fn execute(io: std.Io, args: []const []const u8) !void {
-    if (args.len != 3) return error.InvalidArguments;
-    try analyzer.run(.{
+/// alerts file gets its name once the run has succeeded. A run returns
+/// nothing: what fails it goes to `fatal`, once the files are closed.
+pub fn execute(io: std.Io, args: []const []const u8, exit: *Exit) void {
+    if (args.len != 3) return refuse(io, exit, error.InvalidArguments);
+    analyzer.run(.{
         io,
+        exit,
+        stderr(256),
+        rescue(fatal),
         fileReader(Left, args[0], max_line + 1),
         fileReader(Right, args[1], max_line + 1),
         fileWriter(Alerts, args[2], 4096, .{ .mode = .publish }),
         stdout(512),
     });
-}
-
-const failure = pipe(.{print(Diagnostics, "fatal: {s}\n")});
-
-/// Says on stderr why a run failed, as well as it can.
-pub fn report(io: std.Io, err: anyerror) void {
-    program(fromValue(@errorName(err)), failure).run(.{ io, stderr(256) }) catch {};
 }
 
 test {

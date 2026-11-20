@@ -35,10 +35,14 @@ defects followed (first review of PR 1):
 ## Guarantees
 
 Each is about one program, stated at a point a caller can observe (what
-`run` returns, what has been released, whether
+the run fails with, what has been released, whether
 `run` returns at all), and each names the tests that pin it. A sentence
 without a test does not belong in this list. Nothing is promised about a
 moment inside the run.
+
+`run` returns nothing. *The run fails with an error* means that the rescue
+among its bindings is called with that error (15). A run that can fail with
+nothing has no rescue to call.
 
 1. **On success**, every stage instance with a `finish` hook has finished exactly once.
    The stages of an `each` sub-pipe are instances per item: see 14.
@@ -46,7 +50,7 @@ moment inside the run.
    a branch each finish once", the six "invariants" (`tests/flow.zig`), "an
    error path has stages, state and an end of the stream of its own"
    (`tests/operators.zig`).*
-2. **On an error**, `run` returns it. A segment may have finished before
+2. **On an error**, the run fails with it. A segment may have finished before
    another segment failed. `print` reports writer flush errors during item
    handling and at stream end.
    *Tests: the "invariants" with a failing side (`tests/flow.zig`),
@@ -105,8 +109,8 @@ moment inside the run.
 10. **A `system` or `merge` of more than one starts a task per member**, on
     an `Io` that can; otherwise `error.ConcurrencyUnavailable`, with no
     sequential fallback. Of one, it runs that one in place. The programs of
-    a system are independent: each keeps 1 to 7 by itself, `system.run`
-    returns the first failure of any of them and cancels the others, and a
+    a system are independent: each keeps 1 to 7 by itself, the system
+    fails with the first failure of any of them and cancels the others, and a
     program that ended before that has released its resources.
     *Tests: "a system returns a failure while another program is waiting",
     "without concurrency, a system and a merge fail before anything runs",
@@ -164,7 +168,7 @@ moment inside the run.
     stage before the `each`. `attempt(sub, E, path)` emits what `path` makes
     of an item `sub` fails on with an error in `E`, never for
     `error.Canceled`; a failure of the pipe after it, or of `sub`'s own end
-    of stream, is what `run` returns, and the path is not asked.
+    of stream, is what the run fails with, and the path is not asked.
     *Tests: "each runs a fresh sub-pipe over the source made from every
     item", "a sub-pipe that is done ends its item, not the stream", "once the
     pipe after each is done, the item's source stops and so does the stream",
@@ -179,30 +183,31 @@ moment inside the run.
     sub-pipe fails becomes one value" (`tests/nested.zig`), and the four
     "invariants" with an `each` or an `attempt` (`tests/flow.zig`).*
 
-15. **A rescued failure.** With a `rescue(handler)` among its bindings, a
-    run does not return a failure the handler takes. The handler is called
-    once with it, after every task of the program has returned and what
-    was acquired after the rescue has been released, and before what the
-    handler needs is released; `run` returns what the handler returns. A
-    rescue is acquired before every resource it does not need, wherever it
-    is written. `run` still returns a failure the handler does not take,
-    `error.Canceled`, and a failure of acquiring what the handler needs.
-    A rescue given to a system takes the failure that ends the system; a
-    member's own rescue, in a system that is given none, takes that
-    member's failure, and the system does not fail.
-    *Tests: "a rescue is called once with the failure of the run, which
-    then is not what run returns", "a rescue is not called for a run that
-    succeeds", "a rescue is given a failure once what was acquired after it
-    is released, and holds what it needs", "a rescue guards all it can,
-    wherever it is written", "a failure of acquiring what a rescue needs is
-    what run returns", "a rescue with an error set lets other errors
-    through", "a rescue that takes anytype is given exactly the errors of
-    the run, and never a cancellation", "a rescue given to run replaces the
-    one a program provides", "a rescue that fails fails the run with its
-    own error" (`tests/di.zig`), "a rescue takes a failure from beyond a
-    queue", "a system's rescue takes the failure of a member, in place of
-    the member's own", "a member with a rescue of its own does not fail its
-    system" (`tests/programs.zig`).*
+15. **The failure of a run.** `run` returns nothing. A run that can fail
+    has a `rescue(handler)` among its bindings: without one whose handler
+    takes every error the run can fail with, it does not compile. The
+    handler is called once with the failure, after every task of the
+    program has returned and what was acquired after the rescue has been
+    released, and before what the handler needs is released; then `run`
+    returns. It is not called for a run that succeeds. A rescue is
+    acquired before every resource it does not need, wherever it is
+    written. `error.Canceled` is given to it like any failure. A rescue
+    given to a system is called with the failure that ends the system, in
+    place of the rescues its programs provide.
+    *Tests: "a rescue is called once with the failure of the run", "a
+    rescue is not called for a run that succeeds", "a rescue is given a
+    failure once what was acquired after it is released, and holds what it
+    needs", "a rescue guards all it can, wherever it is written", "a rescue
+    may name the errors it takes, when they are all the run can fail with",
+    "a rescue is given exactly the errors of the run, and a cancellation
+    like any of them", "a rescue given to run replaces the one a program
+    provides" (`tests/di.zig`), "a rescue takes a failure from beyond a
+    queue", "a rescue of a program with a task boundary is given exactly
+    its errors", "a system's rescue takes the failure of a member, in place
+    of the member's own", "a system of one program leaves the failure to
+    that program's rescue" (`tests/programs.zig`), and the compile-fail
+    cases `run_leaves`, `run_leaves_any`, `rescue_leaves`,
+    `rescue_needs_fallible`, `rescue_fails` and `system_leaves`.*
 
 ## Not promised
 
@@ -233,8 +238,14 @@ A review finding against one of these is answered by pointing here.
 - That no task starts after another has failed. All are started together.
 - Which failure is "first" when two tasks fail together: the one on record
   first.
-- That a failure is returned when the caller has also been cancelled:
-  `error.Canceled` is (guarantee 3).
+- That a run fails with its failure when the caller has also been
+  cancelled: it fails with `error.Canceled` (guarantee 3).
+- That the caller is still asked to cancel after a run that was cancelled.
+  The request is used up by the time the rescue is given `error.Canceled`,
+  and `run` then returns as after any failure. zrx does not re-arm it: `std`
+  takes `io.recancel()` only from a task whose request was acknowledged,
+  and a handler may return `error.Canceled` without one. A rescue whose
+  caller is a task that must stay cancellable calls it itself.
 - Interrupting a handler or source that never calls into `std.Io`, or that
   swallows `error.Canceled` and goes on.
 - That a request to cancel looks like one everywhere. `std.Io.Writer`
@@ -426,14 +437,14 @@ itself.
 
 1. A handler after a queue uses two program resources while the source fails: neither is released before that handler
    has returned. (Guarantee 4.)
-2. The source waits forever; a handler after a queue fails: `run` returns
-   that error and the source did not wake by itself. (5.)
+2. The source waits forever; a handler after a queue fails: the run fails
+   with that error and the source did not wake by itself. (5.)
 3. As 2, with the failing handler behind two queues, and inside a queued
    `branch` sub-pipe. (5.)
 4. `merge` of an idle source and one that emits, into `take(1)`: `run`
    returns.
-5. `system`: one member fails while another waits forever: `run` returns the
-   failure. On an `Io` without concurrency: `error.ConcurrencyUnavailable`.
+5. `system`: one member fails while another waits forever: the run fails
+   with the failure. On an `Io` without concurrency: `error.ConcurrencyUnavailable`.
 6. A queue compiles in a pipe whose handlers return `anyerror`. (9.)
 7. Graceful end: the source returns with a full queue and a slow consumer;
    every item is handled and a `fold` after the queue emits. (1, 7.)

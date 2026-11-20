@@ -17,5 +17,5 @@ fn itemOf(failed: zrx.Failed(anyerror, u32)) u32 {
 }
 // A failed item has left the pipe: its path cannot hand anything back.
 test {
-    try program(range(u32, 0, 3), .{ recover(anyerror, .{map(itemOf)}), map(evenOnly), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ recover(anyerror, .{map(itemOf)}), map(evenOnly), forEach(ignore) }).run(.{});
 }

@@ -32,6 +32,10 @@ const lines = zrx.lines;
 const fileReader = zrx.fileReader;
 const fileWriter = zrx.fileWriter;
 const stdout = zrx.stdout;
+const stderr = zrx.stderr;
+const rescue = zrx.rescue;
+const forEach = zrx.forEach;
+const fromValue = zrx.fromValue;
 
 pub const max_line = 64;
 pub const window_size = 8;
@@ -130,10 +134,27 @@ pub const readings = pipe(.{
 /// Needs `Sensor`, `Input`, `Archive` and `Alerts`.
 pub const feed = program(lines(Input, max_line), readings);
 
+/// How the app ended, for `main` to return.
+pub const Exit = struct { code: u8 = 0 };
+
+/// Whatever ends a run: one best-effort line on stderr, exit status 2.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.code = 2;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
+
+/// The same line and status for what fails before there is a run, such as
+/// a wrong argument count: a program of one item, the failure.
+pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+}
+
 /// Replays `NORTH SOUTH NORTH_OUT SOUTH_OUT` (the arguments without argv[0]).
 /// Each feed owns its input, its archive and its writer to standard output.
-pub fn execute(io: Io, args: []const []const u8) !void {
-    if (args.len != 4) return error.InvalidArguments;
+/// A run returns nothing: what ends the system goes to `fatal`.
+pub fn execute(io: Io, args: []const []const u8, exit: *Exit) void {
+    if (args.len != 4) return refuse(io, exit, error.InvalidArguments);
     const north = feed.provide(.{
         Sensor.north,
         fileReader(Input, args[0], max_line + 1),
@@ -146,7 +167,7 @@ pub fn execute(io: Io, args: []const []const u8) !void {
         fileWriter(Archive, args[3], 4096, .{ .mode = .publish }),
         stdout(256),
     });
-    try system(.{ north, south }).run(.{io});
+    system(.{ north, south }).run(.{ io, exit, stderr(256), rescue(fatal) });
 }
 
 test "a window keeps the first and last timestamps and the extremes of its readings" {

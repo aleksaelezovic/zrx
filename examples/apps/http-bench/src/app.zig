@@ -78,7 +78,22 @@ pub const announcement = program(fromProducer(u16, boundPort), .{print(zrx.Stdou
 /// Both share the listener: bound once, announced, and accepted from.
 pub const service = system(.{ announcement, server });
 
+/// What the service failed with. A run returns nothing; the command line
+/// this server shares with the plain one wants the failure back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
 /// Serves on the loopback `port` (0 for one the system chooses) until it fails.
 pub fn serve(io: std.Io, port: u16) !void {
-    try service.run(.{ io, http.listen(.{ .ip4 = .loopback(port) }, .{ .reuse_address = true }) });
+    var failure: Failure = .{};
+    service.run(.{
+        io,
+        &failure,
+        zrx.rescue(noteFailure),
+        http.listen(.{ .ip4 = .loopback(port) }, .{ .reuse_address = true }),
+    });
+    if (failure.err) |err| return err;
 }

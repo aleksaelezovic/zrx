@@ -3,6 +3,7 @@
 const std = @import("std");
 const zrx = @import("zrx");
 const program = zrx.program;
+const rescue = zrx.rescue;
 const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const tap = zrx.tap;
@@ -46,7 +47,16 @@ fn save(logger: Logger, database: Database, table: Table, value: i32) !void {
     try logger.info("saved {d} to {s}", .{ value, table.name });
 }
 
-pub fn main(init: std.process.Init) !void {
+const Exit = struct { code: u8 = 0 };
+
+/// A run returns nothing: what ends it goes to a rescue, and here becomes
+/// the exit status.
+fn fail(exit: *Exit, _: anyerror) void {
+    exit.code = 1;
+}
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .{};
     var saved: u32 = 0;
     const values = [_]i32{ 5, 12, 19 };
 
@@ -59,5 +69,6 @@ pub fn main(init: std.process.Init) !void {
         resource(connect, disconnect),
         Table{ .name = "measurements" },
     });
-    try app.run(.{ init.io, &saved });
+    app.run(.{ init.io, &saved, &exit, rescue(fail) });
+    return exit.code;
 }

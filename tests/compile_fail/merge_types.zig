@@ -15,5 +15,5 @@ fn isEven(value: u32) bool {
 fn ignore(_: u32) void {}
 
 test {
-    try program(zrx.merge(.{ range(u32, 0, 3), range(u8, 0, 3) }), pipe(.{forEach(ignore)})).run(.{std.testing.io});
+    program(zrx.merge(.{ range(u32, 0, 3), range(u8, 0, 3) }), pipe(.{forEach(ignore)})).run(.{std.testing.io});
 }

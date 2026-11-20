@@ -79,8 +79,8 @@ to this file; edit `AGENTS.md`, not copies.
   its own, and that is finished where the `recover` is. `error.Canceled`
   is never taken. A path that answers `.done` ends the stream, so the
   stage remembers nothing; a path that fails fails the run. Errors the
-  path does not take are returned by name, so `run`'s error set holds
-  only those. A final value from a stage before the `recover` is an item
+  path does not take are returned by name, so what is left for the run
+  to fail with is only those. A final value from a stage before the `recover` is an item
   like any other; errors of a later stage's own finish, or beyond a
   `queue`, are not item errors. The error still comes back up the call
   stack to the `recover` as a Zig error: nothing is carried through the
@@ -90,9 +90,9 @@ to this file; edit `AGENTS.md`, not copies.
   `recover` one more shape for the scope to be tested with.
 - **The failure of a run goes to a binding, not to a path.** Failures that
   belong to no item (a source, the end of the stream, a resource, another
-  task) are outside every pipe. `rescue(handler)` is where they go instead
-  of into what `run` returns: a resource in every respect but one,
-  written against the binding contract in `src/resources.zig`. Its `bind`
+  task) are outside every pipe. `rescue(handler)` is where they go: a
+  resource in every respect but one, written against the binding contract
+  in `src/resources.zig`. Its `bind`
   calls `next` and catches what comes back, so it guards what is acquired
   after it and runs while what it needs is held, and its `needs` are its
   handler's. The one thing the planner knows about it: of the bindings
@@ -100,9 +100,12 @@ to this file; edit `AGENTS.md`, not copies.
   decides nothing. It provides the marker type `Rescued`, which is what
   makes a run have one rescue and lets `run` replace a program's. It takes
   a handler and not a pipe on purpose: it is given one value once, and a
-  pipe does not say what it needs, which a binding must. It selects by
-  its error parameter as `recover` does by `E`, never takes
-  `error.Canceled`, and returns what it does not take by name.
+  pipe does not say what it needs, which a binding must. Its handler
+  returns `void`: it is the last to be given the failure. What its error
+  parameter does not take is returned by name and so is left over, which
+  `run` refuses. It is given `error.Canceled` like any failure, where an
+  error path never takes one: a cancellation is no item's, but it does
+  end the run, and `run` has no other way to say so.
 - **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and
@@ -147,8 +150,9 @@ to this file; edit `AGENTS.md`, not copies.
   the comments in `src/` say how it is done, not what is promised. Do not
   restate a guarantee anywhere else. Each review of PR 5 found a copy that
   had drifted or had been worded more strongly than the code.
-- **Promise only what a caller can observe**: what `run` returns, what was
-  flushed, what has been torn down, whether `run` returns. Never a moment
+- **Promise only what a caller can observe**: what the run fails with (what
+  its rescue is given), what was flushed, what has been torn down, whether
+  `run` returns. Never a moment
   inside the run, and never "always", "never after" or "whatever else"
   about two tasks: between a look and the act that follows it, the other
   task can move. The caller's cancellation is looked at once the run has
@@ -277,13 +281,23 @@ to this file; edit `AGENTS.md`, not copies.
   operator tuple or `pipe(...)` value. Each child of `branch`, and the
   sub-pipes of `when` and `otherwise`, accept those same two forms, never a
   bare operator. Every branch must terminate; route cases may rejoin.
-- **A run ends with nothing or an error.** `run` returns `void` or an
-  error, by design. Whatever a program produces (output, a summary, a count
-  that decides an exit status) is an effect of a stage in its pipe: a sink,
-  or a handler that writes through a dependency, such as `tap(remember)`
-  into a `*Summary`. That is the intended form and not a workaround. Do not
-  list "a program has no result" as a gap, and do not add a way to return a
-  value from `run`.
+- **A run returns nothing.** `run` returns `void`, by design: neither a
+  value nor an error. Whatever a program produces (output, a summary, a
+  count that decides an exit status) is an effect of a stage in its pipe:
+  a sink, or a handler that writes through a dependency, such as
+  `tap(remember)` into a `*Summary`. What fails it is taken inside it, by
+  an error path or by its rescue, whose effect is the same kind of thing:
+  a line on stderr, a status in an `*Exit`. `whole` in `src/program.zig`
+  is the one place that enforces it: the error set of the run must be
+  empty there, and what is left is named in the compile error. Inside the
+  library a run is still an error union (`runResolved`, a system's
+  members, the scope): only the two public `run`s are total. That is the
+  intended form and not a workaround. Do not list "a program has no
+  result" as a gap, and do not add a way to return a value or an error
+  from `run`. zrx does not call `io.recancel()` for a cancelled run:
+  `std` asserts an acknowledged request, and a handler can return
+  `error.Canceled` without one. The rescue is given the cancellation and
+  the choice is its handler's.
 
 ## Zero overhead
 
@@ -322,6 +336,13 @@ to this file; edit `AGENTS.md`, not copies.
 
 ## Tests and examples
 
+- A test runs a program through `support.run(program, deps)`, which binds
+  a rescue that hands the failure back, so `try` and `expectError` read as
+  they would for an error union. A run that cannot fail, and one that is
+  given a rescue of its own, is run directly. What a run can still fail
+  with is asked through `support.runLeft`, whose `anytype` rescue writes
+  the names down when the run fails: make it fail with what should be
+  left. A mutant then fails a test instead of failing to compile.
 - Suites in `tests/` import only the public `zrx` module, one file per area.
   `tests/extending.zig` keeps the public operator, source and handler contracts
   (and the guide's example) honest.

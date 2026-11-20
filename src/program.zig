@@ -43,9 +43,10 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
         }
 
         /// Runs with the given bindings, values and resources alike, and
-        /// with the defaults they do not replace.
-        pub fn run(self: *const Self, deps: anytype) !void {
-            return resources.run(self.bindings, deps, Run{ .program = self });
+        /// with the defaults they do not replace. It returns nothing: a
+        /// run whose failure nobody takes does not compile.
+        pub fn run(self: *const Self, deps: anytype) void {
+            return whole("program", resources.run(self.bindings, deps, Run{ .program = self }));
         }
 
         pub const zrx_own: Own = .{};
@@ -116,6 +117,31 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
             return Frame.withLocals(Body{ .program = self, .env = env });
         }
     };
+}
+
+/// The end of a run: `result` is what it came to, and there must be nothing
+/// left in it to fail with. What is left is named, so that it can be taken.
+fn whole(comptime who: []const u8, result: anytype) void {
+    const Left = @typeInfo(@TypeOf(result)).error_union.error_set;
+    const names = comptime @typeInfo(Left).error_set.error_names orelse @compileError(
+        who ++ ": this run can fail with any error, because a handler or a source of it returns `anyerror`, and `run` returns nothing; " ++
+            "bind a rescue that takes every error: `rescue(handler)` with `fn (deps..., err: anyerror) void`",
+    );
+    if (comptime names.len != 0) @compileError(left: {
+        // In alphabetical order: the order of an inferred set is the
+        // compiler's, and differs from one build mode to the next.
+        var sorted = names[0..].*;
+        for (1..sorted.len) |i| {
+            var at = i;
+            while (at > 0 and std.mem.lessThan(u8, sorted[at], sorted[at - 1])) : (at -= 1) {
+                std.mem.swap([:0]const u8, &sorted[at], &sorted[at - 1]);
+            }
+        }
+        var text: []const u8 = who ++ ": this run can still fail with ";
+        for (sorted, 0..) |error_name, i| text = text ++ (if (i == 0) "" else ", ") ++ "`error." ++ error_name ++ "`";
+        break :left text ++ ", and `run` returns nothing; take it in the pipe (`recover`, `attempt`, `orElse`) or bind a `rescue(handler)` whose handler takes it";
+    });
+    result catch |err| switch (err) {};
 }
 
 fn Joined(comptime A: type, comptime B: type) type {
@@ -189,8 +215,9 @@ pub fn System(comptime Ps: type) type {
         pub const zrx_program = {};
 
         /// Runs with the given bindings. A resource among them is acquired
-        /// once, around all the programs.
-        pub fn run(self: *const @This(), deps: anytype) !void {
+        /// once, around all the programs. Like a program's `run`, it
+        /// returns nothing.
+        pub fn run(self: *const @This(), deps: anytype) void {
             const Run = struct {
                 system: *const System(Ps),
 
@@ -198,7 +225,7 @@ pub fn System(comptime Ps: type) type {
                     return body.system.runBound(env);
                 }
             };
-            return resources.run(.{}, deps, Run{ .system = self });
+            return whole("system", resources.run(.{}, deps, Run{ .system = self }));
         }
 
         pub const zrx_own: Own = .{};

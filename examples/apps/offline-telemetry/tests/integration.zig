@@ -29,7 +29,7 @@ const Log = struct {
 fn replay(sensor: app.Sensor, input: []const u8, log: *Log) !void {
     var clock: Clock = .init(io);
     var reader: std.Io.Reader = .fixed(input);
-    try app.feed.run(.{
+    try tryRun(app.feed, .{
         clock.io(),
         sensor,
         app.Input{ .reader = &reader },
@@ -62,7 +62,7 @@ test "two feeds of a system write only to their own archive and alerts" {
     var buffers: [4][256]u8 = undefined;
     var north: Log = .init(&buffers[0], &buffers[1]);
     var south: Log = .init(&buffers[2], &buffers[3]);
-    try zrx.system(.{
+    try tryRun(zrx.system(.{
         app.feed.provide(.{
             app.Sensor.north,
             app.Input{ .reader = &north_reader },
@@ -75,7 +75,7 @@ test "two feeds of a system write only to their own archive and alerts" {
             app.Archive{ .writer = &south.archive },
             app.Alerts{ .writer = &south.alerts },
         }),
-    }).run(.{clock.io()});
+    }), .{clock.io()});
     try std.testing.expectEqualStrings(north_alert, north.alerts.buffered());
     try std.testing.expectEqualStrings(north_window, north.archive.buffered());
     try std.testing.expectEqualStrings(south_alert, south.alerts.buffered());
@@ -134,7 +134,7 @@ const Rows = struct {
 };
 
 fn replayOpen(timed: std.Io, feed: *OpenFeed, rows: *Rows, alerts: *std.Io.Writer) !void {
-    try zrx.program(zrx.fromProducer(app.Line, OpenFeed.produce), app.readings).run(.{
+    try tryRun(zrx.program(zrx.fromProducer(app.Line, OpenFeed.produce), app.readings), .{
         timed,
         feed,
         app.Sensor.north,
@@ -255,4 +255,19 @@ test "the executable rejects any other number of arguments" {
     try std.testing.expectEqual(2, outcome.exit);
     try std.testing.expectEqualStrings("", outcome.stdout);
     try std.testing.expectEqualStrings("fatal: InvalidArguments\n", outcome.stderr);
+}
+
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
 }

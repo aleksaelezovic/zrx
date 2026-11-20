@@ -28,5 +28,5 @@ fn fallback(_: error{Odd}, _: u32) u32 {
     return 0;
 }
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, fallback), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, fallback), forEach(ignore) }).run(.{});
 }

@@ -90,11 +90,17 @@ follow it.
 
 ```zig
 const app = program(source, terminated_pipe);
-try app.run(.{ io, logger });
+app.run(.{ io, logger });
 ```
 
 `program` describes the work. `run` constructs fresh stage state each time
 and uses the source and dependencies supplied by the caller.
+
+`run` returns nothing. What a program produces is an effect of a stage in
+its pipe, and what fails it is taken inside it: by an error path in the
+pipe, or by the [`rescue`](#the-failure-of-a-run) among its bindings. A run
+that could still fail with something nobody takes does not compile, and the
+error names what is left.
 
 ```zig
 const report = program(source, .{
@@ -105,7 +111,7 @@ const report = program(source, .{
     fileWriter(Report, path, 4096, .{ .mode = .create_new }),
 });
 
-try report.run(.{io});
+report.run(.{ io, rescue(fatal) });
 ```
 
 `provide` gives a program *defaults*: bindings that `run` uses unless it is
@@ -130,7 +136,7 @@ const app = program(source, work).provide(.{
     resource(openSession, closeSession), // needs a Connection
     resource(connect, disconnect), // needs a Config
 });
-try app.run(.{ io, config });
+app.run(.{ io, config });
 ```
 
 What every resource provides and needs is known at compile time, and that
@@ -146,16 +152,17 @@ program above with `Report{ .writer = &writer }` in the tuple, and no file
 is created.
 
 ```zig
-try system(.{ ingest, report }).run(.{ io, &mailbox });
+system(.{ ingest, report }).run(.{ io, &mailbox, rescue(fatal) });
 ```
 
 `system` runs its programs together with the same bindings and returns when
 all have finished. What it is given replaces a default of the same type in
-each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and is returned; a
+each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and ends the system; a
 program that had ended before that has released its resources. A system is itself runnable,
 so systems nest. With more than one program, each runs as a task of its own,
 so the `Io` must be able to run tasks concurrently; with one that cannot,
-`run` returns `error.ConcurrencyUnavailable`.
+the run fails with `error.ConcurrencyUnavailable`. A system of several
+programs can therefore always fail, and is run with a rescue.
 
 ## Sources
 
@@ -372,10 +379,11 @@ const windows = pipe(.{
 
 ## Errors
 
-A handler that returns an error fails the run: the error comes out of `run`,
-after every resource has been released. `run`'s error set is inferred from your
-handlers and the operators you used: it is `anyerror` only if a handler's is,
-and a program whose handlers cannot fail has an empty one.
+A handler that returns an error fails the run. `run` returns nothing, so
+somebody has to take that error, and the compiler checks that somebody does.
+What a run can fail with is inferred from your handlers and the operators
+you used: a program whose handlers cannot fail and that starts no task can
+fail with nothing, and is run as it is.
 
 There are three ways to handle an item's error instead, and one for a
 failure of the run itself (see [below](#the-failure-of-a-run)). To keep the item as a value
@@ -406,8 +414,8 @@ const manifest = pipe(.{
 
 - `E` selects what the path takes: an error set takes its members and lets
   every other error of `sub` fail the run; `anyerror` takes everything.
-  `error.Canceled` is never taken. What the path takes is no longer in
-  `run`'s error set.
+  `error.Canceled` is never taken. What the path takes is no longer among
+  what the run can fail with.
 - The path emits what the sub-pipe emits. It keeps its state for the whole
   stream and has an end of the stream of its own, after the sub-pipe's. A
   path that wants no more ends the stream; a path that fails fails the run.
@@ -458,7 +466,7 @@ What the path does with a failure decides how it ends:
 
 - `E` selects what the path takes: an error set takes its members and lets
   everything else through; `anyerror` takes everything. What the path takes
-  is no longer in `run`'s error set.
+  is no longer among what the run can fail with.
 - `error.Canceled` is never sent down a path. A write that was interrupted
   because the run is being cancelled is: `std.Io.Writer` reports it as
   `error.WriteFailed` like any failed write.
@@ -477,8 +485,8 @@ What the path does with a failure decides how it ends:
 
 Some failures belong to no item: a source that cannot read, a flush at the
 end of the stream, a resource that cannot be acquired, anything beyond a
-task boundary. An error path cannot take them. They are what `run` returns,
-unless a `rescue` is among the bindings:
+task boundary. An error path cannot take them. They go to the `rescue`
+among the bindings:
 
 ```zig
 const Exit = enum(u8) { ok, failed };
@@ -498,24 +506,36 @@ const app = program(source, records).provide(.{
 ```
 
 `rescue(handler)` is a binding, like a resource. `handler(deps..., err)` is
-called once with the failure, and `run` returns what the handler returns:
-nothing, or an error of the handler's own.
+called once with the failure and returns nothing: it is the last to be
+given it. What a failed run leaves behind is an effect of the handler, such
+as the status above, which `main` returns:
+
+```zig
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .ok;
+    app.run(.{ init.io, &exit });
+    return @intFromEnum(exit);
+}
+```
 
 - It guards what is acquired after it and the run itself. Their failures
   reach the handler once they have been released, while what the handler
   needs is still held: above, the file is closed and stderr is open.
 - It is acquired as soon as what its handler needs is there, wherever it is
-  written. A failure of acquiring what the handler itself needs (the
-  `stderr` above) is not guarded and is what `run` returns.
-- The handler's error parameter selects what it takes, as the `E` of a
-  `recover` does: an error set, or `anyerror`. With `anytype` it is given
-  exactly the errors the run can fail with, so a `switch` over them is
-  checked by the compiler. `error.Canceled` is never given to it. What it
-  takes is no longer in `run`'s error set.
+  written. Acquiring what the handler itself needs (the `stderr` above) is
+  not guarded: if that could fail, the failure would be left over, and the
+  run would not compile.
+- The handler's error parameter says what it takes: `anyerror`, an error
+  set that holds every error the run can fail with, or `anytype`, with
+  which it is given exactly those errors, so that a `switch` over them is
+  checked by the compiler.
+- A cancellation is given to it like any failure. An error path never takes
+  one, because it is no item's, but this is where the run ends. The request
+  to cancel is used up by then: a handler whose caller is itself a task that
+  must stay cancellable calls `io.recancel()` for it.
 - A run has one rescue. Given to `run`, it replaces the one a program
   provides; given to a `system`, it takes the failure that ends the system,
-  in place of the members' own. A member with a rescue of its own, in a
-  system without one, takes its own failure and the other programs go on.
+  in place of the members' own.
 
 ## Stopping early
 
@@ -531,8 +551,8 @@ is done; a handler between the two may run for it. (A `route` whose cases
 rejoin drops such a value itself once the pipe after it is done.)
 
 To stop a run from outside, cancel the task that called `run`. With a task boundary,
-`run` returns `error.Canceled` under the rules in
-[what a run guarantees](#what-a-run-guarantees). Without a boundary or a
+the run fails with `error.Canceled` under the rules in
+[what a run guarantees](#what-a-run-guarantees), and its rescue is given that. Without a boundary or a
 multi-source `merge`, cancellation is handled by the source and handlers
 through their own `Io` calls. To stop
 *gracefully*, end the source. Queues drain, timed operators emit their pending
@@ -680,8 +700,9 @@ For one program with a task boundary in its pipe:
 - **On success**, each stage's `finish` runs once. The end of the stream
   travels with the items: a segment finishes its stages and ends input to
   its boundary, and the next segment handles its pending values and finishes.
-- **On an error**, `run` returns the error. A segment may already have
-  finished or may be cancelled part-way through finishing.
+- **On an error**, the run fails with it: its rescue is given the error. A
+  segment may already have finished or may be cancelled part-way through
+  finishing.
 - **Which error**: the first failure of any segment, or `error.Canceled` if
   the task that called `run` was asked to cancel before the run had joined
   its tasks.
@@ -819,13 +840,13 @@ caller must serialize those writes.
 - `.publish` writes to a temporary file in the same directory and gives it
   its name after the work wrapped by the binding succeeds and the writer is
   flushed. A failure before publication leaves the destination untouched.
-  If the path already exists at publication, the run returns
+  If the path already exists at publication, the run fails with
   `error.PathAlreadyExists`.
 
 Each file is published atomically. With several published files, the last
 one acquired is named first, following resource release order: of the files
 in one tuple, the one written last. If naming one
-fails, `run` returns that error and the files published earlier stay in place.
+fails, the run fails with that error and the files published earlier stay in place.
 
 ```zig
 program(source, work).provide(.{
@@ -860,9 +881,9 @@ test gives it a reader of its own, which replaces a default:
 const app = program(lines(Input, max_line), work);
 
 // in main:
-try app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
+app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
 // in a test:
-try app.run(.{ Input{ .reader = &fixed }, ... });
+app.run(.{ Input{ .reader = &fixed }, ... });
 ```
 
 The buffer must hold the longest line and its newline, as for any reader
@@ -929,7 +950,7 @@ const server = program(http.connections(), .{
     }),
 }).provide(.{http.listen(address, .{ .reuse_address = true })});
 
-try server.run(.{io});
+server.run(.{ io, rescue(fatal) });
 ```
 
 There are two pipes. The program's pipe carries connections; the pipe given
@@ -1126,7 +1147,7 @@ and does not close.
 
 ```zig
 const connection: http.Transport = .{ .reader = &reader, .writer = &writer };
-try program(fromValue(connection), .{http.serve(api)}).run(.{});
+program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
 ```
 
 ### Limits
@@ -1274,9 +1295,9 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Seventeen are `same`; `take`, `batch`,
-the handler combinators and `attempt` are `lean`, each with the reason next
-to it.
+Every synchronous operator has a fixture, and so has `rescue`. Twenty are
+`same`; `take`, `batch`, the handler combinators, `attempt` and a `recover`
+whose path has stages of its own are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it

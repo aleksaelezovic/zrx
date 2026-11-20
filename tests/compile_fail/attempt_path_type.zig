@@ -29,5 +29,5 @@ fn isOdd(_: zrx.Failed(error{Odd}, u32)) bool {
 
 // What the error path emits stands in for what the sub-pipe emits.
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{map(isOdd)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ attempt(.{map(evenOnly)}, error{Odd}, .{map(isOdd)}), forEach(ignore) }).run(.{});
 }

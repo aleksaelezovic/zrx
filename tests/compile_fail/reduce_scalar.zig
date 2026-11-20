@@ -8,5 +8,5 @@ fn sum(total: u32, value: u32) u32 {
 }
 
 test {
-    try program(range(u32, 0, 3), .{ zrx.map(zrx.reduce(0, sum)), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.map(zrx.reduce(0, sum)), zrx.drain() }).run(.{});
 }

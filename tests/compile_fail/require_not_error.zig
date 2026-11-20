@@ -9,5 +9,5 @@ fn isEven(value: u32) bool {
 
 // The error itself is wanted, `error.Odd`, not the set it belongs to.
 test {
-    try program(range(u32, 0, 3), .{ zrx.map(zrx.require(isEven, error{Odd})), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.map(zrx.require(isEven, error{Odd})), zrx.drain() }).run(.{});
 }

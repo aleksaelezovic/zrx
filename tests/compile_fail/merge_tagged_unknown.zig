@@ -8,5 +8,5 @@ const Side = enum { left, right };
 
 test {
     const sources = mergeTagged(Side, .{ .left = range(u32, 0, 3), .right = range(u32, 0, 3), .middle = range(u32, 0, 3) });
-    try program(sources, .{zrx.drain()}).run(.{std.testing.io});
+    program(sources, .{zrx.drain()}).run(.{std.testing.io});
 }

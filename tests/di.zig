@@ -33,14 +33,14 @@ fn scaleAndShift(factor: Scale, offset: Offset, value: u32) u32 {
 test "handlers receive the dependencies they name, whatever the order at run" {
     var seen: Numbers = .{};
     const work = pipe(.{ map(scaleAndShift), forEach(record) });
-    try program(range(u32, 1, 4), work).run(.{ Offset{ .by = 1 }, &seen, Scale{ .by = 10 } });
+    try support.run(program(range(u32, 1, 4), work), .{ Offset{ .by = 1 }, &seen, Scale{ .by = 10 } });
     try seen.expect(&.{ 11, 21, 31 });
 }
 
 test "a dependency may be shared by several handlers" {
     var seen: Numbers = .{};
     const work = pipe(.{ map(scale), map(scale), forEach(record) });
-    try program(range(u32, 1, 3), work).run(.{ Scale{ .by = 3 }, &seen });
+    try support.run(program(range(u32, 1, 3), work), .{ Scale{ .by = 3 }, &seen });
     try seen.expect(&.{ 9, 18 });
 }
 
@@ -48,7 +48,7 @@ test "program bindings are visible to the source and pipe" {
     var seen: Numbers = .{};
     const app = program(zrx.fromProducer(u32, produce), pipe(.{ map(scale), forEach(record) }))
         .provide(.{Scale{ .by = 5 }});
-    try app.run(.{&seen});
+    try support.run(app, .{&seen});
     try seen.expect(&.{25});
 }
 
@@ -61,11 +61,11 @@ test "program bindings are defaults: a value given to run replaces one, the othe
     const app = program(range(u32, 1, 3), pipe(.{ map(scaleAndShift), forEach(record) }))
         .provide(.{Scale{ .by = 2 }})
         .provide(.{Offset{ .by = 1 }});
-    try app.run(.{&seen});
+    try support.run(app, .{&seen});
     try seen.expect(&.{ 3, 5 });
 
     seen = .{};
-    try app.run(.{ Scale{ .by = 100 }, &seen });
+    try support.run(app, .{ Scale{ .by = 100 }, &seen });
     try seen.expect(&.{ 101, 201 });
 }
 
@@ -75,10 +75,10 @@ test "provide and run are one set of bindings, wherever each is written" {
     const scale_by: Scale = .{ .by = 10 };
     const offset_by: Offset = .{ .by = 1 };
     var logs: [4]Numbers = @splat(.{});
-    try program(source, work).run(.{ scale_by, offset_by, &logs[0] });
-    try program(source, work).provide(.{ scale_by, offset_by }).run(.{&logs[1]});
-    try program(source, work).provide(.{offset_by}).run(.{ &logs[2], scale_by });
-    try program(source, work).provide(.{ &logs[3], offset_by, scale_by }).run(.{});
+    try support.run(program(source, work), .{ scale_by, offset_by, &logs[0] });
+    try support.run(program(source, work).provide(.{ scale_by, offset_by }), .{&logs[1]});
+    try support.run(program(source, work).provide(.{offset_by}), .{ &logs[2], scale_by });
+    try support.run(program(source, work).provide(.{ &logs[3], offset_by, scale_by }), .{});
     for (&logs) |*seen| try seen.expect(&.{ 11, 21 });
 }
 
@@ -98,7 +98,7 @@ test "program bindings are visible to both branches" {
         pipe(.{ map(scale), forEach(toLeft) }),
         pipe(.{ map(scale), forEach(toRight) }),
     })});
-    try program(range(u32, 1, 3), work).provide(.{Scale{ .by = 10 }}).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 1, 3), work).provide(.{Scale{ .by = 10 }}), .{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 10, 20 });
     try right.expect(&.{ 10, 20 });
 }
@@ -135,7 +135,7 @@ test "resources are acquired once what they need is there, and released in rever
         map(useSession),
         forEach(record),
     });
-    try program(range(u32, 0, 2), work).provide(.{ resource(connect, disconnect), resource(openSession, closeSession) }).run(.{ &journal, &seen });
+    try support.run(program(range(u32, 0, 2), work).provide(.{ resource(connect, disconnect), resource(openSession, closeSession) }), .{ &journal, &seen });
     try seen.expect(&.{ 8, 9 });
     try journal.expect("CS..sc");
 }
@@ -148,10 +148,10 @@ test "a resource may be written before what it needs, in provide or in run" {
     var journals: [4]Journal = @splat(.{});
     var seen: [4]Numbers = @splat(.{});
     // The session needs the connection, and both need the journal.
-    try program(source, work).provide(.{ session, connection }).run(.{ &journals[0], &seen[0] });
-    try program(source, work).provide(.{session}).run(.{ &seen[1], connection, &journals[1] });
-    try program(source, work).provide(.{connection}).run(.{ session, &journals[2], &seen[2] });
-    try program(source, work).run(.{ session, &seen[3], connection, &journals[3] });
+    try support.run(program(source, work).provide(.{ session, connection }), .{ &journals[0], &seen[0] });
+    try support.run(program(source, work).provide(.{session}), .{ &seen[1], connection, &journals[1] });
+    try support.run(program(source, work).provide(.{connection}), .{ session, &journals[2], &seen[2] });
+    try support.run(program(source, work), .{ session, &seen[3], connection, &journals[3] });
     for (&journals) |*journal| try journal.expect("CS..sc");
     for (&seen) |*log| try log.expect(&.{ 8, 9 });
 }
@@ -188,17 +188,17 @@ test "independent resources are acquired in written order; one that needs others
     // The cache and the connection need only the journal: written order decides.
     var journal: Journal = .{};
     var seen: Numbers = .{};
-    try program(source, work).run(.{ report, cache, session, connection, &journal, &seen });
+    try support.run(program(source, work), .{ report, cache, session, connection, &journal, &seen });
     try journal.expect("WCSRrscw");
     try seen.expect(&.{9});
 
     journal = .{};
-    try program(source, work).run(.{ report, session, connection, cache, &journal, &seen });
+    try support.run(program(source, work), .{ report, session, connection, cache, &journal, &seen });
     try journal.expect("CSWRrwsc");
 
     // Defaults are written before what `run` is given.
     journal = .{};
-    try program(source, work).provide(.{ report, connection }).run(.{ cache, session, &journal, &seen });
+    try support.run(program(source, work).provide(.{ report, connection }), .{ cache, session, &journal, &seen });
     try journal.expect("CWSRrswc");
 }
 
@@ -211,7 +211,7 @@ test "a default resource that run replaces is not acquired" {
     var seen: Numbers = .{};
     const direct = program(range(u32, 0, 2), pipe(.{ map(useConnection), forEach(record) }))
         .provide(.{resource(connect, disconnect)});
-    try direct.run(.{ Connection{ .id = 40 }, &journal, &seen });
+    try support.run(direct, .{ Connection{ .id = 40 }, &journal, &seen });
     try seen.expect(&.{ 40, 41 });
     try journal.expect("");
 
@@ -219,7 +219,7 @@ test "a default resource that run replaces is not acquired" {
     seen = .{};
     const through = program(range(u32, 0, 2), pipe(.{ map(useSession), forEach(record) }))
         .provide(.{ resource(openSession, closeSession), resource(connect, disconnect) });
-    try through.run(.{ Connection{ .id = 40 }, &journal, &seen });
+    try support.run(through, .{ Connection{ .id = 40 }, &journal, &seen });
     try seen.expect(&.{ 41, 42 });
     try journal.expect("S..s");
 }
@@ -234,7 +234,7 @@ test "a resource given to run replaces a default of the same type" {
     var seen: Numbers = .{};
     const app = program(range(u32, 0, 2), pipe(.{ map(useConnection), forEach(record) }))
         .provide(.{resource(connect, disconnect)});
-    try app.run(.{ &seen, resource(borrow, null), &journal });
+    try support.run(app, .{ &seen, resource(borrow, null), &journal });
     try seen.expect(&.{ 20, 21 });
     try journal.expect("B");
 }
@@ -248,7 +248,7 @@ test "resources are released when the run fails" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
     const work = pipe(.{ map(failing), forEach(record) });
-    try std.testing.expectError(error.Boom, program(range(u32, 0, 3), work).provide(.{resource(connect, disconnect)}).run(.{ &journal, &seen }));
+    try std.testing.expectError(error.Boom, support.run(program(range(u32, 0, 3), work).provide(.{resource(connect, disconnect)}), .{ &journal, &seen }));
     try journal.expect("Cc");
 }
 
@@ -261,7 +261,7 @@ test "a failed acquire releases what was acquired before it and runs nothing" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
     const work = pipe(.{ map(useSession), forEach(record) });
-    try std.testing.expectError(error.Refused, program(range(u32, 0, 3), work).provide(.{ resource(connect, disconnect), resource(refuse, closeSession) }).run(.{ &journal, &seen }));
+    try std.testing.expectError(error.Refused, support.run(program(range(u32, 0, 3), work).provide(.{ resource(connect, disconnect), resource(refuse, closeSession) }), .{ &journal, &seen }));
     try journal.expect("CXc");
     try seen.expect(&.{});
 }
@@ -273,7 +273,7 @@ fn derive(factor: Scale) Offset {
 test "a resource without release is a dependency computed from others" {
     var seen: Numbers = .{};
     const work = pipe(.{ map(shift), forEach(record) });
-    try program(range(u32, 1, 3), work).provide(.{resource(derive, null)}).run(.{ Scale{ .by = 2 }, &seen });
+    try support.run(program(range(u32, 1, 3), work).provide(.{resource(derive, null)}), .{ Scale{ .by = 2 }, &seen });
     try seen.expect(&.{ 201, 202 });
 }
 
@@ -288,23 +288,12 @@ fn noteFailure(journal: *Journal, failure: *Failure, err: anyerror) void {
     failure.calls += 1;
 }
 
-/// The errors a run can still return, from the type of its result: their
-/// names, each followed by a space.
-fn remaining(comptime Result: type) []const u8 {
-    comptime var text: []const u8 = "";
-    inline for (@typeInfo(@typeInfo(Result).error_union.error_set).error_set.error_names.?) |error_name| text = text ++ error_name ++ " ";
-    return text;
-}
-
-test "a rescue is called once with the failure of the run, which then is not what run returns" {
+test "a rescue is called once with the failure of the run" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
     var failure: Failure = .{};
     const work = pipe(.{ map(failing), forEach(record) });
-    const guarded = program(range(u32, 0, 3), work);
-    const deps = .{ &journal, &seen, &failure, rescue(noteFailure) };
-    try std.testing.expectEqualStrings("", comptime remaining(@TypeOf(guarded.run(deps))));
-    try guarded.run(deps);
+    program(range(u32, 0, 3), work).run(.{ &journal, &seen, &failure, rescue(noteFailure) });
     try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
     try seen.expect(&.{0});
 }
@@ -313,7 +302,7 @@ test "a rescue is not called for a run that succeeds" {
     var journal: Journal = .{};
     var seen: Numbers = .{};
     var failure: Failure = .{};
-    try program(range(u32, 2, 4), pipe(.{ map(failing), forEach(record) })).run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    program(range(u32, 2, 4), pipe(.{ map(failing), forEach(record) })).run(.{ &journal, &seen, &failure, rescue(noteFailure) });
     try std.testing.expectEqual(Failure{}, failure);
     try seen.expect(&.{ 2, 3 });
 }
@@ -327,7 +316,7 @@ test "a rescue is given a failure once what was acquired after it is released, a
     var seen: Numbers = .{};
     var failure: Failure = .{};
     const bindings = .{ resource(connect, disconnect), resource(openSession, closeSession), rescue(noteHoldingConnection) };
-    try program(range(u32, 0, 3), pipe(.{ map(failing), map(useSession), forEach(record) })).provide(bindings).run(.{ &journal, &seen, &failure });
+    program(range(u32, 0, 3), pipe(.{ map(failing), map(useSession), forEach(record) })).provide(bindings).run(.{ &journal, &seen, &failure });
     // The connection, the session, one item, the session closed, the
     // rescue, the connection closed.
     try journal.expect("CS.s!c");
@@ -337,7 +326,7 @@ test "a rescue is given a failure once what was acquired after it is released, a
     journal = .{};
     failure = .{};
     const refusing = .{ resource(connect, disconnect), resource(refuse, closeSession), rescue(noteHoldingConnection) };
-    try program(range(u32, 0, 3), pipe(.{ map(useSession), forEach(record) })).provide(refusing).run(.{ &journal, &seen, &failure });
+    program(range(u32, 0, 3), pipe(.{ map(useSession), forEach(record) })).provide(refusing).run(.{ &journal, &seen, &failure });
     try journal.expect("CX!c");
     try std.testing.expectEqual(Failure{ .err = error.Refused, .calls = 1 }, failure);
 }
@@ -347,27 +336,13 @@ test "a rescue guards all it can, wherever it is written" {
     var seen: Numbers = .{};
     var failure: Failure = .{};
     // Given to `run`, it is written after the program's own resources. It
-    // needs none of them, so it is there before they are acquired.
+    // needs none of them, so it is there before they are acquired. Were it
+    // not, their failure would be left over and this would not compile.
     const app = program(range(u32, 0, 3), pipe(.{ map(useSession), forEach(record) }))
         .provide(.{ resource(connect, disconnect), resource(refuse, closeSession) });
-    try app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
     try journal.expect("CXc!");
     try std.testing.expectEqual(Failure{ .err = error.Refused, .calls = 1 }, failure);
-}
-
-fn noNetwork(journal: *Journal) error{NoNetwork}!Connection {
-    journal.add('N');
-    return error.NoNetwork;
-}
-
-test "a failure of acquiring what a rescue needs is what run returns" {
-    var journal: Journal = .{};
-    var seen: Numbers = .{};
-    var failure: Failure = .{};
-    const app = program(range(u32, 0, 3), pipe(.{forEach(record)})).provide(.{ resource(noNetwork, disconnect), rescue(noteHoldingConnection) });
-    try std.testing.expectError(error.NoNetwork, app.run(.{ &journal, &seen, &failure }));
-    try journal.expect("N");
-    try std.testing.expectEqual(Failure{}, failure);
 }
 
 fn noteBoom(failure: *Failure, err: error{Boom}) void {
@@ -375,28 +350,20 @@ fn noteBoom(failure: *Failure, err: error{Boom}) void {
     failure.calls += 1;
 }
 
-test "a rescue with an error set lets other errors through" {
-    var journal: Journal = .{};
+test "a rescue may name the errors it takes, when they are all the run can fail with" {
     var seen: Numbers = .{};
     var failure: Failure = .{};
-    const refusing = program(range(u32, 0, 3), pipe(.{ map(failing), map(useSession), forEach(record) }))
-        .provide(.{ resource(connect, disconnect), resource(refuse, closeSession), rescue(noteBoom) });
-    const deps = .{ &journal, &seen, &failure };
-    try std.testing.expectEqualStrings("Refused ", comptime remaining(@TypeOf(refusing.run(deps))));
-    try std.testing.expectError(error.Refused, refusing.run(deps));
-    try std.testing.expectEqual(Failure{}, failure);
-
-    const failing_later = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) })).provide(.{rescue(noteBoom)});
-    try failing_later.run(deps);
+    program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) })).provide(.{rescue(noteBoom)}).run(.{ &seen, &failure });
     try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
 }
 
 /// Names every error it can be given: this compiles only if those are
-/// exactly the errors of the run, a cancellation left out.
+/// exactly the errors of the run. A cancellation is one of them.
 fn noteExactly(failure: *Failure, err: anytype) void {
     failure.err = switch (err) {
         error.Boom => error.Boom,
         error.Refused => error.Refused,
+        error.Canceled => error.Canceled,
     };
     failure.calls += 1;
 }
@@ -410,16 +377,15 @@ fn sessionOrRefuse(journal: *Journal, connection: Connection) error{Refused}!Ses
     return openSession(journal, connection);
 }
 
-test "a rescue that takes anytype is given exactly the errors of the run, and never a cancellation" {
-    var journal: Journal = .{};
-    var seen: Numbers = .{};
-    var failure: Failure = .{};
+test "a rescue is given exactly the errors of the run, and a cancellation like any of them" {
     inline for (.{ noteExactly, noteFailure }) |handler| {
+        var journal: Journal = .{};
+        var seen: Numbers = .{};
+        var failure: Failure = .{};
         const app = program(range(u32, 0, 3), pipe(.{ map(interrupted), forEach(record) }));
-        const deps = .{ &journal, &seen, &failure, rescue(handler), resource(connect, disconnect), resource(sessionOrRefuse, closeSession) };
-        try std.testing.expectEqualStrings("Canceled ", comptime remaining(@TypeOf(app.run(deps))));
-        try std.testing.expectError(error.Canceled, app.run(deps));
-        try std.testing.expectEqual(Failure{}, failure);
+        app.run(.{ &journal, &seen, &failure, rescue(handler), resource(connect, disconnect), resource(sessionOrRefuse, closeSession) });
+        try std.testing.expectEqual(Failure{ .err = error.Canceled, .calls = 1 }, failure);
+        try seen.expect(&.{0});
     }
 }
 
@@ -432,27 +398,11 @@ test "a rescue given to run replaces the one a program provides" {
     var seen: Numbers = .{};
     var failure: Failure = .{};
     const app = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) })).provide(.{rescue(noteDefault)});
-    try app.run(.{ &journal, &seen });
+    app.run(.{ &journal, &seen });
     try journal.expect("d");
     journal = .{};
-    try app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
+    app.run(.{ &journal, &seen, &failure, rescue(noteFailure) });
     try journal.expect("!");
-}
-
-fn giveUp(failure: *Failure, err: anyerror) error{Lost}!void {
-    failure.err = err;
-    failure.calls += 1;
-    return error.Lost;
-}
-
-test "a rescue that fails fails the run with its own error" {
-    var seen: Numbers = .{};
-    var failure: Failure = .{};
-    const app = program(range(u32, 0, 3), pipe(.{ map(failing), forEach(record) }));
-    const deps = .{ &seen, &failure, rescue(giveUp) };
-    try std.testing.expectEqualStrings("Lost ", comptime remaining(@TypeOf(app.run(deps))));
-    try std.testing.expectError(error.Lost, app.run(deps));
-    try std.testing.expectEqual(Failure{ .err = error.Boom, .calls = 1 }, failure);
 }
 
 // --- generic handlers -----------------------------------------------------
@@ -466,7 +416,7 @@ fn narrow(value: u64) u32 {
 
 test "the data parameter of a handler may be generic" {
     var seen: Numbers = .{};
-    try program(range(u32, 1, 3), pipe(.{ map(widen), map(narrow), forEach(record) })).run(.{&seen});
+    try support.run(program(range(u32, 1, 3), pipe(.{ map(widen), map(narrow), forEach(record) })), .{&seen});
     try seen.expect(&.{ 1, 2 });
 }
 
@@ -477,6 +427,6 @@ fn bump(counter: *Counter, value: u32) void {
 
 test "a pointer dependency is shared, not copied" {
     var counter: Counter = .{};
-    try program(range(u32, 1, 4), pipe(.{ tap(bump), forEach(bump) })).run(.{&counter});
+    try support.run(program(range(u32, 1, 4), pipe(.{ tap(bump), forEach(bump) })), .{&counter});
     try std.testing.expectEqual(@as(u32, 12), counter.total);
 }

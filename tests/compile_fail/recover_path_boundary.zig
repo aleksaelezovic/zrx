@@ -14,5 +14,5 @@ fn ignore(_: anytype) void {}
 
 // A failure taken beyond a queue is handled on another task.
 test {
-    try program(range(u32, 0, 3), .{ recover(anyerror, .{ zrx.queue(2), forEach(ignore) }), map(evenOnly), forEach(ignore) }).run(.{std.testing.io});
+    program(range(u32, 0, 3), .{ recover(anyerror, .{ zrx.queue(2), forEach(ignore) }), map(evenOnly), forEach(ignore) }).run(.{std.testing.io});
 }

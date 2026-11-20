@@ -28,5 +28,5 @@ fn double(value: u32) u32 {
 }
 
 test {
-    try program(range(u32, 0, 3), .{ attempt(.{map(double)}, error{Odd}, .{map(zero)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ attempt(.{map(double)}, error{Odd}, .{map(zero)}), forEach(ignore) }).run(.{});
 }

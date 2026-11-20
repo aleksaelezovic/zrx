@@ -10,5 +10,5 @@ const json = zrx.ext.json;
 test {
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
-    try program(range(u32, 0, 3), pipe(.{ map(json.encode(42)), write(*std.Io.Writer, "{f}\n") })).run(.{&writer});
+    program(range(u32, 0, 3), pipe(.{ map(json.encode(42)), write(*std.Io.Writer, "{f}\n") })).run(.{&writer});
 }

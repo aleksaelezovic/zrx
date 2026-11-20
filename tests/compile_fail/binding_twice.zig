@@ -8,5 +8,5 @@ fn connect() Connection {
 fn ignore(_: Connection, _: u32) void {}
 
 test "a value and a resource in one tuple provide the same type" {
-    try zrx.program(zrx.range(u32, 0, 3), .{zrx.forEach(ignore)}).run(.{ zrx.resource(connect, null), Connection{ .id = 2 } });
+    zrx.program(zrx.range(u32, 0, 3), .{zrx.forEach(ignore)}).run(.{ zrx.resource(connect, null), Connection{ .id = 2 } });
 }

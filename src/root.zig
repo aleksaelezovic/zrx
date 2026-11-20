@@ -6,7 +6,7 @@
 //! several programs together. Everything is resolved at compile time.
 //!
 //!     const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), forEach(report) });
-//!     try program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
+//!     program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
 
 // Composition
 pub const pipe = @import("pipe.zig").pipe;
