@@ -54,14 +54,14 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
         /// What a `system` calls for its members: `env` is an environment
         /// that is already resolved, so every element of it is a value,
         /// whatever its type looks like. The defaults still apply.
-        fn runResolved(self: *const Self, env: anytype) !void {
-            return resources.run(self.bindings, resources.resolved(env), Run{ .program = self });
+        fn runResolved(self: *const Self, env: anytype, comptime rescued: bool) !void {
+            return resources.run(self.bindings, resources.resolved(env, rescued), Run{ .program = self });
         }
 
         const Run = struct {
             program: *const Self,
 
-            pub fn call(body: @This(), env: anytype) !void {
+            pub fn call(body: @This(), env: anytype, comptime _: bool) !void {
                 return body.program.runBound(env);
             }
         };
@@ -221,8 +221,8 @@ pub fn System(comptime Ps: type) type {
             const Run = struct {
                 system: *const System(Ps),
 
-                pub fn call(body: @This(), env: anytype) !void {
-                    return body.system.runBound(env);
+                pub fn call(body: @This(), env: anytype, comptime rescued: bool) !void {
+                    return body.system.runBound(env, rescued);
                 }
             };
             return whole("system", resources.run(.{}, deps, Run{ .system = self }));
@@ -231,18 +231,20 @@ pub fn System(comptime Ps: type) type {
         pub const zrx_own: Own = .{};
 
         /// A system inside a system: nothing is left to resolve.
-        fn runResolved(self: *const @This(), env: anytype) !void {
-            return self.runBound(env);
+        fn runResolved(self: *const @This(), env: anytype, comptime rescued: bool) !void {
+            return self.runBound(env, rescued);
         }
 
-        fn runBound(self: *const @This(), env: anytype) !void {
+        /// `rescued`: whether a rescue stands outside this system. Its
+        /// programs are told, and leave their own out.
+        fn runBound(self: *const @This(), env: anytype, comptime rescued: bool) !void {
             const Env = @TypeOf(env);
-            if (members.len == 1) return runMember(&self.programs[0], env);
+            if (members.len == 1) return runMember(&self.programs[0], env, rescued);
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");
 
             const list = comptime blk: {
                 var types: [members.len]type = undefined;
-                for (members, 0..) |P, i| types[i] = Member(P, Env);
+                for (members, 0..) |P, i| types[i] = Member(P, Env, rescued);
                 break :blk types;
             };
             var group: @Tuple(&list) = undefined;
@@ -253,13 +255,13 @@ pub fn System(comptime Ps: type) type {
     };
 }
 
-fn Member(comptime P: type, comptime Env: type) type {
+fn Member(comptime P: type, comptime Env: type, comptime rescued: bool) type {
     return struct {
         program: *const P,
         env: Env,
 
         pub fn run(self: @This()) !void {
-            return runMember(self.program, self.env);
+            return runMember(self.program, self.env, rescued);
         }
     };
 }
@@ -278,7 +280,7 @@ fn isOwn(comptime M: type) bool {
 /// of this library takes it as resolved values. Any other runnable (a type
 /// with `zrx_program` and `run`) is given the tuple itself, as `run` always
 /// was, and never sees how this library marks one.
-fn runMember(member: anytype, env: anytype) !void {
+fn runMember(member: anytype, env: anytype, comptime rescued: bool) !void {
     const M = @TypeOf(member.*);
-    return if (comptime isOwn(M)) member.runResolved(env) else member.run(env);
+    return if (comptime isOwn(M)) member.runResolved(env, rescued) else member.run(env);
 }

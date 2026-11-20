@@ -73,8 +73,8 @@ const north = feed.provide(.{
   own archive file and its own writer to standard output, so there is no
   lock.
 - A run returns nothing. What ends the system goes to the `rescue(fatal)`
-  it is run with, `system(.{ north, south }).run(.{ io, exit, stderr(256),
-  rescue(fatal) })`: the `fatal:` line and the status `main` returns.
+  it is run with, `rescue(fatal).provide(.{stderr(256)})`: the `fatal:`
+  line and the status `main` returns.
 
 ## Format and output
 

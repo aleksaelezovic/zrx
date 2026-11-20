@@ -331,6 +331,28 @@ test "recover selects what it takes also where any error is possible" {
     try rejected.expect(&.{ 1, 3 });
 }
 
+const Canceling = struct { seen: ?anyerror = null };
+fn onlyCanceled(canceling: *Canceling, err: error{Canceled}) void {
+    canceling.seen = err;
+}
+
+test "after a recover that takes everything, only a cancellation is left, also of any error" {
+    var seen: Numbers = .{};
+    var rejected: Numbers = .{};
+    var canceling: Canceling = .{};
+    // `loose` can fail with anything. This compiles with a rescue that
+    // takes a cancellation and nothing else: nothing else is left.
+    program(range(u32, 0, 8), pipe(.{ recover(anyerror, rejections), map(loose), forEach(record) })).run(.{
+        &seen,
+        Rejected{ .seen = &rejected },
+        &canceling,
+        zrx.rescue(onlyCanceled),
+    });
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), canceling.seen);
+    try seen.expect(&.{ 0, 2, 4 });
+    try rejected.expect(&.{ 1, 3 });
+}
+
 test "recover only guards what comes after it" {
     var seen: Numbers = .{};
     var rejected: Numbers = .{};

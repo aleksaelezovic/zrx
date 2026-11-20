@@ -167,7 +167,7 @@ pub fn execute(io: Io, args: []const []const u8, exit: *Exit) void {
         fileWriter(Archive, args[3], 4096, .{ .mode = .publish }),
         stdout(256),
     });
-    system(.{ north, south }).run(.{ io, exit, stderr(256), rescue(fatal) });
+    system(.{ north, south }).run(.{ io, exit, rescue(fatal).provide(.{stderr(256)}) });
 }
 
 test "a window keeps the first and last timestamps and the extremes of its readings" {

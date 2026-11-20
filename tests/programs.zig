@@ -367,15 +367,19 @@ const Lookalike = struct {
     }
 };
 
+/// A rescue that needs nothing, for a system of several: starting tasks can
+/// fail, so such a system is run with one.
+fn unexpected(_: anyerror) void {
+    unreachable;
+}
+
 test "a system calls a runnable's run, whatever else the runnable declares" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
     system(.{Lookalike{}}).run(.{Left{ .seen = &left }});
-    // A system of two can fail, so this one is run with a rescue: that and
-    // what the rescue writes to are two dependencies more.
-    try support.run(system(.{ Lookalike{}, b }), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    try left.expect(&.{ 1, 5 });
+    system(.{ Lookalike{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, zrx.rescue(unexpected) });
+    try left.expect(&.{ 1, 3 });
     try right.expect(&.{2});
 }
 
@@ -384,11 +388,38 @@ test "a runnable of the caller's own is given a system's dependencies as a tuple
     var right: Numbers = .{};
     const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
     system(.{Custom{}}).run(.{Left{ .seen = &left }});
-    try support.run(system(.{ Custom{}, b }), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    // What it counted: one dependency, then the three of the second run
-    // and the two a test's rescue adds.
-    try left.expect(&.{ 1, 5 });
+    system(.{ Custom{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, zrx.rescue(unexpected) });
+    // What it counted: one dependency, then three. A rescue is not one.
+    try left.expect(&.{ 1, 3 });
     try right.expect(&.{2});
+}
+
+/// Two runnables that say exactly what they are given. They run at the same
+/// time in a system of two, so each writes to a log of its own.
+const ExactLeft = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const ExactLeft, deps: struct { std.Io, Left, Right }) void {
+        deps[1].seen.add(7);
+    }
+};
+const ExactRight = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const ExactRight, deps: struct { std.Io, Left, Right }) void {
+        deps[2].seen.add(8);
+    }
+};
+
+test "a runnable that names its dependencies is given those and nothing else, with or without a rescue" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const sinks = .{ Left{ .seen = &left }, Right{ .seen = &right } };
+    system(.{ExactLeft{}}).run(.{io} ++ sinks);
+    system(.{ExactLeft{}}).run(.{io} ++ sinks ++ .{zrx.rescue(unexpected)});
+    system(.{ ExactLeft{}, ExactRight{} }).run(.{io} ++ sinks ++ .{zrx.rescue(unexpected)});
+    try left.expect(&.{ 7, 7, 7 });
+    try right.expect(&.{8});
 }
 
 fn patiently(clock: std.Io, out: anytype) !void {

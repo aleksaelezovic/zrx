@@ -12,11 +12,14 @@ fn evenOnly(value: u32) error{Odd}!u32 {
 }
 fn ignore(_: anytype) void {}
 const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
+/// A run that cannot fail: its rescue is never called.
+const steady = program(range(u32, 0, 3), .{forEach(ignore)});
 
-// A run ends with nothing or an error: there is nowhere for a value to go.
+// There is nowhere for a value to go. Said where the rescue is written:
+// this run cannot fail, so the handler would never be called.
 fn status(_: anyerror) u8 {
     return 1;
 }
 test {
-    failing.run(.{rescue(status)});
+    steady.run(.{rescue(status)});
 }

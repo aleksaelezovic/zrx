@@ -48,7 +48,8 @@ const Exit = struct { code: u8 = 0 };
 
 /// What belongs to no line, such as a write that fails, ends the run. A run
 /// returns nothing: the failure goes to a rescue, which reports it and
-/// leaves a status for `main`.
+/// leaves a status for `main`. It is called when the run is over, with a
+/// stderr of its own: the run's has been released by then.
 fn fatal(err_out: zrx.Stderr, exit: *Exit, err: anyerror) void {
     exit.code = 1;
     err_out.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
@@ -61,7 +62,7 @@ pub fn main(init: std.process.Init) u8 {
     const app = program(fromSlice(&input), records).provide(.{
         stdout(256),
         stderr(256),
-        rescue(fatal),
+        rescue(fatal).provide(.{stderr(64)}),
     });
     app.run(.{ init.io, &exit });
     return exit.code;

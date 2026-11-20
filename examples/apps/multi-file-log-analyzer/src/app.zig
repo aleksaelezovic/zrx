@@ -109,8 +109,7 @@ pub fn execute(io: std.Io, args: []const []const u8, exit: *Exit) void {
     analyzer.run(.{
         io,
         exit,
-        stderr(256),
-        rescue(fatal),
+        rescue(fatal).provide(.{stderr(256)}),
         fileReader(Left, args[0], max_line + 1),
         fileReader(Right, args[1], max_line + 1),
         fileWriter(Alerts, args[2], 4096, .{ .mode = .publish }),

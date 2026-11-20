@@ -70,8 +70,7 @@ pub fn run(io: std.Io, input: []const u8, output: []const u8, exit: *Exit) void 
     archiving.run(.{
         io,
         exit,
-        stderr(256),
-        rescue(fatal),
+        rescue(fatal).provide(.{stderr(256)}),
         fileReader(Input, input, records.max_line + 1),
         fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
     });

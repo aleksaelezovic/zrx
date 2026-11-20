@@ -51,8 +51,7 @@ pub const manifest = pipe(.{
 program(fromSlice(args[2..]), manifest).run(.{
     init.io,
     &exit,
-    stderr(256),
-    rescue(fatal),
+    rescue(fatal).provide(.{stderr(256)}),
     fileWriter(Manifest, args[1], 8192, .{ .mode = .publish }),
 });
 return @backingInt(exit);

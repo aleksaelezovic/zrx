@@ -38,8 +38,7 @@ pub const archiving = program(lines(Input, records.max_line), archive);
 archiving.run(.{
     io,
     exit,
-    stderr(256),
-    rescue(fatal),
+    rescue(fatal).provide(.{stderr(256)}),
     fileReader(Input, input, records.max_line + 1),
     fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
 });
@@ -62,7 +61,8 @@ archiving.run(.{
   test gives it a reader and a writer of its own in their place.
 - A run returns nothing. What fails it goes to `rescue(fatal)`, which
   writes the `fatal:` line and stores the exit status `main` returns. It
-  is called once both files are closed, while stderr is still open.
+  is called once the run is over and both files are closed, with a stderr
+  of its own.
 - `main.zig` checks the argument count and returns the status. A wrong
   count is reported by a program too: `fromValue` into `forEach(fatal)`.
 

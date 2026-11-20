@@ -362,6 +362,24 @@ test "attempt selects what it takes also where any error is possible" {
     try seen.expect(&.{ 0, 101, 2, 103, 4 });
 }
 
+const Canceling = struct { seen: ?anyerror = null };
+fn onlyCanceled(canceling: *Canceling, err: error{Canceled}) void {
+    canceling.seen = err;
+}
+
+test "after an attempt that takes everything, only a cancellation is left, also of any error" {
+    var seen: Numbers = .{};
+    var canceling: Canceling = .{};
+    // As for `recover`: this compiles with a rescue for a cancellation alone.
+    program(range(u32, 0, 8), .{ attempt(.{map(loose)}, anyerror, .{map(anyPlusHundred)}), forEach(record) }).run(.{
+        &seen,
+        &canceling,
+        zrx.rescue(onlyCanceled),
+    });
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), canceling.seen);
+    try seen.expect(&.{ 0, 101, 2, 103, 4 });
+}
+
 fn failedItem(failed: Failed(ParseError, u32)) u32 {
     return failed.item;
 }
@@ -469,6 +487,68 @@ test "a recover inside the sub-pipe does not see a failure of the pipe after the
     try std.testing.expectError(error.Ended, result);
     try rejected.expect(&.{});
     try std.testing.expectEqual(@as(usize, 0), fallbacks.count);
+}
+
+// Every way from an `attempt` into the pipe after it: what the sub-pipe
+// emits and what the error path emits, for an item and at the end of the
+// stream. A failure of the pipe after the attempt is the run's on each of
+// them. A `recover` at the end of a sub-pipe guards nothing of that
+// sub-pipe: it could only take what comes back from the pipe after the
+// attempt, and it must be given none of it.
+
+const Spy = struct { took: u32 = 0 };
+fn spy(seen: *Spy, _: anytype) void {
+    seen.took += 1;
+}
+const watching = recover(anyerror, .{forEach(spy)});
+
+fn failAtFour(value: u32) error{Later}!u32 {
+    if (value == 4) return error.Later;
+    return value;
+}
+fn failAbove100Later(value: u32) error{Later}!u32 {
+    if (value > 100) return error.Later;
+    return value;
+}
+
+test "a failure of the pipe after an attempt is the run's, whichever sub-pipe was emitting and when" {
+    const Case = struct { []const u8, []const u32, u32 };
+    const sub = pipe(.{ map(evenOnly), watching });
+    const path = pipe(.{ map(plusHundred), watching });
+    const sub_summed = pipe(.{ map(evenOnly), fold(@as(u32, 0), add), watching });
+    const path_summed = pipe(.{ map(failedItem), fold(@as(u32, 0), add), watching });
+    inline for (.{
+        // The sub-pipe emits 4 for an item, which fails after the attempt.
+        .{ sub, path, failAtFour, Case{ "for an item, from the sub-pipe", &.{ 0, 2, 4, 6 }, 0 } },
+        // The error path emits 101 for an item, which fails after it.
+        .{ sub, path, failAbove100Later, Case{ "for an item, from the error path", &.{ 0, 1, 2 }, 1 } },
+        // The sub-pipe emits its sum of 4 when the stream ends.
+        .{ sub_summed, path, failAtFour, Case{ "at the end, from the sub-pipe", &.{ 0, 4 }, 0 } },
+        // The error path emits its sum of 1 and 3 when the stream ends.
+        .{ sub, path_summed, failAtFour, Case{ "at the end, from the error path", &.{ 0, 1, 2, 3 }, 0 } },
+    }) |row| {
+        const case: Case = row[3];
+        var seen: Numbers = .{};
+        var fallbacks: Fallbacks = .{};
+        var watched: Spy = .{};
+        const work = pipe(.{ attempt(row[0], ParseError, row[1]), map(row[2]), forEach(record) });
+        const result = support.run(program(fromSlice(case[1]), work), .{ &seen, &fallbacks, &watched });
+        errdefer std.debug.print("case: {s}\n", .{case[0]});
+        try std.testing.expectError(error.Later, result);
+        try std.testing.expectEqual(@as(u32, 0), watched.took);
+        try std.testing.expectEqual(@as(usize, case[2]), fallbacks.count);
+    }
+}
+
+test "a recover in an error path still takes what the path itself fails with" {
+    var seen: Numbers = .{};
+    var watched: Spy = .{};
+    // The seal is against the pipe after the attempt, not against the path.
+    const path = pipe(.{ watching, map(giveUpOnTooBig) });
+    const values = [_]u32{ 2, 3, 500, 4 };
+    try support.run(program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, ParseError, path), forEach(record) }), .{ &seen, &watched });
+    try seen.expect(&.{ 2, 103, 4 });
+    try std.testing.expectEqual(@as(u32, 1), watched.took);
 }
 
 /// A stage that does not keep to the contract: it pushes every item twice,

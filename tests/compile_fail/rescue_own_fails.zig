@@ -12,13 +12,15 @@ fn evenOnly(value: u32) error{Odd}!u32 {
 }
 fn ignore(_: anytype) void {}
 const failing = program(range(u32, 0, 3), .{ map(evenOnly), forEach(ignore) });
+/// A run that cannot fail: its rescue is never called.
+const steady = program(range(u32, 0, 3), .{forEach(ignore)});
 
 const Log = struct { lines: u32 };
 fn openLog() error{NoDisk}!Log {
     return error.NoDisk;
 }
-// A rescue does not guard the acquiring of what its own handler needs.
+// What a rescue is given for itself has to be there when it is called.
 fn note(_: Log, _: anyerror) void {}
 test {
-    failing.run(.{ zrx.resource(openLog, null), rescue(note) });
+    failing.run(.{rescue(note).provide(.{zrx.resource(openLog, null)})});
 }

@@ -11,6 +11,8 @@ const core = @import("../pipe.zig");
 const program = @import("../program.zig");
 const sources = @import("../sources.zig");
 const completion = @import("../completion.zig");
+const failure = @import("../failure.zig");
+const Failed = failure.Failed;
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -135,8 +137,56 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
 }
 
 // ---------------------------------------------------------------------------
-// attempt
+// error paths: attempt and recover
 // ---------------------------------------------------------------------------
+
+/// The error set an error path is for, checked where the operator is written.
+fn Handled(comptime who: []const u8, comptime example: []const u8, comptime handler: []const u8, comptime handled: anytype) type {
+    if (@TypeOf(handled) != type or @typeInfo(handled) != .error_set) @compileError(
+        who ++ ": the errors to take must be an error set such as `ParseError`, or `anyerror`, got `" ++
+            (if (@TypeOf(handled) == type) @typeName(handled) else @typeName(@TypeOf(handled))) ++
+            "`; write `" ++ example ++ "`, where `" ++ handler ++ "` takes a `Failed(ParseError, Item)`",
+    );
+    return handled;
+}
+
+/// What stands between a sub-pipe that rejoins and the pipe after it: the
+/// `down` the sub-pipe is given. A failure of the pipe after it does not
+/// travel back through the sub-pipe, where it would look like the
+/// sub-pipe's own and a `recover` in there could take it. It is set aside,
+/// the sub-pipe is told that nothing more is wanted, and whoever pushed
+/// returns it once the sub-pipe has returned.
+///
+/// Everything a sub-pipe of `attempt` hands to the pipe after it goes
+/// through one of these: what either sub-pipe emits for an item, and what
+/// either emits at the end of the stream.
+fn Seal(comptime Down: type, comptime T: type) type {
+    return struct {
+        down: Down,
+        failed: ?Outside = null,
+
+        const Sealed = @This();
+
+        /// What a push into `Down` can fail with.
+        const Outside = @typeInfo(@TypeOf(@as(Down, undefined).push(@as(T, undefined)))).error_union.error_set;
+
+        const Tail = struct {
+            seal: *Sealed,
+
+            pub fn push(end: Tail, value: T) error{}!Flow {
+                if (end.seal.failed != null) return .done;
+                return end.seal.down.push(value) catch |err| {
+                    end.seal.failed = err;
+                    return .done;
+                };
+            }
+        };
+
+        fn tail(seal: *Sealed) Tail {
+            return .{ .seal = seal };
+        }
+    };
+}
 
 /// `sub`, with a failure turned into a value. When `sub` fails for an item
 /// with an error in `handled`, a `Failed(handled, Item)` goes down `path`,
@@ -151,8 +201,9 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
 ///
 /// What `sub` had already emitted for the item is not taken back, and its
 /// stages keep the state the item gave them. A failure of the pipe *after*
-/// the `attempt` is not the sub-pipe's: it fails the run as it would without
-/// the `attempt`. So does a failure of `sub`'s own end of stream.
+/// the `attempt` is neither sub-pipe's: it fails the run as it would without
+/// the `attempt`, whichever of the two was emitting, for an item or at the
+/// end of the stream, and a `recover` inside either does not see it.
 pub fn attempt(sub: anytype, comptime handled: anytype, path: anytype) Attempt(
     core.NormalizedPipe("attempt", @TypeOf(sub)),
     Handled("attempt", "attempt(sub, ParseError, .{ map(fallback) })", "fallback", handled),
@@ -205,9 +256,7 @@ fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
             const Own = @typeInfo(Pushed).error_union.error_set;
             if (@typeInfo(Own).error_set.error_names) |names| {
                 if (names.len == 0) @compileError("attempt: the sub-pipe cannot fail; there is nothing to fall back from");
-                for (names) |error_name| {
-                    if (di.takesError(E, error_name)) break;
-                } else @compileError(
+                if (!failure.takesAny(E, .passes, Own)) @compileError(
                     "attempt: the sub-pipe cannot fail with an error in `" ++ @typeName(E) ++ "`, so the error path would never be taken; it can fail with `" ++ errorNames(Own) ++ "`",
                 );
             }
@@ -250,88 +299,56 @@ fn Attempt(comptime Sub: type, comptime E: type, comptime Path: type) type {
 
                 const Self = @This();
 
-                /// What a push into `Down` can fail with.
-                fn Outside(comptime Down: type) type {
-                    return @typeInfo(@TypeOf(@as(Down, undefined).push(@as(T, undefined)))).error_union.error_set;
-                }
-
-                /// The `down` of the sub-pipe. A failure of the pipe after
-                /// the `attempt` does not travel back through the sub-pipe,
-                /// where it would look like the sub-pipe's own: it is put
-                /// aside, the sub-pipe is told that nothing more is wanted,
-                /// and `push` returns it once the sub-pipe has returned.
-                fn Tail(comptime Down: type) type {
-                    return struct {
-                        down: Down,
-                        failed: *?Outside(Down),
-
-                        pub fn push(tail: @This(), value: T) error{}!Flow {
-                            if (tail.failed.* != null) return .done;
-                            return tail.down.push(value) catch |err| {
-                                tail.failed.* = err;
-                                return .done;
-                            };
-                        }
-                    };
-                }
-
                 pub fn init(self: *Self, op: *const Op, env: Env) void {
                     self.chain.init(&op.pipe, env);
                     self.fallback.init(&op.path, env);
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
-                    var outside: ?Outside(@TypeOf(down)) = null;
-                    const tail: Tail(@TypeOf(down)) = .{ .down = down, .failed = &outside };
-                    const done = if (self.chain.push(item, tail)) |flow| flow == .done else |err| failed: {
+                    var seal: Seal(@TypeOf(down), T) = .{ .down = down };
+                    const done = if (self.chain.push(item, seal.tail())) |flow| flow == .done else |err| failed: {
                         // The run has failed already, whatever the sub-pipe
                         // made of being told to stop.
-                        if (outside != null) break :failed true;
-                        const any: anyerror = err;
-                        if (comptime @typeInfo(@TypeOf(err)).error_set.error_names) |possible| {
-                            // As in `recover`: an error the path does not
-                            // take is returned by its name.
-                            inline for (possible) |error_name| {
-                                if (any == @field(anyerror, error_name)) {
-                                    if (comptime !di.takesError(E, error_name)) return @field(anyerror, error_name);
-                                    return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
-                                }
-                            }
-                            unreachable;
+                        if (seal.failed != null) break :failed true;
+                        switch (failure.take(E, .passes, err)) {
+                            .left => |rest| return rest,
+                            .taken => |taken| return self.fallBack(.{ .err = taken, .item = item }, down),
                         }
-                        if (any == error.Canceled) return err;
-                        if (comptime @typeInfo(E).error_set.error_names) |names| {
-                            inline for (names) |error_name| {
-                                if (comptime di.takesError(E, error_name)) {
-                                    if (any == @field(anyerror, error_name)) return self.fallback.push(.{ .err = @errorCast(any), .item = item }, down);
-                                }
-                            }
-                            return err;
-                        }
-                        return self.fallback.push(.{ .err = any, .item = item }, down);
                     };
-                    if (outside) |err| return err;
+                    if (seal.failed) |err| return err;
                     return if (done) .done else .more;
                 }
 
-                /// The end of the stream is not an item: nothing is caught here.
+                /// The failure goes down the error path, which is sealed
+                /// from the pipe after the attempt as the sub-pipe is.
+                fn fallBack(self: *Self, failed: Failed(E, In), down: anytype) !Flow {
+                    var seal: Seal(@TypeOf(down), T) = .{ .down = down };
+                    const done = if (self.fallback.push(failed, seal.tail())) |flow| flow == .done else |err| own: {
+                        if (seal.failed != null) break :own true;
+                        return err;
+                    };
+                    if (seal.failed) |err| return err;
+                    return if (done) .done else .more;
+                }
+
+                /// The end of the stream is not an item: no failure is taken
+                /// here. What the two sub-pipes still emit is sealed too.
                 pub fn finish(self: *Self, down: anytype) !void {
-                    try self.chain.finish(down);
-                    return self.fallback.finish(down);
+                    try ended(&self.chain, down);
+                    return ended(&self.fallback, down);
+                }
+
+                fn ended(chain: anytype, down: anytype) !void {
+                    var seal: Seal(@TypeOf(down), T) = .{ .down = down };
+                    chain.finish(seal.tail()) catch |err| {
+                        if (seal.failed) |outside| return outside;
+                        return err;
+                    };
+                    if (seal.failed) |outside| return outside;
                 }
             };
         }
     };
-}
-
-// ---------------------------------------------------------------------------
-// recover
-// ---------------------------------------------------------------------------
-
-/// A failure as an item: the error, and the item it failed for as it was
-/// where the failure was caught.
-pub fn Failed(comptime E: type, comptime Item: type) type {
-    return struct { err: E, item: Item };
 }
 
 /// Guards the operators after it: when one of them fails for an item with an
@@ -354,16 +371,6 @@ pub fn recover(comptime handled: anytype, path: anytype) Recover(
     core.NormalizedPipe("recover", @TypeOf(path)),
 ) {
     return .{ .path = core.normalizePipe("recover", path) };
-}
-
-/// The error set an error path is for, checked where the operator is written.
-fn Handled(comptime who: []const u8, comptime example: []const u8, comptime handler: []const u8, comptime handled: anytype) type {
-    if (@TypeOf(handled) != type or @typeInfo(handled) != .error_set) @compileError(
-        who ++ ": the errors to take must be an error set such as `ParseError`, or `anyerror`, got `" ++
-            (if (@TypeOf(handled) == type) @typeName(handled) else @typeName(@TypeOf(handled))) ++
-            "`; write `" ++ example ++ "`, where `" ++ handler ++ "` takes a `Failed(ParseError, Item)`",
-    );
-    return handled;
 }
 
 fn Recover(comptime E: type, comptime P: type) type {
@@ -400,39 +407,16 @@ fn Recover(comptime E: type, comptime P: type) type {
                 }
 
                 pub fn push(self: *Self, item: In, down: anytype) !Flow {
-                    return down.push(item) catch |err| {
-                        const any: anyerror = err;
-                        if (comptime @typeInfo(@TypeOf(err)).error_set.error_names) |possible| {
-                            // Every error the pipe after this can fail with is
-                            // known: one the path does not take is returned by
-                            // its name, so that only those are left in the
-                            // error set of this push.
-                            inline for (possible) |error_name| {
-                                if (any == @field(anyerror, error_name)) {
-                                    if (comptime !di.takesError(E, error_name)) return @field(anyerror, error_name);
-                                    return self.divert(@errorCast(any), item);
-                                }
-                            }
-                            unreachable;
-                        }
-                        if (any == error.Canceled) return err;
-                        if (comptime @typeInfo(E).error_set.error_names) |names| {
-                            inline for (names) |error_name| {
-                                if (comptime di.takesError(E, error_name)) {
-                                    if (any == @field(anyerror, error_name)) return self.divert(@errorCast(any), item);
-                                }
-                            }
-                            return err;
-                        }
-                        return self.divert(any, item);
+                    return down.push(item) catch |err| switch (failure.take(E, .passes, err)) {
+                        .left => |rest| return rest,
+                        // The failure goes down the path. A path that wants
+                        // no more ends the stream: nobody is left to take
+                        // the next failure.
+                        .taken => |taken| {
+                            if (try self.chain.push(.{ .err = taken, .item = item }, Closed{}) == .done) return .done;
+                            return .more;
+                        },
                     };
-                }
-
-                /// The failure goes down the path. A path that wants no more
-                /// ends the stream: nobody is left to take the next failure.
-                fn divert(self: *Self, err: E, item: In) !Flow {
-                    if (try self.chain.push(.{ .err = err, .item = item }, Closed{}) == .done) return .done;
-                    return .more;
                 }
 
                 pub fn finish(self: *Self, _: anytype) !void {

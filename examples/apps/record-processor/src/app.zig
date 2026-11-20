@@ -38,7 +38,7 @@ pub fn execute(io: Io, args: []const []const u8, exit: *Exit) void {
         return zrx.program(zrx.fromValue(commands.usage), .{zrx.forEach(invalid)}).run(.{ io, exit, zrx.stderr(1024) });
     };
     switch (command) {
-        .help => composition.announce(commands.usage).run(.{ io, exit, zrx.stderr(256), zrx.rescue(fatal) }),
+        .help => composition.announce(commands.usage).run(.{ io, exit, zrx.rescue(fatal).provide(.{zrx.stderr(256)}) }),
         .process => |config| process(io, config, .{}, exit),
     }
 }
@@ -57,7 +57,7 @@ pub fn process(io: Io, config: commands.Config, rules: records.Rules, exit: *Exi
     const production = zrx.program(zrx.lines(composition.Input, records.max_line_bytes), composition.records_pipe).provide(.{
         zrx.stdout(256),
         zrx.stderr(1024),
-        zrx.rescue(fatal),
+        zrx.rescue(fatal).provide(.{zrx.stderr(256)}),
         zrx.fileWriter(composition.Accepted, config.output, 4096, .{ .mode = .create_new }),
     });
     production.run(.{

@@ -12,9 +12,11 @@
 //! is its release. The order of acquisition is worked out at compile time
 //! from what each binding provides and needs; nothing of it exists at runtime.
 //!
-//! A `rescue` is a binding too. What it holds around the call is not a
-//! value but the call's failure.
+//! A `rescue` is the third kind of binding. It provides nothing and is not
+//! acquired: it stands outside the run, and is given what the run failed
+//! with once everything the run acquired has been released.
 const di = @import("di.zig");
+const failure = @import("failure.zig");
 const lift = @import("pipe.zig").lift;
 
 pub fn resource(comptime acquire: anytype, comptime release: anytype) Resource(acquire, release) {
@@ -52,102 +54,124 @@ fn Resource(comptime acquire: anytype, comptime release: anytype) type {
 
 /// Where the failure of a run goes: `run` returns nothing.
 /// `handler(deps..., err)` is called once with it and returns nothing
-/// either. It is a binding: it needs what its handler asks
-/// for, and guards everything acquired after that is there, which is every
-/// other resource and the run itself. Their failures reach the handler
-/// after they have been released, while what it needs is still held.
+/// either: it is the last to be given the failure.
 ///
-/// The handler's error parameter selects what it takes: an error set,
-/// `anyerror`, or `anytype` for exactly the errors the run can fail with.
-/// A cancellation is one of them: an error path never takes one, but this
-/// is where the run ends, and `run` has no other way to say so. A handler
-/// whose caller must stay cancellable calls `io.recancel()` for it.
+/// A rescue stands outside the run. It is called when the run is over and
+/// every resource the run acquired has been released, whichever of them
+/// failed and wherever the rescue is written among the bindings. Its
+/// handler is given the plain values of the run, and what the rescue is
+/// given for itself: `rescue(fatal).provide(.{ stderr(256) })`. Those are
+/// acquired for the call and released after it. A resource of the run is
+/// gone by then, and asking for one is a compile error.
 ///
-/// What the handler does not take is left over, and so is a failure of
-/// acquiring what the handler itself needs. A run with anything left over
-/// does not compile: `run` returns nothing.
-pub fn rescue(comptime handler: anytype) Rescue(handler) {
-    return .{};
+/// The handler's error parameter says what it takes: `anyerror`, an error
+/// set, or `anytype` for exactly the errors the run can fail with. A
+/// cancellation is one of them: an error path never takes one, but this is
+/// where the run ends. What the handler does not take is left over, and so
+/// is a failure of acquiring what the rescue itself was given. A run with
+/// anything left over does not compile.
+pub fn rescue(comptime handler: anytype) Rescue(handler, @Tuple(&.{})) {
+    return .{ .bindings = .{} };
 }
 
-/// What a `rescue` provides: nothing to use, but one type, so that a run
-/// has one rescue and the one given to `run` replaces a program's default.
-pub const Rescued = struct {};
-
-fn Rescue(comptime handler: anytype) type {
+fn Rescue(comptime handler: anytype, comptime Own: type) type {
     @setEvalBranchQuota(di.quota);
     if (!di.isHandler(handler)) @compileError("rescue: expected a handler `fn (deps..., err) void`, got `" ++ @typeName(@TypeOf(handler)) ++ "`");
     const Declared: ?type = di.Param(handler, 1, 0);
-    if (Declared) |E| if (@typeInfo(E) != .error_set) @compileError(
-        "rescue: the handler's data parameter is the failure of the run, so it must be an error set, `anyerror` or `anytype`, got `" ++ @typeName(E) ++ "`",
-    );
+    if (Declared) |E| {
+        if (@typeInfo(E) != .error_set) @compileError(
+            "rescue: the handler's data parameter is the failure of the run, so it must be an error set, `anyerror` or `anytype`, got `" ++ @typeName(E) ++ "`",
+        );
+        // Checked here, where the rescue is written, and not where it is
+        // called: a run that cannot fail never calls it.
+        expectNothing(di.Result("rescue", handler, &.{E}));
+    }
     return struct {
-        pub const zrx_resource = {};
-        pub const zrx_rescue = {};
-        pub const Provides = Rescued;
-        pub const needs = di.requires("rescue", handler, 1);
+        bindings: Own,
 
-        pub fn bind(_: @This(), env: anytype, next: anytype) !void {
-            return next.call(Rescued{}) catch |err| {
-                const any: anyerror = err;
-                const Taken = comptime Declared orelse Named(@TypeOf(err));
-                const Call = di.Bound("rescue", handler, @TypeOf(env), &.{Taken});
-                if (comptime Call.Return != void) @compileError(
-                    "rescue: the handler must return `void`, got `" ++ @typeName(Call.Return) ++ "`; it is the last to be given the failure, and `run` returns nothing. " ++
-                        "What a run leaves behind is an effect, such as a status written through a dependency",
+        pub const zrx_rescue = {};
+
+        const Self = @This();
+
+        /// Gives the rescue bindings of its own, for what its handler needs
+        /// beyond the plain values of the run.
+        pub fn provide(self: Self, bindings: anytype) Rescue(handler, OwnBindings(Own, @TypeOf(bindings))) {
+            return .{ .bindings = self.bindings ++ bindings };
+        }
+
+        /// What the handler is given, of the errors in `Possible`.
+        fn Taken(comptime Possible: type) type {
+            return Declared orelse failure.Named(Possible);
+        }
+
+        /// Everything that can be wrong with this rescue for a run with
+        /// these values that can fail with `Possible`. `held` is what the
+        /// run's own resources provide. Evaluated for every run, also one
+        /// that cannot fail.
+        fn check(comptime Values: type, comptime Possible: type, comptime held: []const type) void {
+            @setEvalBranchQuota(di.quota);
+            expectNothing(di.Result("rescue", handler, &.{Taken(Possible)}));
+            // Its own bindings must be acquirable from the values alone.
+            const own = plan(Own, Values, true, true);
+            var provided: []const type = di.types(Values);
+            for (own.resources) |i| provided = provided ++ [_]type{di.types(Own)[i].Provides};
+            for (own.values) |i| {
+                if (i < di.types(Own).len) provided = provided ++ [_]type{di.types(Own)[i]};
+            }
+            for (di.requires("rescue", handler, 1)) |Need| {
+                if (contains(provided, Need)) continue;
+                if (contains(held, Need)) @compileError(
+                    "rescue: the handler asks for `" ++ @typeName(Need) ++ "`, which a resource of the run provides. A rescue is called when the run is over " ++
+                        "and what it acquired has been released; give the rescue one of its own: `rescue(handler).provide(.{ ... })`",
                 );
-                const call: Call = .init(env);
-                if (comptime @typeInfo(@TypeOf(err)).error_set.error_names) |possible| {
-                    // Every error the run can fail with is known: one the
-                    // handler does not take is returned by its name, so that
-                    // only those are left in the error set of the run.
-                    // The last of them needs no asking: it is the one left.
-                    inline for (possible, 1..) |error_name, nth| {
-                        if (nth == possible.len or any == @field(anyerror, error_name)) {
-                            if (comptime !holds(Taken, error_name)) return @field(anyerror, error_name);
-                            return call.call(.{@as(Taken, @errorCast(any))});
-                        }
-                    }
-                    comptime unreachable;
+                @compileError(
+                    "rescue: the handler asks for dependency `" ++ @typeName(Need) ++ "`, which is not provided; provided: " ++ di.listTypes(provided) ++
+                        ". Pass it to `run(.{ ... })` as a value, or give it to the rescue with `rescue(handler).provide(.{ ... })`.",
+                );
+            }
+        }
+
+        /// The run failed with `err`, and everything it acquired has been
+        /// released. `values` are the plain values it was run with.
+        fn handle(self: Self, values: anytype, err: anytype) !void {
+            const T = Taken(@TypeOf(err));
+            switch (failure.take(T, .taken, err)) {
+                .left => |rest| return rest,
+                .taken => |taken| return run(self.bindings, resolved(values, true), Handle(T){ .err = taken }),
+            }
+        }
+
+        fn Handle(comptime T: type) type {
+            return struct {
+                err: T,
+
+                pub fn call(body: @This(), env: anytype, comptime _: bool) !void {
+                    const bound: di.Bound("rescue", handler, @TypeOf(env), &.{T}) = .init(env);
+                    bound.call(.{body.err});
                 }
-                if (comptime @typeInfo(Taken).error_set.error_names) |names| {
-                    inline for (names) |error_name| {
-                        if (any == @field(anyerror, error_name)) return call.call(.{@as(Taken, @errorCast(any))});
-                    }
-                    return err;
-                }
-                return call.call(.{any});
             };
         }
     };
 }
 
-/// `E` as one would write it: an inferred error set is a type of its own,
-/// which a handler could not name.
-fn Named(comptime E: type) type {
-    const names = @typeInfo(E).error_set.error_names orelse return anyerror;
-    var Set = error{};
-    for (names) |error_name| Set = Set || @TypeOf(@field(anyerror, error_name));
-    return Set;
+fn expectNothing(comptime Returned: type) void {
+    if (Returned != void) @compileError(
+        "rescue: the handler must return `void`, got `" ++ @typeName(Returned) ++ "`; it is the last to be given the failure, and `run` returns nothing. " ++
+            "What a run leaves behind is an effect, such as a status written through a dependency",
+    );
 }
 
-/// Whether the error set `E`, or `anyerror`, holds the error of this name.
-/// A cancellation is one of them here: an error path leaves it alone
-/// because it is no item's, but a rescue is where the run ends.
-fn holds(comptime E: type, comptime error_name: []const u8) bool {
-    const names = @typeInfo(E).error_set.error_names orelse return true; // anyerror
-    for (names) |have| if (eql(have, error_name)) return true;
-    return false;
-}
-
-fn eql(comptime a: []const u8, comptime b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |x, y| if (x != y) return false;
-    return true;
+/// The bindings a rescue is given for itself.
+fn OwnBindings(comptime A: type, comptime B: type) type {
+    if (!di.isTuple(B)) @compileError("rescue.provide: expected a tuple of bindings such as `.{ stderr(256) }`");
+    for (di.types(B)) |Binding| if (isRescue(Binding)) @compileError(
+        "rescue.provide: a rescue has no rescue of its own; what fails while it is called is left over, which `run` refuses",
+    );
+    return Bindings(@Tuple(di.types(A) ++ di.types(B)));
 }
 
 fn isRescue(comptime B: type) bool {
-    return isResource(B) and @hasDecl(B, "zrx_rescue");
+    return @typeInfo(B) == .@"struct" and @hasDecl(B, "zrx_rescue");
 }
 
 fn isResource(comptime B: type) bool {
@@ -168,13 +192,16 @@ fn contains(comptime list: []const type, comptime T: type) bool {
 pub fn Bindings(comptime Given: type) type {
     @setEvalBranchQuota(di.quota);
     const list = di.types(di.Normalized(Given));
-    for (list, 0..) |B, i| for (list[0..i]) |Earlier| if (Provided(Earlier) == Provided(B)) @compileError(
-        if (isRescue(Earlier) and isRescue(B))
-            "zrx: two `rescue` bindings are given together, but the failure of a run goes to one place; keep one. Given to `run`, a rescue replaces the one a program provides"
-        else
+    for (list, 0..) |B, i| for (list[0..i]) |Earlier| {
+        if (isRescue(Earlier) and isRescue(B)) @compileError(
+            "zrx: two `rescue` bindings are given together, but the failure of a run goes to one place; keep one. Given to `run`, a rescue replaces the one a program provides",
+        );
+        if (isRescue(Earlier) or isRescue(B)) continue;
+        if (Provided(Earlier) == Provided(B)) @compileError(
             "zrx: dependency type `" ++ @typeName(Provided(B)) ++ "` is provided twice, by " ++ describe(Earlier) ++ " and by " ++ describe(B) ++
                 "; keep one of them, or have one provide a distinct struct type",
-    );
+        );
+    };
     return @Tuple(list);
 }
 
@@ -185,16 +212,19 @@ fn describe(comptime B: type) []const u8 {
 /// An environment handed on as it is: every element is a value, whatever
 /// its type looks like. A system gives its programs what it resolved this
 /// way; sorting those values into values and resources a second time would
-/// take a value that has the shape of a binding for a binding.
-pub fn Resolved(comptime Env: type) type {
+/// take a value that has the shape of a binding for a binding. `rescued`
+/// says whether a rescue already stands outside: a program's own is then
+/// left out, as a default is that `run` replaces.
+pub fn Resolved(comptime Env: type, comptime is_rescued: bool) type {
     return struct {
         env: Env,
 
         pub const zrx_resolved = {};
+        pub const rescued = is_rescued;
     };
 }
 
-pub fn resolved(env: anytype) Resolved(@TypeOf(env)) {
+pub fn resolved(env: anytype, comptime rescued: bool) Resolved(@TypeOf(env), rescued) {
     return .{ .env = env };
 }
 
@@ -203,17 +233,20 @@ fn isResolved(comptime Given: type) bool {
 }
 
 /// Positions in `defaults ++ given`: the values, then the resources in the
-/// order they are acquired.
+/// order they are acquired, and the rescue that stands outside them all.
 const Plan = struct {
     values: []const usize,
     resources: []const usize,
+    rescue: ?usize,
 };
 
 /// Plain values come first. Then, again and again, the first resource in
-/// written order whose needs are all there; a rescue before any other, so
-/// that wherever it is written it guards all it can. A default whose type
-/// is also given is left out: it is neither provided nor acquired.
-fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bool) Plan {
+/// written order whose needs are all there. A default whose type is also
+/// given is left out: it is neither provided nor acquired. A rescue is
+/// neither a value nor a resource and takes no part in the order: one that
+/// is given replaces a default one, and so does one that already stands
+/// outside (`rescued`).
+fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bool, comptime rescued: bool) Plan {
     @setEvalBranchQuota(di.quota);
     const given = if (given_values) di.types(Given) else di.types(Bindings(Given));
     const all = di.types(Defaults) ++ given;
@@ -222,11 +255,18 @@ fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bo
     var values: []const usize = &.{};
     var pending: []const usize = &.{};
     var available: []const type = &.{};
+    var guard: ?usize = null;
     next: for (all, 0..) |B, i| {
+        // In a resolved environment every element is a value.
+        const bound = i < overridable or !given_values;
+        if (bound and isRescue(B)) {
+            if (i >= overridable or (guard == null and !rescued)) guard = i;
+            continue :next;
+        }
         if (i < overridable) for (given) |Over| {
             if ((if (given_values) Over else Provided(Over)) == Provided(B)) continue :next;
         };
-        if (isResource(B) and (i < overridable or !given_values)) {
+        if (bound and isResource(B)) {
             pending = pending ++ [_]usize{i};
         } else {
             values = values ++ [_]usize{i};
@@ -236,8 +276,7 @@ fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bo
 
     var resources: []const usize = &.{};
     placing: while (pending.len != 0) {
-        for ([_]bool{ true, false }) |rescues| for (pending, 0..) |i, at| {
-            if (isRescue(all[i]) != rescues) continue;
+        for (pending, 0..) |i, at| {
             const ready = for (all[i].needs) |Need| {
                 if (!contains(available, Need)) break false;
             } else true;
@@ -246,10 +285,10 @@ fn plan(comptime Defaults: type, comptime Given: type, comptime given_values: bo
             available = available ++ [_]type{all[i].Provides};
             pending = pending[0..at] ++ pending[at + 1 ..];
             continue :placing;
-        };
+        }
         @compileError(stuck(all, pending, available));
     }
-    return .{ .values = values, .resources = resources };
+    return .{ .values = values, .resources = resources, .rescue = guard };
 }
 
 /// Why none of `pending` can be acquired: a need nobody provides, or
@@ -286,18 +325,22 @@ fn stuck(comptime all: []const type, comptime pending: []const usize, comptime a
     return text ++ ". Pass one of these as a value, or build it from something else.";
 }
 
-/// Calls `program.call(env)` with the environment built from `given` and
-/// from the `defaults` it does not replace. Resources are held around the
-/// call and released in the reverse of the order they were acquired in.
+/// Calls `program.call(env, rescued)` with the environment built from
+/// `given` and from the `defaults` it does not replace. Resources are held
+/// around the call and released in the reverse of the order they were
+/// acquired in. A rescue among the bindings stands outside all of that: it
+/// is given what the call or a resource failed with, after the release.
+/// `rescued` tells the body whether a rescue stands outside it.
 pub fn run(defaults: anytype, given: anytype, program: anytype) !void {
-    if (comptime isResolved(@TypeOf(given))) return runWith(defaults, given.env, true, program);
-    return runWith(defaults, given, false, program);
+    const Given = @TypeOf(given);
+    if (comptime isResolved(Given)) return runWith(defaults, given.env, true, Given.rescued, program);
+    return runWith(defaults, given, false, false, program);
 }
 
-fn runWith(defaults: anytype, given: anytype, comptime given_values: bool, program: anytype) !void {
+fn runWith(defaults: anytype, given: anytype, comptime given_values: bool, comptime rescued: bool, program: anytype) !void {
     const Defaults = @TypeOf(defaults);
     const Given = @TypeOf(given);
-    const order = comptime plan(Defaults, Given, given_values);
+    const order = comptime plan(Defaults, Given, given_values, rescued);
     const types = comptime di.types(Defaults) ++ di.types(Given);
     const all: @Tuple(types) = defaults ++ given;
 
@@ -308,11 +351,20 @@ fn runWith(defaults: anytype, given: anytype, comptime given_values: bool, progr
     };
     var env: Values = undefined;
     inline for (order.values, 0..) |i, at| env[at] = all[i];
-    return hold(order.resources, all, env, program);
+
+    if (comptime order.rescue == null) return hold(order.resources, all, env, program, rescued);
+    const guard = all[comptime order.rescue.?];
+    const Possible = @typeInfo(@TypeOf(hold(order.resources, all, env, program, true))).error_union.error_set;
+    comptime @TypeOf(guard).check(Values, Possible, held: {
+        var list: []const type = &.{};
+        for (order.resources) |i| list = list ++ [_]type{types[i].Provides};
+        break :held list;
+    });
+    return hold(order.resources, all, env, program, true) catch |err| guard.handle(env, err);
 }
 
-fn hold(comptime rest: []const usize, all: anytype, env: anytype, program: anytype) !void {
-    if (rest.len == 0) return program.call(env);
+fn hold(comptime rest: []const usize, all: anytype, env: anytype, program: anytype, comptime rescued: bool) !void {
+    if (rest.len == 0) return program.call(env, rescued);
     const binding = all[rest[0]];
     const Next = struct {
         all: @TypeOf(all),
@@ -320,7 +372,7 @@ fn hold(comptime rest: []const usize, all: anytype, env: anytype, program: anyty
         program: @TypeOf(program),
 
         pub fn call(self: @This(), value: @TypeOf(binding).Provides) !void {
-            return hold(rest[1..], self.all, di.extend(self.env, value), self.program);
+            return hold(rest[1..], self.all, di.extend(self.env, value), self.program, rescued);
         }
     };
     return binding.bind(env, Next{ .all = all, .env = env, .program = program });

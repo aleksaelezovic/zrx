@@ -62,7 +62,7 @@ const nested = @import("ops/nested.zig");
 pub const each = nested.each;
 pub const attempt = nested.attempt;
 pub const recover = nested.recover;
-pub const Failed = nested.Failed;
+pub const Failed = @import("failure.zig").Failed;
 
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;
@@ -116,6 +116,8 @@ pub const Flow = @import("pipe.zig").Flow;
 pub const End = @import("pipe.zig").End;
 pub const di = @import("di.zig");
 pub const operator = @import("pipe.zig");
+/// Which errors something that takes failures takes, and what is left.
+pub const failure = @import("failure.zig");
 
 // For testing programs: a clock the test moves.
 pub const testing = @import("testing.zig");

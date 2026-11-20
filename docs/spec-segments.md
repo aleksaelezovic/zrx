@@ -168,7 +168,10 @@ nothing has no rescue to call.
     stage before the `each`. `attempt(sub, E, path)` emits what `path` makes
     of an item `sub` fails on with an error in `E`, never for
     `error.Canceled`; a failure of the pipe after it, or of `sub`'s own end
-    of stream, is what the run fails with, and the path is not asked.
+    of stream, is what the run fails with, and the path is not asked. The
+    same holds for what the path emits, and for what either emits at the
+    end of the stream: a `recover` inside either does not see a failure of
+    the pipe after the `attempt`.
     *Tests: "each runs a fresh sub-pipe over the source made from every
     item", "a sub-pipe that is done ends its item, not the stream", "once the
     pipe after each is done, the item's source stops and so does the stream",
@@ -177,7 +180,8 @@ nothing has no rescue to call.
     sub-pipe fails on", "attempt with an error set lets other errors
     through", "a failure of the pipe after an attempt passes through,
     whatever its name", "a recover inside the sub-pipe does not see a failure
-    of the pipe after the attempt", "attempt falls back from failures but
+    of the pipe after the attempt", "a failure of the pipe after an
+    attempt is the run's, whichever sub-pipe was emitting and when", "attempt falls back from failures but
     never from a cancellation", "a failure of the sub-pipe's own end of
     stream is not an item's", "attempt around each: an item whose source or
     sub-pipe fails becomes one value" (`tests/nested.zig`), and the four
@@ -187,27 +191,32 @@ nothing has no rescue to call.
     has a `rescue(handler)` among its bindings: without one whose handler
     takes every error the run can fail with, it does not compile. The
     handler is called once with the failure, after every task of the
-    program has returned and what was acquired after the rescue has been
-    released, and before what the handler needs is released; then `run`
-    returns. It is not called for a run that succeeds. A rescue is
-    acquired before every resource it does not need, wherever it is
-    written. `error.Canceled` is given to it like any failure. A rescue
-    given to a system is called with the failure that ends the system, in
-    place of the rescues its programs provide.
+    program has returned and every resource the run acquired has been
+    released, whichever of them failed and wherever the rescue is written;
+    then `run` returns. It is not called for a run that succeeds, and what
+    the rescue was given for itself is acquired only for the call.
+    `error.Canceled` is given to it like any failure. A rescue given to a
+    system is called with the failure that ends the system, in place of the
+    rescues its programs provide.
     *Tests: "a rescue is called once with the failure of the run", "a
-    rescue is not called for a run that succeeds", "a rescue is given a
-    failure once what was acquired after it is released, and holds what it
-    needs", "a rescue guards all it can, wherever it is written", "a rescue
-    may name the errors it takes, when they are all the run can fail with",
-    "a rescue is given exactly the errors of the run, and a cancellation
-    like any of them", "a rescue given to run replaces the one a program
-    provides" (`tests/di.zig`), "a rescue takes a failure from beyond a
+    rescue is not called for a run that succeeds, and what it was given is
+    not acquired", "a rescue is called once everything the run acquired is
+    released, with bindings of its own", "a rescue takes the failure of any
+    resource, wherever it and the resources are written", "a rescue may
+    name the errors it takes, when they are all the run can fail with", "a
+    rescue is given exactly the errors of the run, and a cancellation like
+    any of them", "a rescue given to run replaces the one a program
+    provides", "a value given to run replaces what a rescue was given for
+    itself" (`tests/di.zig`), "a rescue takes a failure from beyond a
     queue", "a rescue of a program with a task boundary is given exactly
     its errors", "a system's rescue takes the failure of a member, in place
     of the member's own", "a system of one program leaves the failure to
-    that program's rescue" (`tests/programs.zig`), and the compile-fail
-    cases `run_leaves`, `run_leaves_any`, `rescue_leaves`,
-    `rescue_needs_fallible`, `rescue_fails` and `system_leaves`.*
+    that program's rescue", "a runnable that names its dependencies is
+    given those and nothing else, with or without a rescue"
+    (`tests/programs.zig`), and the compile-fail cases `run_leaves`,
+    `run_leaves_any`, `rescue_leaves`, `rescue_needs_resource`,
+    `rescue_own_fails`, `rescue_fails`, `rescue_returns`,
+    `rescue_returns_generic` and `system_leaves`.*
 
 ## Not promised
 

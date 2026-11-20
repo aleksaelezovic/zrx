@@ -59,8 +59,7 @@ pub fn main(init: std.process.Init) u8 {
         }),
     })).provide(.{
         stdout(64),
-        stderr(128),
-        rescue(fatal),
+        rescue(fatal).provide(.{stderr(128)}),
         fileWriter(Copy, output, 4096, .{ .mode = .create_new }),
     });
     copy.run(.{ init.io, &exit });

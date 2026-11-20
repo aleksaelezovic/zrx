@@ -423,9 +423,11 @@ const manifest = pipe(.{
   operator and the item's own type. `anytype` takes any.
 - What the sub-pipe had already emitted for the item is not taken back, and
   its stages keep whatever state the item gave them.
-- A failure of the pipe *after* the `attempt` is not the sub-pipe's. It
-  fails the run as it would without the `attempt`, the path is not asked,
-  and a `recover` inside the sub-pipe does not see it.
+- A failure of the pipe *after* the `attempt` is neither the sub-pipe's
+  nor the path's. It fails the run as it would without the `attempt`,
+  whichever of the two was emitting, for an item or at the end of the
+  stream; the path is not asked, and a `recover` inside either does not
+  see it.
 - The sub-pipe keeps its state for the whole stream, like a case of a
   `route`. A failure at its end of the stream does not belong to an item and
   fails the run.
@@ -499,16 +501,16 @@ fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
 }
 
 const app = program(source, records).provide(.{
-    stderr(256),
-    rescue(fatal),
+    rescue(fatal).provide(.{stderr(256)}),
     fileWriter(Accepted, path, 4096, .{ .mode = .create_new }),
 });
 ```
 
-`rescue(handler)` is a binding, like a resource. `handler(deps..., err)` is
-called once with the failure and returns nothing: it is the last to be
-given it. What a failed run leaves behind is an effect of the handler, such
-as the status above, which `main` returns:
+`rescue(handler)` is a binding, the third kind beside a value and a
+resource. `handler(deps..., err)` is called once with the failure and
+returns nothing: it is the last to be given it. What a failed run leaves
+behind is an effect of the handler, such as the status above, which `main`
+returns:
 
 ```zig
 pub fn main(init: std.process.Init) u8 {
@@ -518,13 +520,19 @@ pub fn main(init: std.process.Init) u8 {
 }
 ```
 
-- It guards what is acquired after it and the run itself. Their failures
-  reach the handler once they have been released, while what the handler
-  needs is still held: above, the file is closed and stderr is open.
-- It is acquired as soon as what its handler needs is there, wherever it is
-  written. Acquiring what the handler itself needs (the `stderr` above) is
-  not guarded: if that could fail, the failure would be left over, and the
-  run would not compile.
+- A rescue stands outside the run. It is called when the run is over and
+  everything the run acquired has been released, whichever resource or
+  stage failed, and wherever the rescue is written among the bindings:
+  above, the file is closed before `fatal` is called.
+- Its handler is given the plain values of the run (`io` and `&exit`
+  above) and what the rescue is given for itself with `provide`, which is
+  acquired for the call and released after it. A resource of the run is
+  gone by then: a handler that asks for one is a compile error, which says
+  to give the rescue its own.
+- What the rescue is given for itself must be there when it is needed: if
+  acquiring it could fail, that failure would be left over, and the run
+  would not compile. A value given to `run` replaces it like any default,
+  so a test hands the handler a writer of its own.
 - The handler's error parameter says what it takes: `anyerror`, an error
   set that holds every error the run can fail with, or `anytype`, with
   which it is given exactly those errors, so that a `switch` over them is

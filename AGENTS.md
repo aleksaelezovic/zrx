@@ -88,24 +88,45 @@ to this file; edit `AGENTS.md`, not copies.
   handler before; that is a path of `forEach(handler)`, and there is no
   second spelling. A path cannot contain a task boundary: that would make
   `recover` one more shape for the scope to be tested with.
-- **The failure of a run goes to a binding, not to a path.** Failures that
-  belong to no item (a source, the end of the stream, a resource, another
-  task) are outside every pipe. `rescue(handler)` is where they go: a
-  resource in every respect but one, written against the binding contract
-  in `src/resources.zig`. Its `bind`
-  calls `next` and catches what comes back, so it guards what is acquired
-  after it and runs while what it needs is held, and its `needs` are its
-  handler's. The one thing the planner knows about it: of the bindings
-  that are ready, a rescue is acquired first, so that where it is written
-  decides nothing. It provides the marker type `Rescued`, which is what
-  makes a run have one rescue and lets `run` replace a program's. It takes
-  a handler and not a pipe on purpose: it is given one value once, and a
-  pipe does not say what it needs, which a binding must. Its handler
-  returns `void`: it is the last to be given the failure. What its error
-  parameter does not take is returned by name and so is left over, which
-  `run` refuses. It is given `error.Canceled` like any failure, where an
-  error path never takes one: a cancellation is no item's, but it does
-  end the run, and `run` has no other way to say so.
+- **Which errors are taken is decided in one place**: `src/failure.zig`.
+  `recover`, `attempt` and `rescue` all take some errors and leave the
+  rest, and each of them once had that logic of its own, in two branches
+  (the names known, or `anyerror`). They disagreed: two of them returned
+  the whole `anyerror` where only a cancellation could be left. `take`
+  sorts an error into taken or left, and `Left` is the type of what is
+  left, written out and not inferred, so a wrong answer does not compile.
+  `Cancellation` says what a cancellation is to the one who asks: nothing
+  to an error path (`.passes`), a failure like any to a rescue (`.taken`).
+  A new thing that takes failures calls `take`; it does not compare
+  errors itself. `tests/failure.zig` holds the table of every combination.
+- **The failure of a run goes to a rescue, which stands outside the run.**
+  Failures that belong to no item (a source, the end of the stream, a
+  resource, another task) are outside every pipe. `rescue(handler)` is
+  the third kind of binding: it provides nothing and is not acquired.
+  `resources.run` takes it out of the bindings, runs everything else, and
+  hands it what that failed with after the last release. Its handler is
+  given the plain values of the run and the bindings the rescue was given
+  for itself (`rescue(fatal).provide(.{ stderr(256) })`), which are
+  resolved by the same `run`, with the values as a resolved environment,
+  only when it is called. So the planner knows nothing of it, where it
+  is written decides nothing, and nothing of it is in the environment.
+  An earlier version made it a resource that provided a marker type and
+  was acquired "first". Review found three defects in that one idea: a
+  fallible resource written before the rescue's own prerequisite escaped
+  it, the marker reached the tuple a custom runnable is given, and its
+  validation sat in code a run that cannot fail never reaches. Do not go
+  back to placing a rescue among the resources. Whether a rescue stands
+  outside is passed down a system as a comptime flag (`rescued`), not as
+  a value. It takes a handler and not a pipe on purpose: it is given one
+  value once. Its handler returns `void`: it is the last to be given the
+  failure. It is given `error.Canceled` like any failure, where an error
+  path never takes one: a cancellation is no item's, but it does end the
+  run, and `run` has no other way to say so.
+- **Check what a user wrote where they wrote it.** A `@compileError` for a
+  handler or a binding belongs in the type function that takes it, or in
+  code every run reaches. Inside a `catch`, or a branch a particular
+  program never takes, it is not a check: a rescue whose handler returned
+  a value compiled on every run that could not fail.
 - **Task boundaries are `queue`, `batchWithin`, `debounce` and `concurrent`.**
   Timed operators buffer input and wait for deadlines within that contract.
   `branch` is terminal direct fan-out and
@@ -127,12 +148,17 @@ to this file; edit `AGENTS.md`, not copies.
   by `E` with the same code. It took a fallback handler before; that is a
   path of `map(fallback)`, and there is no second spelling. `E` is written
   out although the sub-pipe's own errors are known: a path handler has to
-  be able to name its item, and an inferred set has no name. Its tail puts
-  a failure of the pipe after it aside, answers `.done`, and `push`
-  returns the failure once the
-  sub-pipe has returned: inside the sub-pipe it could not be told from the
-  sub-pipe's own, and a flag for it goes stale when a `recover` in there
-  swallows it. Neither may contain a task boundary, neither adds to the
+  be able to name its item, and an inferred set has no name. A `Seal`
+  stands between each of its sub-pipes and the pipe after it: it puts a
+  failure of that pipe aside, answers `.done`, and the failure is
+  returned once the sub-pipe has returned. Inside the sub-pipe it could
+  not be told from the sub-pipe's own, and a flag for it goes stale when
+  a `recover` in there swallows it. There are four ways from an
+  `attempt` into the pipe after it (either sub-pipe, for an item or at
+  the end of the stream) and all four go through a seal. The error path
+  once pushed straight on, and a `recover` in it took the failure of the
+  final sink. A sub-pipe that rejoins is sealed or it is not: do not
+  seal some of its ways out. Neither may contain a task boundary, neither adds to the
   stage contract, and both live in `src/ops/nested.zig` on the operator and
   source contracts. `each` pairs what it emits with the item as
   `Tagged(Item, T)`, where `Item` is the parameter type `source_of`
@@ -393,7 +419,9 @@ to this file; edit `AGENTS.md`, not copies.
   and `extending` suites a few hundred times in Debug and ReleaseFast under
   a watchdog that also fails when the binary is missing. A hang is a
   failure. Repetition finds little by itself: 300 clean runs hid a hang
-  that one differently paced source showed at once.
+  that one differently paced source showed at once. Run the repeats in
+  several loops at the same time: two runnables that wrote to one log
+  passed 400 runs in a row and failed ten times in 3600 run six abreast.
 - Concurrency is tested as invariants over shapes (`tests/flow.zig`): every
   shape of pipe is run with its ended side running out, being done and
   failing. A new shape goes there, not into a one-off test.
