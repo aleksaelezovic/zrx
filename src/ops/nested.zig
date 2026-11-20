@@ -66,7 +66,7 @@ fn Each(comptime source_of: anytype, comptime Sub: type) type {
             // The item as `source_of` takes it: a pipe written for
             // `[]const u8` then emits the same type whichever kind of
             // slice it is fed.
-            return sources.Tagged(di.Param(source_of, 1, 0) orelse In, T);
+            return sources.Tagged(di.Param("each", source_of, 1, 0) orelse In, T);
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {

@@ -77,7 +77,7 @@ pub fn rescue(comptime handler: anytype) Rescue(handler, @Tuple(&.{})) {
 fn Rescue(comptime handler: anytype, comptime Own: type) type {
     @setEvalBranchQuota(di.quota);
     if (!di.isHandler(handler)) @compileError("rescue: expected a handler `fn (deps..., err) void`, got `" ++ @typeName(@TypeOf(handler)) ++ "`");
-    const Declared: ?type = di.Param(handler, 1, 0);
+    const Declared: ?type = di.Param("rescue", handler, 1, 0);
     if (Declared) |E| if (@typeInfo(E) != .error_set) @compileError(
         "rescue: the handler's data parameter is the failure of the run, so it must be an error set, `anyerror` or `anytype`, got `" ++ @typeName(E) ++ "`",
     );

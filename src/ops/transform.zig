@@ -122,7 +122,7 @@ pub fn fold(seed: anytype, comptime reducer: anytype) Accumulate(.fold, State(re
 /// The accumulator type: the reducer's declared state parameter, else the seed's type.
 fn State(comptime reducer: anytype, comptime Seed: type) type {
     if (!di.isHandler(reducer)) @compileError("scan/fold: expected a reducer `fn (deps..., state, item) state`, got `" ++ @typeName(@TypeOf(reducer)) ++ "`");
-    return di.Param(reducer, 2, 0) orelse Seed;
+    return di.Param("scan/fold", reducer, 2, 0) orelse Seed;
 }
 
 fn Accumulate(comptime kind: enum { scan, fold }, comptime A: type, comptime reducer: anytype) type {
