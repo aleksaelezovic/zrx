@@ -52,9 +52,25 @@ fn storeSecond(result: Second, value: u64) void {
     result.out.* = value;
 }
 
-/// These programs cannot fail; say so, so that no error path is compiled in.
+/// A run returns nothing. For a program that cannot fail that is all there
+/// is to it: with anything left to fail with, this would not compile.
 fn run(runnable: anytype, deps: anytype) void {
-    runnable.run(deps) catch unreachable;
+    runnable.run(deps);
+}
+
+/// Where a fixture that can fail says so: a flag its rescue sets, as the
+/// hand-written loop sets it where it fails.
+const Outcome = struct { failed: *bool };
+
+fn noteFailed(outcome: Outcome, _: anyerror) void {
+    outcome.failed.* = true;
+}
+
+/// Runs a program that can fail and says whether it came to its end.
+fn ran(runnable: anytype, deps: anytype) bool {
+    var failed = false;
+    runnable.run(deps ++ .{ Outcome{ .failed = &failed }, zrx.rescue(noteFailed) });
+    return !failed;
 }
 
 // --- injected map, filter, fold ---------------------------------------------
@@ -177,12 +193,14 @@ export fn same_flatten(ptr: [*]const [4]u32, len: usize, out: *u64) void {
 // --- recover --------------------------------------------------------------------------
 
 const Rejected = struct { count: *u32 };
+/// A value that was too small, as its error path sees it.
+const TooSmall = zrx.Failed(error{TooSmall}, u32);
 
 fn checked(value: u32) error{TooSmall}!u32 {
     if (value < 10) return error.TooSmall;
     return value;
 }
-fn countRejected(rejected: Rejected, _: error{TooSmall}, _: u32) void {
+fn countRejected(rejected: Rejected, _: TooSmall) void {
     rejected.count.* +%= 1;
 }
 fn accumulate(result: Result, value: u32) void {
@@ -191,7 +209,7 @@ fn accumulate(result: Result, value: u32) void {
 
 pub fn recovered(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ recover(countRejected), map(checked), tap(accumulate), drain() });
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countRejected)}), map(checked), tap(accumulate), drain() });
         run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
     } else {
         for (items) |value| {
@@ -206,6 +224,136 @@ pub fn recovered(comptime with_zrx: bool, items: []const u32, rejected: *u32, ou
 
 export fn same_recover(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
     recovered(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+fn tooSmall(failed: TooSmall) u32 {
+    return failed.item;
+}
+fn countOne(count: u32, _: u32) u32 {
+    return count +% 1;
+}
+fn storeCount(rejected: Rejected, count: u32) void {
+    rejected.count.* = count;
+}
+
+/// An error path with stages, state and an end of the stream of its own:
+/// the even ones among the values that were too small, counted.
+pub fn recoveredInto(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const counted = pipe(.{ map(tooSmall), filter(isEven), fold(@as(u32, 0), countOne), forEach(storeCount) });
+        const total = pipe(.{ recover(error{TooSmall}, counted), map(checked), fold(@as(u64, 0), add), forEach(store) });
+        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        var even: u32 = 0;
+        for (items) |value| {
+            if (value < 10) {
+                if (value % 2 == 0) even +%= 1;
+            } else {
+                sum +%= value;
+            }
+        }
+        rejected.* = even;
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`: the pipeline keeps the branches of its two paths
+/// where the optimizer turns the loop's inner `if` into selects.
+export fn lean_recover_path(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
+    recoveredInto(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+/// An error path that wants no more ends the stream: the first value that
+/// is too small is counted, and nothing after it is looked at.
+pub fn recoveredOnce(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const first = pipe(.{ take(1), forEach(countRejected) });
+        const total = pipe(.{ recover(error{TooSmall}, first), map(checked), fold(@as(u64, 0), add), forEach(store) });
+        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            if (value < 10) {
+                rejected.* +%= 1;
+                break;
+            }
+            sum +%= value;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_recover_stop(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
+    recoveredOnce(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+/// A zero is not a rejection: the error path fails the run for it.
+fn countOrFail(rejected: Rejected, failed: TooSmall) error{Zero}!void {
+    if (failed.item == 0) return error.Zero;
+    rejected.count.* +%= 1;
+}
+
+/// An error path that fails the run. Whether it did is the result.
+pub fn recoveredOrFailed(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countOrFail)}), map(checked), tap(accumulate), drain() });
+        return !ran(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        for (items) |value| {
+            if (value < 10) {
+                if (value == 0) return true;
+                rejected.* +%= 1;
+            } else {
+                out.* +%= value;
+            }
+        }
+        return false;
+    }
+}
+
+export fn same_recover_fail(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) bool {
+    return recoveredOrFailed(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+// --- rescue -----------------------------------------------------------------------------
+
+const Failure = struct { seen: *bool };
+
+/// Names every error of the run: with it bound, nothing is left to return.
+fn noteFailure(failure: Failure, err: anytype) void {
+    switch (err) {
+        error.Zero => failure.seen.* = true,
+    }
+}
+
+/// The failure of the run goes to a binding instead of to the caller.
+pub fn rescued(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64, failed: *bool) void {
+    if (with_zrx) {
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countOrFail)}), map(checked), tap(accumulate), drain() });
+        run(program(fromSlice(items), total), .{
+            Rejected{ .count = rejected },
+            Result{ .out = out },
+            Failure{ .seen = failed },
+            zrx.rescue(noteFailure),
+        });
+    } else {
+        for (items) |value| {
+            if (value < 10) {
+                if (value == 0) {
+                    failed.* = true;
+                    return;
+                }
+                rejected.* +%= 1;
+            } else {
+                out.* +%= value;
+            }
+        }
+    }
+}
+
+export fn same_rescue(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64, failed: *bool) void {
+    rescued(exported_with_zrx, ptr[0..len], rejected, out, failed);
 }
 
 // --- handler combinators ----------------------------------------------------------------
@@ -452,46 +600,58 @@ export fn same_bindings(ptr: [*]const u32, len: usize, by: u32, opened: *u32, cl
 // --- print --------------------------------------------------------------------------------------
 
 /// Formatting is a call into `std.Io.Writer` in both variants; what must match
-/// is everything around it.
-pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+/// is everything around it. A failed write is noted in `failed`: by the
+/// rescue of the run, and by hand where it happens.
+pub fn printed(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer, failed: *bool) void {
     if (with_zrx) {
         const lines = pipe(.{ filter(isEven), zrx.print(*std.Io.Writer, "{d}\n") });
-        program(fromSlice(items), lines).run(.{writer}) catch return false;
+        program(fromSlice(items), lines).run(.{ writer, Outcome{ .failed = failed }, zrx.rescue(noteFailed) });
     } else {
         for (items) |value| {
             if (value % 2 != 0) continue;
-            writer.print("{d}\n", .{value}) catch return false;
-            writer.flush() catch return false;
+            writer.print("{d}\n", .{value}) catch {
+                failed.* = true;
+                return;
+            };
+            writer.flush() catch {
+                failed.* = true;
+                return;
+            };
         }
-        writer.flush() catch return false;
+        writer.flush() catch {
+            failed.* = true;
+        };
     }
-    return true;
 }
 
-export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
-    return printed(exported_with_zrx, ptr[0..len], writer);
+export fn same_print(ptr: [*]const u32, len: usize, writer: *std.Io.Writer, failed: *bool) void {
+    printed(exported_with_zrx, ptr[0..len], writer, failed);
 }
 
 /// `write` is `print` without the flush after each item. Its format differs
 /// from the one in `printed` on purpose: two callers of one instantiation of
 /// `std.Io.Writer.print` keep it out of line under a compiler-chosen name,
 /// which differs between the two variants.
-pub fn written(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer) bool {
+pub fn written(comptime with_zrx: bool, items: []const u32, writer: *std.Io.Writer, failed: *bool) void {
     if (with_zrx) {
         const lines = pipe(.{ filter(isEven), zrx.write(*std.Io.Writer, "{d},") });
-        program(fromSlice(items), lines).run(.{writer}) catch return false;
+        program(fromSlice(items), lines).run(.{ writer, Outcome{ .failed = failed }, zrx.rescue(noteFailed) });
     } else {
         for (items) |value| {
             if (value % 2 != 0) continue;
-            writer.print("{d},", .{value}) catch return false;
+            writer.print("{d},", .{value}) catch {
+                failed.* = true;
+                return;
+            };
         }
-        writer.flush() catch return false;
+        writer.flush() catch {
+            failed.* = true;
+        };
     }
-    return true;
 }
 
-export fn same_write(ptr: [*]const u32, len: usize, writer: *std.Io.Writer) bool {
-    return written(exported_with_zrx, ptr[0..len], writer);
+export fn same_write(ptr: [*]const u32, len: usize, writer: *std.Io.Writer, failed: *bool) void {
+    written(exported_with_zrx, ptr[0..len], writer, failed);
 }
 
 // --- reduce -------------------------------------------------------------------------------------
@@ -525,6 +685,10 @@ export fn same_reduce(ptr: [*]const [4]u32, len: usize, out: *u64) void {
 fn halved(_: error{TooSmall}, value: u32) u32 {
     return value / 2;
 }
+/// The same, as the end of an error path.
+fn halvedFailure(failed: TooSmall) u32 {
+    return failed.item / 2;
+}
 
 /// Small values count for half instead of being dropped.
 pub fn fellBack(comptime with_zrx: bool, items: []const u32, out: *u64) void {
@@ -550,7 +714,7 @@ export fn same_or_else(ptr: [*]const u32, len: usize, out: *u64) void {
 /// `same_recover`.
 pub fn required(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ recover(countRejected), map(zrx.require(zrx.ge(100), error.TooSmall)), tap(accumulate), drain() });
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countRejected)}), map(zrx.require(zrx.ge(100), error.TooSmall)), tap(accumulate), drain() });
         run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
     } else {
         for (items) |value| {
@@ -614,7 +778,7 @@ export fn same_each(ptr: [*]const Group, len: usize, out: *u64) void {
 pub fn attempted(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
         const total = pipe(.{
-            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            zrx.attempt(.{ map(checked), map(triple) }, error{TooSmall}, .{map(halvedFailure)}),
             fold(@as(u64, 0), add),
             forEach(store),
         });
@@ -627,7 +791,7 @@ pub fn attempted(comptime with_zrx: bool, items: []const u32, out: *u64) void {
 }
 
 /// `lean`, not `same`: the pipeline pushes on from two places, the sub-pipe
-/// and the fallback, and the optimizer keeps the branch between them where
+/// and the error path, and the optimizer keeps the branch between them where
 /// the loop's one expression becomes a select. Three instructions more.
 export fn lean_attempt(ptr: [*]const u32, len: usize, out: *u64) void {
     attempted(exported_with_zrx, ptr[0..len], out);
@@ -643,12 +807,12 @@ fn capped(value: u32) error{TooLarge}!u32 {
 pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
     if (with_zrx) {
         const total = pipe(.{
-            zrx.attempt(.{ map(checked), map(triple) }, halved),
+            zrx.attempt(.{ map(checked), map(triple) }, error{TooSmall}, .{map(halvedFailure)}),
             map(capped),
             fold(@as(u64, 0), add),
             forEach(store),
         });
-        program(fromSlice(items), total).run(.{Result{ .out = out }}) catch return false;
+        if (!ran(program(fromSlice(items), total), .{Result{ .out = out }})) return false;
     } else {
         var sum: u64 = 0;
         for (items) |value| {

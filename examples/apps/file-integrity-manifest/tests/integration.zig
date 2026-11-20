@@ -68,7 +68,7 @@ fn pathIn(arena: std.mem.Allocator, temp: *const std.testing.TmpDir, name: []con
 /// Runs the app's pipe over `paths` into `output` and returns the outcome it stored.
 fn manifestOf(paths: []const []const u8, output: *std.Io.Writer) !app.Exit {
     var exit: app.Exit = .complete;
-    try zrx.program(zrx.fromSlice(paths), app.manifest).run(.{ io, &exit, app.Manifest{ .writer = output } });
+    try tryRun(zrx.program(zrx.fromSlice(paths), app.manifest), .{ io, &exit, app.Manifest{ .writer = output } });
     return exit;
 }
 
@@ -172,4 +172,19 @@ test "the executable exits 2 without files to hash and writes nothing" {
     try invoke(temp.dir, &.{"manifest"}, 2, "fatal: InvalidArguments\n");
     try invoke(temp.dir, &.{}, 2, "fatal: InvalidArguments\n");
     try std.testing.expectError(error.FileNotFound, temp.dir.access(io, "manifest", .{}));
+}
+
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
 }

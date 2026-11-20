@@ -9,5 +9,5 @@ fn bump(state: [2]u32, value: u32) [2]u32 {
 
 test {
     const seed: [2]u32 = .{ 0, 0 };
-    try program(range(u32, 0, 3), .{ zrx.fold(seed, zrx.reduce(seed, bump)), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.fold(seed, zrx.reduce(seed, bump)), zrx.drain() }).run(.{});
 }

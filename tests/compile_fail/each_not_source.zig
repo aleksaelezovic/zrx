@@ -18,7 +18,7 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
@@ -29,5 +29,5 @@ fn double(value: u32) u32 {
 
 // `source_of` makes a source from the item, not a value.
 test {
-    try program(range(u32, 0, 3), .{ each(double, .{fold(@as(u32, 0), add)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ each(double, .{fold(@as(u32, 0), add)}), forEach(ignore) }).run(.{});
 }

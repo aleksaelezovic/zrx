@@ -90,11 +90,17 @@ follow it.
 
 ```zig
 const app = program(source, terminated_pipe);
-try app.run(.{ io, logger });
+app.run(.{ io, logger });
 ```
 
 `program` describes the work. `run` constructs fresh stage state each time
 and uses the source and dependencies supplied by the caller.
+
+`run` returns nothing. What a program produces is an effect of a stage in
+its pipe, and what fails it is taken inside it: by an error path in the
+pipe, or by the [`rescue`](#the-failure-of-a-run) among its bindings. A run
+that could still fail with something nobody takes does not compile, and the
+error names what is left.
 
 ```zig
 const report = program(source, .{
@@ -105,7 +111,7 @@ const report = program(source, .{
     fileWriter(Report, path, 4096, .{ .mode = .create_new }),
 });
 
-try report.run(.{io});
+report.run(.{ io, rescue(fatal) });
 ```
 
 `provide` gives a program *defaults*: bindings that `run` uses unless it is
@@ -116,7 +122,8 @@ given, a type has one provider; a second one is a compile error. The
 resulting environment is shared by the source and all stages, including
 branch and route cases.
 
-A binding is a value, which provides its own type, or a *resource*.
+A binding is a value, which provides its own type, a *resource*, or a
+[`rescue`](#the-failure-of-a-run).
 `resource(acquire, release)` calls `acquire(deps...)` once per run and
 provides what it returns. `release(deps..., value)` returns `void`. Use
 `null` for a computed binding that needs no release. `stdout`, `stderr` and
@@ -129,7 +136,7 @@ const app = program(source, work).provide(.{
     resource(openSession, closeSession), // needs a Connection
     resource(connect, disconnect), // needs a Config
 });
-try app.run(.{ io, config });
+app.run(.{ io, config });
 ```
 
 What every resource provides and needs is known at compile time, and that
@@ -145,16 +152,17 @@ program above with `Report{ .writer = &writer }` in the tuple, and no file
 is created.
 
 ```zig
-try system(.{ ingest, report }).run(.{ io, &mailbox });
+system(.{ ingest, report }).run(.{ io, &mailbox, rescue(fatal) });
 ```
 
 `system` runs its programs together with the same bindings and returns when
 all have finished. What it is given replaces a default of the same type in
-each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and is returned; a
+each program, and a resource among it is acquired once, around all of them. The first failure cancels the others and ends the system; a
 program that had ended before that has released its resources. A system is itself runnable,
 so systems nest. With more than one program, each runs as a task of its own,
 so the `Io` must be able to run tasks concurrently; with one that cannot,
-`run` returns `error.ConcurrencyUnavailable`.
+the run fails with `error.ConcurrencyUnavailable`. A system of several
+programs can therefore always fail, and is run with a rescue.
 
 ## Sources
 
@@ -228,7 +236,7 @@ Per item:
 | `takeWhile(p)` | `fn (deps..., T) bool` | Items until `p` is first false, then stops the source. |
 | `flatten()` | | Each element of array, slice, or batch items. |
 | `batch(n)` | | Inline `Batch(T, n)` values (the last may contain fewer items). |
-| `recover(h)` | `fn (deps..., E, T) void` | Handles errors of the operators after it. |
+| `recover(E, path)` | | A failure of the operators after it, with an error in `E`, goes down `path` as a `Failed(E, T)`. |
 
 Flow:
 
@@ -246,7 +254,7 @@ Within one item:
 | Operator | Effect |
 |---|---|
 | `each(source_of, sub)` | Runs a fresh `sub` over the source that `source_of(deps..., item)` returns, and emits what `sub` emits, paired with the item. See [each](#each). |
-| `attempt(sub, fallback)` | Runs `sub`; when it fails for an item, emits `fallback(deps..., err, item)` in its place. See [Errors](#errors). |
+| `attempt(sub, E, path)` | Runs `sub`; when it fails for an item with an error in `E`, what `path` makes of the `Failed(E, T)` goes on in its place. See [Errors](#errors). |
 
 Terminal:
 
@@ -371,69 +379,101 @@ const windows = pipe(.{
 
 ## Errors
 
-A handler that returns an error fails the run: the error comes out of `run`,
-after every resource has been released. `run`'s error set is inferred from your
-handlers and the operators you used: it is `anyerror` only if a handler's is,
-and a program whose handlers cannot fail has an empty one.
+A handler that returns an error fails the run. `run` returns nothing, so
+somebody has to take that error, and the compiler checks that somebody does.
+What a run can fail with is inferred from your handlers and the operators
+you used: a program whose handlers cannot fail and that starts no task can
+fail with nothing, and is run as it is.
 
-There are three ways to handle an error instead. To keep the item as a value
+There are three ways to handle an item's error instead, and one for a
+failure of the run itself (see [below](#the-failure-of-a-run)). To keep the item as a value
 of your choosing, wrap the handler: `map(orElse(parse, rejected))` calls
 `rejected(deps..., err, item)` when `parse` fails and passes its result on.
 `require` goes the other way, from a value to an error:
 `map(require(isPlausible, error.InvalidReading))` fails an item that
 `filter(isPlausible)` would drop without a trace.
 
-When what fails is not one handler but several operators, wrap them:
-`attempt(sub, fallback)` is `orElse` for a sub-pipe. When `sub` fails for an
-item, `fallback(deps..., err, item)` is emitted in its place, with the item
-as it was at the `attempt`.
+When what fails is not one handler but several operators, the failure
+becomes an item and is sent down an *error path*, a pipe of its own. A
+`Failed(E, Item)` is that item: `.err` is the error, and `.item` the item as
+it was where the failure was caught. Two operators catch one.
+
+`attempt(sub, E, path)` keeps the item. When `sub` fails for an item with an
+error in `E`, the failure goes down `path`, and what the path emits goes on
+in place of what `sub` would have.
 
 ```zig
 /// A file that cannot be hashed is still a row.
-fn failed(err: anyerror, path: []const u8) Row { ... }
+fn failed(failure: zrx.Failed(anyerror, []const u8)) Row { ... }
 
 const manifest = pipe(.{
-    concurrent(4, .{attempt(hashed, failed)}),
+    concurrent(4, .{attempt(hashed, anyerror, .{map(failed)})}),
     forEach(save),
 });
 ```
 
-- The rules are `orElse`'s. The fallback returns what the sub-pipe emits.
-  Its error parameter must take every error the sub-pipe can fail with
-  (`anyerror` always does); `error.Canceled` is never handed to it. What it
-  handles is no longer in `run`'s error set.
+- `E` selects what the path takes: an error set takes its members and lets
+  every other error of `sub` fail the run; `anyerror` takes everything.
+  `error.Canceled` is never taken, so a set that holds nothing else is a
+  compile error, as is one none of whose errors `sub` can fail with. What
+  the path takes is no longer among what the run can fail with.
+- The path emits what the sub-pipe emits. It keeps its state for the whole
+  stream and has an end of the stream of its own, after the sub-pipe's. A
+  path that wants no more ends the stream; a path that fails fails the run.
+- A handler that names its failure names it exactly: the `E` of the
+  operator and the item's own type. `anytype` takes any.
 - What the sub-pipe had already emitted for the item is not taken back, and
   its stages keep whatever state the item gave them.
-- A failure of the pipe *after* the `attempt` is not the sub-pipe's. It
-  fails the run as it would without the `attempt`, the fallback is not
-  asked, and a `recover` inside the sub-pipe does not see it.
+- A failure of the pipe *after* the `attempt` is neither the sub-pipe's
+  nor the path's. It fails the run as it would without the `attempt`,
+  whichever of the two was emitting, for an item or at the end of the
+  stream; the path is not asked, and a `recover` inside either does not
+  see it.
 - The sub-pipe keeps its state for the whole stream, like a case of a
   `route`. A failure at its end of the stream does not belong to an item and
   fails the run.
-- The sub-pipe cannot contain a task boundary: a failure beyond one happens
-  on another task.
+- Neither the sub-pipe nor the path can contain a task boundary: a failure
+  beyond one happens on another task.
 
-To drop the item, put `recover(handler)` before the operators that may
-fail. When one of them fails for an item, the handler receives the error and
-the item as it was at the `recover`. Returning normally skips the item;
-returning an error fails the run.
+`recover(E, path)` takes the item out of the pipe. Put it before the
+operators that may fail: when one of them fails for an item with an error in
+`E`, the item leaves the pipe and the failure goes down `path` instead, a
+terminated pipe with stages, state and an end of the stream of its own.
 
 ```zig
-fn reject(log: Log, err: ParseError, line: []const u8) void { ... }
+const Rejected = zrx.Failed(ParseError, []const u8);
+
+fn described(rejected: Rejected) Rejection { ... }
+
+/// Where a line that did not parse goes instead.
+const rejections = pipe(.{
+    map(described),
+    print(zrx.Stderr, "{f}\n"),
+});
 
 pipe(.{
-    recover(reject),
+    recover(ParseError, rejections),
     map(parse),
     map(validate),
     forEach(save),
 })
 ```
 
-- The handler's error parameter selects what it handles: an error set handles
-  its members and lets everything else through; `anyerror` handles everything.
-- `error.Canceled` is never given to a handler. A write that was interrupted
+What the path does with a failure decides how it ends:
+
+| The path | The stream |
+|---|---|
+| takes the failure | goes on without the item. |
+| wants no more (a `take(1)` at its start: report the first failure) | ends as it ends anywhere, and the run succeeds. See "Stopping early". |
+| fails (a handler in it returns an error, its own or `failed.err`) | fails the run with that error. |
+
+- `E` selects what the path takes: an error set takes its members and lets
+  everything else through; `anyerror` takes everything. What the path takes
+  is no longer among what the run can fail with.
+- `error.Canceled` is never sent down a path. A write that was interrupted
   because the run is being cancelled is: `std.Io.Writer` reports it as
   `error.WriteFailed` like any failed write.
+- The path cannot contain a task boundary.
 - A `recover` guards what comes *after* it, up to the next task boundary
   (`queue`, `batchWithin` or `debounce`). Errors on the far side happen in
   another task and fail the run.
@@ -443,6 +483,70 @@ pipe(.{
   fail the run.
 - Nothing is rolled back: stages between the `recover` and the failure keep
   whatever state the item already gave them.
+
+### The failure of a run
+
+Some failures belong to no item: a source that cannot read, a flush at the
+end of the stream, a resource that cannot be acquired, anything beyond a
+task boundary. An error path cannot take them. They go to the `rescue`
+among the bindings:
+
+```zig
+const Exit = enum(u8) { ok, failed };
+
+/// Whatever ends the run: a line on stderr and a status for `main`.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.* = .failed;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
+
+const app = program(source, records).provide(.{
+    rescue(fatal).provide(.{stderr(256)}),
+    fileWriter(Accepted, path, 4096, .{ .mode = .create_new }),
+});
+```
+
+`rescue(handler)` is a binding, the third kind beside a value and a
+resource. `handler(deps..., err)` is called once with the failure and
+returns nothing: it is the last to be given it. What a failed run leaves
+behind is an effect of the handler, such as the status above, which `main`
+returns:
+
+```zig
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .ok;
+    app.run(.{ init.io, &exit });
+    return @intFromEnum(exit);
+}
+```
+
+- A rescue stands outside the run. It is called when the run is over and
+  everything the run acquired has been released, whichever resource or
+  stage failed, and wherever the rescue is written among the bindings:
+  above, the file is closed before `fatal` is called.
+- Its handler is given the plain values of the run (`io` and `&exit`
+  above) and what the rescue is given for itself with `provide`, which is
+  acquired for the call and released after it. A resource of the run is
+  gone by then: a handler that asks for one is a compile error, which says
+  to give the rescue its own.
+- What the rescue is given for itself must be there when it is needed: if
+  acquiring it could fail, that failure would be left over, and the run
+  would not compile. A value given to `run` replaces it like any default,
+  so a test hands the handler a writer of its own.
+- The handler's error parameter says what it takes: `anyerror`, an error
+  set that holds every error the run can fail with, or `anytype`, with
+  which it is given exactly those errors, so that a `switch` over them is
+  checked by the compiler. For a run that cannot fail it is not checked
+  at all: a program's rescue stays valid when a test replaces the one
+  resource that could fail.
+- A cancellation is given to it like any failure. An error path never takes
+  one, because it is no item's, but this is where the run ends. The request
+  to cancel is used up by then: a handler whose caller is itself a task that
+  must stay cancellable calls `io.recancel()` for it.
+- A run has one rescue. Given to `run`, it replaces the one a program
+  provides; given to a `system`, it takes the failure that ends the system,
+  in place of the members' own.
 
 ## Stopping early
 
@@ -458,8 +562,8 @@ is done; a handler between the two may run for it. (A `route` whose cases
 rejoin drops such a value itself once the pipe after it is done.)
 
 To stop a run from outside, cancel the task that called `run`. With a task boundary,
-`run` returns `error.Canceled` under the rules in
-[what a run guarantees](#what-a-run-guarantees). Without a boundary or a
+the run fails with `error.Canceled` under the rules in
+[what a run guarantees](#what-a-run-guarantees), and its rescue is given that. Without a boundary or a
 multi-source `merge`, cancellation is handled by the source and handlers
 through their own `Io` calls. To stop
 *gracefully*, end the source. Queues drain, timed operators emit their pending
@@ -607,8 +711,9 @@ For one program with a task boundary in its pipe:
 - **On success**, each stage's `finish` runs once. The end of the stream
   travels with the items: a segment finishes its stages and ends input to
   its boundary, and the next segment handles its pending values and finishes.
-- **On an error**, `run` returns the error. A segment may already have
-  finished or may be cancelled part-way through finishing.
+- **On an error**, the run fails with it: its rescue is given the error. A
+  segment may already have finished or may be cancelled part-way through
+  finishing.
 - **Which error**: the first failure of any segment, or `error.Canceled` if
   the task that called `run` was asked to cancel before the run had joined
   its tasks.
@@ -746,13 +851,13 @@ caller must serialize those writes.
 - `.publish` writes to a temporary file in the same directory and gives it
   its name after the work wrapped by the binding succeeds and the writer is
   flushed. A failure before publication leaves the destination untouched.
-  If the path already exists at publication, the run returns
+  If the path already exists at publication, the run fails with
   `error.PathAlreadyExists`.
 
 Each file is published atomically. With several published files, the last
 one acquired is named first, following resource release order: of the files
 in one tuple, the one written last. If naming one
-fails, `run` returns that error and the files published earlier stay in place.
+fails, the run fails with that error and the files published earlier stay in place.
 
 ```zig
 program(source, work).provide(.{
@@ -787,9 +892,9 @@ test gives it a reader of its own, which replaces a default:
 const app = program(lines(Input, max_line), work);
 
 // in main:
-try app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
+app.run(.{ io, fileReader(Input, input_path, max_line + 1), ... });
 // in a test:
-try app.run(.{ Input{ .reader = &fixed }, ... });
+app.run(.{ Input{ .reader = &fixed }, ... });
 ```
 
 The buffer must hold the longest line and its newline, as for any reader
@@ -835,7 +940,7 @@ compiled only when a program uses it.
 const http = zrx.ext.http;
 
 const api = pipe(.{
-    recover(http.fail),
+    recover(anyerror, .{http.fail()}),
     route(.{
         when(http.path("/sum"), .{
             map(sum),
@@ -851,12 +956,12 @@ const api = pipe(.{
 
 const server = program(http.connections(), .{
     concurrent(64, .{
-        recover(http.disconnected),
+        recover(http.Disconnected, .{drain()}),
         http.serve(api),
     }),
 }).provide(.{http.listen(address, .{ .reuse_address = true })});
 
-try server.run(.{io});
+server.run(.{ io, rescue(fatal) });
 ```
 
 There are two pipes. The program's pipe carries connections; the pipe given
@@ -872,8 +977,8 @@ to `serve` carries the requests of one connection.
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
 | `http.status(code)` | Terminal, in `sub`. Answers the final status `code` with an empty body; a 204 or 304 carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
-| `http.fail` | For `recover`, in `sub`: answers a failed request with the status of its error. |
-| `http.disconnected` | For `recover`, before `serve`: drops a connection that broke. |
+| `http.fail()` | Terminal, in an error path in `sub`: answers a failed request with the status of its error. |
+| `http.Disconnected` | The errors a connection that broke fails with. `recover(http.Disconnected, .{drain()})` before `serve` drops such a connection. |
 
 `serve` constructs `sub` anew for every connection and finishes it when the
 conversation ends without an error, so its stages hold per-connection state: with an inner
@@ -938,8 +1043,8 @@ place. `100 Continue` is sent by `request.body`, as above.
 
 ### Failures
 
-`recover(http.fail)` at the start of `sub` turns a handler's error into an
-answer and lets the connection go on:
+`recover(anyerror, .{http.fail()})` at the start of `sub` turns a handler's
+error into an answer and lets the connection go on:
 
 | Error | Status |
 |---|---|
@@ -1005,8 +1110,8 @@ safety checks. A client has to send a `Content-Length`. (A coding whose
 name `std` does not know is a head that does not parse: 400.)
 
 A connection that breaks fails its push with `error.ReadFailed` or
-`error.WriteFailed`. `recover(http.disconnected)` before `serve` handles
-exactly these two, so one lost peer does not end the server and every other
+`error.WriteFailed`. `recover(http.Disconnected, .{drain()})` before `serve`
+takes exactly these two, so one lost peer does not end the server and every other
 error still does. `fail` does not answer them either: they pass through it.
 
 ### Connections and writes
@@ -1023,7 +1128,7 @@ Every connection has to end in a `serve` or a `reject`. On its way there it
 may wait at a boundary (`queue`, `concurrent`) and pass through stages that
 hand on every item they are given (`route`, `tap`, `take`). A stage that
 drops a connection or keeps it back (`filter`, `batch`, any other terminal,
-a `recover` handling the failure of a stage the connection had not yet
+a `recover` taking the failure of a stage the connection had not yet
 left for `serve`) does not close it and does not free its place: it stays
 open and counts as waiting until the run is over. So do not filter connections. Route the ones you will not serve to
 `reject`, which frees the place:
@@ -1053,7 +1158,7 @@ and does not close.
 
 ```zig
 const connection: http.Transport = .{ .reader = &reader, .writer = &writer };
-try program(fromValue(connection), .{http.serve(api)}).run(.{});
+program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
 ```
 
 ### Limits
@@ -1201,9 +1306,9 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture. Seventeen are `same`; `take`, `batch`,
-the handler combinators and `attempt` are `lean`, each with the reason next
-to it.
+Every synchronous operator has a fixture, and so has `rescue`. Twenty are
+`same`; `take`, `batch`, the handler combinators, `attempt` and a `recover`
+whose path has stages of its own are `lean`, each with the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it

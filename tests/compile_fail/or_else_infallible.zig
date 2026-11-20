@@ -14,5 +14,5 @@ fn zero(_: anyerror, _: u32) u32 {
     return 0;
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ map(zrx.orElse(double, zero)), forEach(ignore) })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ map(zrx.orElse(double, zero)), forEach(ignore) })).run(.{});
 }

@@ -8,5 +8,5 @@ fn isEven(value: u64) bool {
 }
 
 test {
-    try program(range(u32, 0, 3), .{ zrx.map(zrx.require(isEven, error.Odd)), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.map(zrx.require(isEven, error.Odd)), zrx.drain() }).run(.{});
 }

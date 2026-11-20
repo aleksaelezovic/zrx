@@ -18,5 +18,5 @@ fn nothing() u32 {
     return 0;
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ map(nothing), forEach(ignore) })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ map(nothing), forEach(ignore) })).run(.{});
 }

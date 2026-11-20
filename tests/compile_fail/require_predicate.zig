@@ -8,5 +8,5 @@ fn double(value: u32) u32 {
 }
 
 test {
-    try program(range(u32, 0, 3), .{ zrx.map(zrx.require(double, error.Odd)), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.map(zrx.require(double, error.Odd)), zrx.drain() }).run(.{});
 }

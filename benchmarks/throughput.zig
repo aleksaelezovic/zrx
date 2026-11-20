@@ -41,9 +41,18 @@ fn byHand(items: []const u32, by: u32) u64 {
     return sum;
 }
 
+/// What a run failed with, if it did: `run` returns nothing.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
 fn byPipe(comptime work: anytype, io: std.Io, items: []const u32, by: u32) !u64 {
     var total: u64 = 0;
-    try program(fromSlice(items), work).run(.{ io, Scale{ .by = by }, Total{ .out = &total } });
+    var failure: Failure = .{};
+    program(fromSlice(items), work).run(.{ io, Scale{ .by = by }, Total{ .out = &total }, &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
     return total;
 }
 

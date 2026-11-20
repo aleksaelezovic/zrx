@@ -154,7 +154,10 @@ pub fn merge(comptime a: []const type, comptime b: []const type) []const type {
 }
 
 /// The declared type of trailing data parameter `i`, or null when it is `anytype`.
-pub fn Param(comptime handler: anytype, comptime arity: usize, comptime i: usize) ?type {
+pub fn Param(comptime who: []const u8, comptime handler: anytype, comptime arity: usize, comptime i: usize) ?type {
+    // Before anything of the handler is read: a function with fewer
+    // parameters than `arity` has no such parameter to look at.
+    expectHandler(who, handler, arity);
     if (isComposite(handler)) return null;
     const params = @typeInfo(@TypeOf(handler)).@"fn".param_types;
     return params[params.len - arity + i];
@@ -202,7 +205,7 @@ pub fn check(comptime who: []const u8, comptime handler: anytype, comptime Env: 
             ". Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`.",
     );
     for (Args, 0..) |Arg, i| {
-        const Want = Param(handler, Args.len, i) orelse continue;
+        const Want = Param(who, handler, Args.len, i) orelse continue;
         if (!accepts(Want, Arg)) @compileError(
             who ++ ": handler `" ++ describe(handler) ++ "` takes `" ++ @typeName(Want) ++
                 "` but receives `" ++ @typeName(Arg) ++ "` here",

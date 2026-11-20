@@ -7,5 +7,5 @@ const mergeTagged = zrx.mergeTagged;
 const Side = enum { left, right };
 
 test {
-    try program(mergeTagged(Side, .{ range(u32, 0, 3), range(u32, 0, 3) }), .{zrx.drain()}).run(.{std.testing.io});
+    program(mergeTagged(Side, .{ range(u32, 0, 3), range(u32, 0, 3) }), .{zrx.drain()}).run(.{std.testing.io});
 }

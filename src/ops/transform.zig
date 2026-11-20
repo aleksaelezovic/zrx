@@ -122,7 +122,7 @@ pub fn fold(seed: anytype, comptime reducer: anytype) Accumulate(.fold, State(re
 /// The accumulator type: the reducer's declared state parameter, else the seed's type.
 fn State(comptime reducer: anytype, comptime Seed: type) type {
     if (!di.isHandler(reducer)) @compileError("scan/fold: expected a reducer `fn (deps..., state, item) state`, got `" ++ @typeName(@TypeOf(reducer)) ++ "`");
-    return di.Param(reducer, 2, 0) orelse Seed;
+    return di.Param("scan/fold", reducer, 2, 0) orelse Seed;
 }
 
 fn Accumulate(comptime kind: enum { scan, fold }, comptime A: type, comptime reducer: anytype) type {
@@ -403,70 +403,6 @@ fn BatchBuffer(comptime size: usize) type {
                     if (step.item) |item| self.items[step.index] = item;
                     if (step.deliver == 0) return .more;
                     return down.push(.{ .items = self.items, .len = step.deliver });
-                }
-            };
-        }
-    };
-}
-
-/// Guards the operators after it: when one of them fails for an item,
-/// `handler(deps..., err, item)` decides. Returning normally skips the item and
-/// continues; returning an error fails the run.
-///
-/// The handler's error parameter selects what it handles: `anyerror` for
-/// everything, or an error set such as `ParseError` to let other errors pass.
-/// `error.Canceled` is never handed to the handler. A value that a stage
-/// *before* the `recover` emits at the end of the stream is an item like any
-/// other. Errors of a later stage's own `finish`, or beyond a
-/// `queue`, are not per-item and fail the run.
-pub fn recover(comptime handler: anytype) Recover(handler) {
-    return .{};
-}
-
-fn Recover(comptime handler: anytype) type {
-    return struct {
-        const Op = @This();
-        pub const zrx_operator = {};
-        pub const name = "recover";
-
-        fn Handled() type {
-            if (!di.isHandler(handler)) @compileError("recover: expected a handler `fn (deps..., err, item) void`, got `" ++ @typeName(@TypeOf(handler)) ++ "`");
-            const E = di.Param(handler, 2, 0) orelse anyerror;
-            if (@typeInfo(E) != .error_set) @compileError("recover: the handler's first data parameter must be an error set or anyerror, got `" ++ @typeName(E) ++ "`");
-            return E;
-        }
-
-        pub fn Out(comptime Env: type, comptime In: type) type {
-            expectReturn(name, "handler", di.Bound(name, handler, Env, &.{ Handled(), In }).Return, void);
-            return In;
-        }
-
-        pub fn Stage(comptime Env: type, comptime In: type) type {
-            const E = Handled();
-            const Call = di.Bound(name, handler, Env, &.{ E, In });
-            return struct {
-                call: Call,
-
-                pub fn init(self: *@This(), _: *const Op, env: Env) void {
-                    self.call = .init(env);
-                }
-
-                pub fn push(self: *@This(), item: In, down: anytype) !Flow {
-                    return down.push(item) catch |err| {
-                        const any: anyerror = err;
-                        if (any == error.Canceled) return err;
-                        if (@typeInfo(E).error_set.error_names) |names| {
-                            inline for (names) |error_name| {
-                                if (any == @field(anyerror, error_name)) {
-                                    try lift(self.call.call(.{ @as(E, @errorCast(any)), item }));
-                                    return .more;
-                                }
-                            }
-                            return err;
-                        }
-                        try lift(self.call.call(.{ any, item }));
-                        return .more;
-                    };
                 }
             };
         }

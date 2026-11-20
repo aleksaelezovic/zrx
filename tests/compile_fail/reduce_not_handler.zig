@@ -5,5 +5,5 @@ const range = zrx.range;
 
 test {
     const rows = [_][2]u32{.{ 1, 2 }};
-    try program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, 1)), zrx.drain() }).run(.{});
+    program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, 1)), zrx.drain() }).run(.{});
 }

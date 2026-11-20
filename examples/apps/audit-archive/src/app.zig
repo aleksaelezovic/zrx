@@ -12,7 +12,6 @@ const batch = zrx.batch;
 const queue = zrx.queue;
 const flatten = zrx.flatten;
 const write = zrx.write;
-const print = zrx.print;
 const compose = zrx.compose;
 const field = zrx.field;
 const require = zrx.require;
@@ -21,6 +20,8 @@ const fromValue = zrx.fromValue;
 const fileReader = zrx.fileReader;
 const fileWriter = zrx.fileWriter;
 const stderr = zrx.stderr;
+const rescue = zrx.rescue;
+const forEach = zrx.forEach;
 const json = zrx.ext.json;
 
 /// Where the export is read from.
@@ -52,21 +53,33 @@ pub const archive = pipe(.{
 /// The whole app. `run` gives it files; a test gives it a reader and a writer.
 pub const archiving = program(lines(Input, records.max_line), archive);
 
+/// How the app ended, for `main` to return.
+pub const Exit = struct { code: u8 = 0 };
+
+/// Whatever ends a run: one best-effort line on stderr, exit status 2.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.code = 2;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
+
 /// Archives the export at `input` as the new file `output`, which gets its
-/// name only once every record has been written.
-pub fn run(io: std.Io, input: []const u8, output: []const u8) !void {
-    try archiving.run(.{
+/// name only once every record has been written. A run returns nothing:
+/// what fails it goes to `fatal`, once both files are closed.
+pub fn run(io: std.Io, input: []const u8, output: []const u8, exit: *Exit) void {
+    archiving.run(.{
         io,
+        exit,
+        rescue(fatal).provide(.{stderr(256)}),
         fileReader(Input, input, records.max_line + 1),
         fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
     });
 }
 
-const failure = pipe(.{print(zrx.Stderr, "fatal: {s}\n")});
-
-/// One best-effort line on stderr for a run that failed.
-pub fn report(io: std.Io, err: anyerror) void {
-    program(fromValue(@errorName(err)), failure).run(.{ io, stderr(256) }) catch {};
+/// The same line and status for what fails before there is a run, such as
+/// a wrong argument count: a program of one item, the failure.
+pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
 }
 
 test {

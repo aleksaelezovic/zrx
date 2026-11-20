@@ -16,5 +16,5 @@ fn ignore(_: u32) void {}
 
 const Scale = struct { by: u32 };
 test {
-    try program(range(u32, 0, 3), pipe(.{forEach(ignore)})).run(.{ Scale{ .by = 1 }, Scale{ .by = 2 } });
+    program(range(u32, 0, 3), pipe(.{forEach(ignore)})).run(.{ Scale{ .by = 1 }, Scale{ .by = 2 } });
 }

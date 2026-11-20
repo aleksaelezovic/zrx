@@ -35,8 +35,10 @@ pub const archive = pipe(.{
 
 pub const archiving = program(lines(Input, records.max_line), archive);
 
-try archiving.run(.{
+archiving.run(.{
     io,
+    exit,
+    rescue(fatal).provide(.{stderr(256)}),
     fileReader(Input, input, records.max_line + 1),
     fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
 });
@@ -57,8 +59,12 @@ try archiving.run(.{
   exists is not replaced.
 - The program is one constant. `run` gives it the two files as bindings; a
   test gives it a reader and a writer of its own in their place.
-- `main.zig` checks the argument count, runs the program and owns the exit
-  status. The `fatal:` line is a program too: `fromValue` into `print`.
+- A run returns nothing. What fails it goes to `rescue(fatal)`, which
+  writes the `fatal:` line and stores the exit status `main` returns. It
+  is called once the run is over and both files are closed, with a stderr
+  of its own.
+- `main.zig` checks the argument count and returns the status. A wrong
+  count is reported by a program too: `fromValue` into `forEach(fatal)`.
 
 ## Format
 

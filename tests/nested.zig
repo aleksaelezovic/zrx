@@ -14,6 +14,7 @@ const fold = zrx.fold;
 const take = zrx.take;
 const flatten = zrx.flatten;
 const recover = zrx.recover;
+const Failed = zrx.Failed;
 const route = zrx.route;
 const when = zrx.when;
 const otherwise = zrx.otherwise;
@@ -92,7 +93,7 @@ test "each runs a fresh sub-pipe over the source made from every item" {
         each(below, .{ Counted{}, fold(@as(u32, 0), add) }),
         forEach(recordPair),
     });
-    try program(range(u32, 0, 5), sums).run(.{ &seen, &lives });
+    try support.run(program(range(u32, 0, 5), sums), .{ &seen, &lives });
     // One value per item, the seed for the item whose source is empty.
     try seen.expect(&.{
         .{ .source = 0, .item = 0 },
@@ -111,7 +112,7 @@ test "a sub-pipe that is done ends its item, not the stream" {
         each(below, .{ Counted{}, take(2), fold(@as(u32, 0), add) }),
         forEach(recordPair),
     });
-    try program(range(u32, 1, 5), firstTwo).run(.{ &seen, &lives });
+    try support.run(program(range(u32, 1, 5), firstTwo), .{ &seen, &lives });
     try seen.expect(&.{
         .{ .source = 1, .item = 0 },
         .{ .source = 2, .item = 1 },
@@ -135,7 +136,7 @@ test "once the pipe after each is done, the item's source stops and so does the 
     });
     // 3 gives 0, 1, 2. The fourth value is the first of the next item, whose
     // stream is cut short there and whose sub-pipe is still finished.
-    try program(range(u32, 3, 1000), work).run(.{ &seen, &pulls, &lives });
+    try support.run(program(range(u32, 3, 1000), work), .{ &seen, &pulls, &lives });
     try seen.expect(&.{ 0, 1, 2, 0 });
     try std.testing.expectEqual(@as(usize, 2), pulls.count);
     try std.testing.expectEqual(Lives{ .made = 2, .pushed = 4, .finished = 2 }, lives);
@@ -170,14 +171,14 @@ test "the tag has the type source_of declares, whichever kind of slice the item 
         each(letters, .{fold(@as(usize, 0), count)}),
         forEach(describe),
     });
-    try program(fromSlice(&terminated), sized).run(.{&writer});
-    try program(fromSlice(&plain), sized).run(.{&writer});
+    try support.run(program(fromSlice(&terminated), sized), .{&writer});
+    try support.run(program(fromSlice(&plain), sized), .{&writer});
     // A generic `source_of` declares nothing: the tag is the item as it came.
     const asItCame = pipe(.{
         each(lettersOfAny, .{fold(@as(usize, 0), count)}),
         forEach(describeTerminated),
     });
-    try program(fromSlice(&terminated), asItCame).run(.{&writer});
+    try support.run(program(fromSlice(&terminated), asItCame), .{&writer});
     try std.testing.expectEqualStrings("ab=2;=0;cde=3;xy=2;ab:2;:0;cde:3;", writer.buffered());
 }
 
@@ -195,7 +196,7 @@ test "source_of takes dependencies, and when it fails no sub-pipe is made for th
         each(limited, .{ Counted{}, fold(@as(u32, 0), add) }),
         forEach(recordPair),
     });
-    const result = program(range(u32, 1, 5), sums).run(.{ &seen, &lives, Limit{ .below = 3 } });
+    const result = support.run(program(range(u32, 1, 5), sums), .{ &seen, &lives, Limit{ .below = 3 } });
     try std.testing.expectError(error.TooMany, result);
     try seen.expect(&.{ .{ .source = 1, .item = 0 }, .{ .source = 2, .item = 1 } });
     try std.testing.expectEqual(Lives{ .made = 2, .pushed = 3, .finished = 2 }, lives);
@@ -213,7 +214,7 @@ test "a failure in the sub-pipe fails the run, and that item's sub-pipe is not f
         each(below, .{ Counted{}, map(failAtTwo), fold(@as(u32, 0), add) }),
         forEach(recordPair),
     });
-    const result = program(range(u32, 1, 5), sums).run(.{ &seen, &lives });
+    const result = support.run(program(range(u32, 1, 5), sums), .{ &seen, &lives });
     try std.testing.expectError(error.Two, result);
     try seen.expect(&.{ .{ .source = 1, .item = 0 }, .{ .source = 2, .item = 1 } });
     // The third item's stream reached its third value.
@@ -228,7 +229,7 @@ test "sub-pipes nest" {
         map(field(.item)),
         fold(@as(u32, 0), add),
     });
-    try program(range(u32, 3, 5), .{ each(below, inner), forEach(recordPair) }).run(.{&seen});
+    try support.run(program(range(u32, 3, 5), .{ each(below, inner), forEach(recordPair) }), .{&seen});
     try seen.expect(&.{ .{ .source = 3, .item = 1 }, .{ .source = 4, .item = 4 } });
 }
 
@@ -244,7 +245,7 @@ test "each works in a case of a route, where stages are stored together" {
         }),
         forEach(record),
     });
-    try program(range(u32, 3, 7), work).run(.{&seen});
+    try support.run(program(range(u32, 3, 7), work), .{&seen});
     try seen.expect(&.{ 6, 6, 10, 15 });
 }
 
@@ -263,7 +264,7 @@ fn ticksOf(_: u32) Ticks {
 
 test "the item's source may be any source, also a producer that asks for Stop" {
     var seen: Pairs = .{};
-    try program(range(u32, 7, 9), .{ each(ticksOf, .{fold(@as(u32, 0), add)}), forEach(recordPair) }).run(.{&seen});
+    try support.run(program(range(u32, 7, 9), .{ each(ticksOf, .{fold(@as(u32, 0), add)}), forEach(recordPair) }), .{&seen});
     try seen.expect(&.{ .{ .source = 7, .item = 3 }, .{ .source = 8, .item = 3 } });
 }
 
@@ -279,64 +280,137 @@ fn evenOnly(value: u32) ParseError!u32 {
 
 const Fallbacks = struct { count: usize = 0 };
 
-fn plusHundred(fallbacks: *Fallbacks, err: ParseError, value: u32) u32 {
-    std.debug.assert(err == error.Odd);
+fn plusHundred(fallbacks: *Fallbacks, failed: Failed(ParseError, u32)) u32 {
+    std.debug.assert(failed.err == error.Odd);
     fallbacks.count += 1;
-    return value + 100;
+    return failed.item + 100;
 }
+/// The error path most tests here use: an odd item, a hundred higher.
+const raised = pipe(.{map(plusHundred)});
 
-test "attempt emits the fallback in place of an item its sub-pipe fails on" {
+test "attempt emits what its error path makes of an item its sub-pipe fails on" {
     var seen: Numbers = .{};
     var fallbacks: Fallbacks = .{};
     const work = pipe(.{
         attempt(.{
             map(evenOnly),
             map(double),
-        }, plusHundred),
+        }, ParseError, raised),
         forEach(record),
     });
-    try program(range(u32, 0, 6), work).run(.{ &seen, &fallbacks });
+    try support.run(program(range(u32, 0, 6), work), .{ &seen, &fallbacks });
     try seen.expect(&.{ 0, 101, 4, 103, 8, 105 });
     try std.testing.expectEqual(@as(usize, 3), fallbacks.count);
 }
 
-fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
-    for (names) |name| if (std.mem.eql(u8, name, wanted)) return true;
-    return false;
+/// The path is given the error set the `attempt` names, whatever the
+/// sub-pipe's own is.
+fn anyPlusHundred(failed: anytype) u32 {
+    return failed.item + 100;
+}
+fn giveUpOnTooBig(failed: Failed(ParseError, u32)) error{GaveUp}!u32 {
+    return if (failed.err == error.TooBig) error.GaveUp else failed.item + 100;
 }
 
-fn anyPlusHundred(_: anyerror, value: u32) u32 {
-    return value + 100;
-}
-fn genericPlusHundred(err: anytype, value: u32) u32 {
-    // It is given the sub-pipe's own error set.
-    const names = comptime @typeInfo(@TypeOf(err)).error_set.error_names.?;
-    comptime std.debug.assert(names.len == 2 and has(names, "Odd") and has(names, "TooBig"));
-    return value + 100;
-}
-fn giveUpOnTooBig(err: ParseError, value: u32) error{GaveUp}!u32 {
-    return if (err == error.TooBig) error.GaveUp else value + 100;
-}
-
-test "the fallback's error parameter follows orElse, and what it handles leaves run's error set" {
+test "what an attempt takes is no longer among the errors of the run, and what its path fails with is" {
     var seen: Numbers = .{};
     const values = [_]u32{ 2, 3, 500, 4 };
     const deps = .{&seen};
-    inline for (.{ anyPlusHundred, genericPlusHundred }) |fallback| {
-        const guarded = program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, fallback), forEach(record) });
-        const Set = @typeInfo(@TypeOf(guarded.run(deps))).error_union.error_set;
-        try std.testing.expectEqual(@as(usize, 0), comptime @typeInfo(Set).error_set.error_names.?.len);
-        try guarded.run(deps);
+    inline for (.{ anyerror, ParseError }) |Taken| {
+        // Nothing is left: this compiles without a rescue.
+        program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, Taken, .{map(anyPlusHundred)}), forEach(record) }).run(deps);
     }
     try seen.expect(&.{ 2, 103, 600, 4, 2, 103, 600, 4 });
 
-    // A fallback that fails adds its own errors, and fails the run with them.
-    const strict = program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, giveUpOnTooBig), forEach(record) });
-    const Strict = @typeInfo(@TypeOf(strict.run(deps))).error_union.error_set;
-    const names = comptime @typeInfo(Strict).error_set.error_names.?;
-    try std.testing.expect(comptime names.len == 1 and has(names, "GaveUp"));
-    try std.testing.expectError(error.GaveUp, strict.run(deps));
+    // A path that fails adds its own errors, and fails the run with them.
+    const strict = program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, ParseError, .{map(giveUpOnTooBig)}), forEach(record) });
+    const left = support.runLeft(strict, deps);
+    try std.testing.expectEqualStrings("GaveUp ", left.names());
+    try std.testing.expectEqual(error.GaveUp, left.err.?);
     try seen.expect(&.{ 2, 103, 600, 4, 2, 103, 600, 4, 2, 103 });
+}
+
+test "attempt with an error set lets other errors through" {
+    var seen: Numbers = .{};
+    const values = [_]u32{ 2, 3, 500, 4 };
+    const odd = program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, error{Odd}, .{map(anyPlusHundred)}), forEach(record) });
+    const left = support.runLeft(odd, .{&seen});
+    try std.testing.expectEqualStrings("TooBig ", left.names());
+    try std.testing.expectEqual(error.TooBig, left.err.?);
+    try seen.expect(&.{ 2, 103 });
+}
+
+/// Fails with anything: nothing is known about its errors where it is attempted.
+fn loose(value: u32) anyerror!u32 {
+    return switch (value) {
+        1 => error.Odd,
+        3 => error.TooBig,
+        5 => error.Canceled,
+        else => value,
+    };
+}
+
+test "attempt selects what it takes also where any error is possible" {
+    var seen: Numbers = .{};
+    const some = program(range(u32, 0, 8), .{ attempt(.{map(loose)}, error{Odd}, .{map(anyPlusHundred)}), forEach(record) });
+    try std.testing.expectError(error.TooBig, support.run(some, .{&seen}));
+    try seen.expect(&.{ 0, 101, 2 });
+
+    seen = .{};
+    const every = program(range(u32, 0, 8), .{ attempt(.{map(loose)}, anyerror, .{map(anyPlusHundred)}), forEach(record) });
+    try std.testing.expectError(error.Canceled, support.run(every, .{&seen}));
+    try seen.expect(&.{ 0, 101, 2, 103, 4 });
+}
+
+const Canceling = struct { seen: ?anyerror = null };
+fn onlyCanceled(canceling: *Canceling, err: error{Canceled}) void {
+    canceling.seen = err;
+}
+
+test "after an attempt that takes everything, only a cancellation is left, also of any error" {
+    var seen: Numbers = .{};
+    var canceling: Canceling = .{};
+    // As for `recover`: this compiles with a rescue for a cancellation alone.
+    program(range(u32, 0, 8), .{ attempt(.{map(loose)}, anyerror, .{map(anyPlusHundred)}), forEach(record) }).run(.{
+        &seen,
+        &canceling,
+        zrx.rescue(onlyCanceled),
+    });
+    try std.testing.expectEqual(@as(?anyerror, error.Canceled), canceling.seen);
+    try seen.expect(&.{ 0, 101, 2, 103, 4 });
+}
+
+fn failedItem(failed: Failed(ParseError, u32)) u32 {
+    return failed.item;
+}
+
+test "an error path of an attempt has state and an end of the stream of its own" {
+    var seen: Numbers = .{};
+    const summed = pipe(.{ map(failedItem), fold(@as(u32, 0), add) });
+    try support.run(program(range(u32, 0, 6), .{ attempt(.{map(evenOnly)}, ParseError, summed), forEach(record) }), .{&seen});
+    // Nothing in place of 1, 3 and 5; their sum once, when the stream ends.
+    try seen.expect(&.{ 0, 2, 4, 9 });
+}
+
+fn failAbove100(value: u32) error{Odd}!u32 {
+    if (value > 100) return error.Odd;
+    return value;
+}
+
+test "a failure of the pipe after an attempt, for what the error path emitted, passes through" {
+    var seen: Numbers = .{};
+    var fallbacks: Fallbacks = .{};
+    const work = pipe(.{
+        attempt(.{map(evenOnly)}, ParseError, raised),
+        map(failAbove100),
+        forEach(record),
+    });
+    const result = support.run(program(range(u32, 0, 10), work), .{ &seen, &fallbacks });
+    // 1 became 101, which fails after the attempt, with an error by the
+    // name the attempt takes: the path is not asked a second time.
+    try std.testing.expectError(error.Odd, result);
+    try seen.expect(&.{0});
+    try std.testing.expectEqual(@as(usize, 1), fallbacks.count);
 }
 
 fn pair(value: u32) [2]u32 {
@@ -346,7 +420,7 @@ fn failAtTwelve(value: u32) error{Twelve}!u32 {
     if (value == 12) return error.Twelve;
     return value;
 }
-fn nine(_: error{Twelve}, _: u32) u32 {
+fn nine(_: Failed(error{Twelve}, u32)) u32 {
     return 9;
 }
 
@@ -357,10 +431,10 @@ test "what the sub-pipe had emitted for the item is not taken back" {
             map(pair),
             flatten(),
             map(failAtTwelve),
-        }, nine),
+        }, error{Twelve}, .{map(nine)}),
         forEach(record),
     });
-    try program(range(u32, 1, 4), work).run(.{&seen});
+    try support.run(program(range(u32, 1, 4), work), .{&seen});
     // 2 gives 2 and then fails on 12.
     try seen.expect(&.{ 1, 11, 2, 9, 3, 13 });
 }
@@ -375,11 +449,11 @@ test "a failure of the pipe after an attempt passes through, whatever its name" 
     var seen: Numbers = .{};
     var fallbacks: Fallbacks = .{};
     const work = pipe(.{
-        attempt(.{map(evenOnly)}, plusHundred),
+        attempt(.{map(evenOnly)}, ParseError, raised),
         map(oddAtFour),
         forEach(record),
     });
-    const result = program(range(u32, 0, 10), work).run(.{ &seen, &fallbacks });
+    const result = support.run(program(range(u32, 0, 10), work), .{ &seen, &fallbacks });
     try std.testing.expectError(error.Odd, result);
     try seen.expect(&.{ 0, 101, 2, 103 });
     // The fallback was asked about 1 and 3, not about 4.
@@ -387,8 +461,8 @@ test "a failure of the pipe after an attempt passes through, whatever its name" 
 }
 
 const Rejected = struct { seen: *Numbers };
-fn reject(log: Rejected, _: anyerror, value: u32) void {
-    log.seen.add(value);
+fn reject(log: Rejected, failed: anytype) void {
+    log.seen.add(failed.item);
 }
 fn failAlways(_: u32) error{Ended}!u32 {
     return error.Ended;
@@ -400,16 +474,81 @@ test "a recover inside the sub-pipe does not see a failure of the pipe after the
     var fallbacks: Fallbacks = .{};
     const work = pipe(.{
         attempt(.{
-            recover(reject),
+            // It would take the failure after the attempt, if it saw it. It
+            // leaves `TooBig` to the fallback: a sub-pipe that cannot fail
+            // has nothing to attempt.
+            recover(error{ Odd, Ended }, .{forEach(reject)}),
             map(evenOnly),
-        }, plusHundred),
+        }, ParseError, raised),
         map(failAlways),
         forEach(record),
     });
-    const result = program(range(u32, 0, 10), work).run(.{ &seen, &fallbacks, Rejected{ .seen = &rejected } });
+    const result = support.run(program(range(u32, 0, 10), work), .{ &seen, &fallbacks, Rejected{ .seen = &rejected } });
     try std.testing.expectError(error.Ended, result);
     try rejected.expect(&.{});
     try std.testing.expectEqual(@as(usize, 0), fallbacks.count);
+}
+
+// Every way from an `attempt` into the pipe after it: what the sub-pipe
+// emits and what the error path emits, for an item and at the end of the
+// stream. A failure of the pipe after the attempt is the run's on each of
+// them. A `recover` at the end of a sub-pipe guards nothing of that
+// sub-pipe: it could only take what comes back from the pipe after the
+// attempt, and it must be given none of it.
+
+const Spy = struct { took: u32 = 0 };
+fn spy(seen: *Spy, _: anytype) void {
+    seen.took += 1;
+}
+const watching = recover(anyerror, .{forEach(spy)});
+
+fn failAtFour(value: u32) error{Later}!u32 {
+    if (value == 4) return error.Later;
+    return value;
+}
+fn failAbove100Later(value: u32) error{Later}!u32 {
+    if (value > 100) return error.Later;
+    return value;
+}
+
+test "a failure of the pipe after an attempt is the run's, whichever sub-pipe was emitting and when" {
+    const Case = struct { []const u8, []const u32, u32 };
+    const sub = pipe(.{ map(evenOnly), watching });
+    const path = pipe(.{ map(plusHundred), watching });
+    const sub_summed = pipe(.{ map(evenOnly), fold(@as(u32, 0), add), watching });
+    const path_summed = pipe(.{ map(failedItem), fold(@as(u32, 0), add), watching });
+    inline for (.{
+        // The sub-pipe emits 4 for an item, which fails after the attempt.
+        .{ sub, path, failAtFour, Case{ "for an item, from the sub-pipe", &.{ 0, 2, 4, 6 }, 0 } },
+        // The error path emits 101 for an item, which fails after it.
+        .{ sub, path, failAbove100Later, Case{ "for an item, from the error path", &.{ 0, 1, 2 }, 1 } },
+        // The sub-pipe emits its sum of 4 when the stream ends.
+        .{ sub_summed, path, failAtFour, Case{ "at the end, from the sub-pipe", &.{ 0, 4 }, 0 } },
+        // The error path emits its sum of 1 and 3 when the stream ends.
+        .{ sub, path_summed, failAtFour, Case{ "at the end, from the error path", &.{ 0, 1, 2, 3 }, 0 } },
+    }) |row| {
+        const case: Case = row[3];
+        var seen: Numbers = .{};
+        var fallbacks: Fallbacks = .{};
+        var watched: Spy = .{};
+        const work = pipe(.{ attempt(row[0], ParseError, row[1]), map(row[2]), forEach(record) });
+        const result = support.run(program(fromSlice(case[1]), work), .{ &seen, &fallbacks, &watched });
+        errdefer std.debug.print("case: {s}\n", .{case[0]});
+        try std.testing.expectError(error.Later, result);
+        try std.testing.expectEqual(@as(u32, 0), watched.took);
+        try std.testing.expectEqual(@as(usize, case[2]), fallbacks.count);
+    }
+}
+
+test "a recover in an error path still takes what the path itself fails with" {
+    var seen: Numbers = .{};
+    var watched: Spy = .{};
+    // The seal is against the pipe after the attempt, not against the path.
+    const path = pipe(.{ watching, map(giveUpOnTooBig) });
+    const values = [_]u32{ 2, 3, 500, 4 };
+    try support.run(program(fromSlice(&values), .{ attempt(.{map(evenOnly)}, ParseError, path), forEach(record) }), .{ &seen, &watched });
+    try seen.expect(&.{ 2, 103, 4 });
+    try std.testing.expectEqual(@as(u32, 1), watched.took);
 }
 
 /// A stage that does not keep to the contract: it pushes every item twice,
@@ -437,9 +576,9 @@ fn countThenFail(pulls: *Pulls, _: u32) error{Ended}!u32 {
     pulls.count += 1;
     return error.Ended;
 }
-fn refused(fallbacks: *Fallbacks, _: error{Refused}, value: u32) u32 {
+fn refused(fallbacks: *Fallbacks, failed: Failed(error{Refused}, u32)) u32 {
     fallbacks.count += 1;
-    return value;
+    return failed.item;
 }
 
 test "once the pipe after an attempt has failed, it is not pushed to again and its failure is the one returned" {
@@ -447,11 +586,11 @@ test "once the pipe after an attempt has failed, it is not pushed to again and i
     var pulls: Pulls = .{};
     var fallbacks: Fallbacks = .{};
     const work = pipe(.{
-        attempt(.{Insistent{}}, refused),
+        attempt(.{Insistent{}}, error{Refused}, .{map(refused)}),
         map(countThenFail),
         forEach(record),
     });
-    const result = program(range(u32, 0, 10), work).run(.{ &seen, &pulls, &fallbacks });
+    const result = support.run(program(range(u32, 0, 10), work), .{ &seen, &pulls, &fallbacks });
     // The sub-pipe pushed again and then failed by itself: neither reaches
     // the pipe that had failed, as a second push or as a fallback.
     try std.testing.expectError(error.Ended, result);
@@ -473,11 +612,11 @@ test "when the pipe after an attempt fails, the sub-pipe is told that nothing mo
             flatten(),
             tap(countPull),
             map(neverOdd),
-        }, plusHundred),
+        }, ParseError, raised),
         map(failAlways),
         forEach(record),
     });
-    const result = program(range(u32, 0, 10), work).run(.{ &seen, &pulls, &fallbacks });
+    const result = support.run(program(range(u32, 0, 10), work), .{ &seen, &pulls, &fallbacks });
     try std.testing.expectError(error.Ended, result);
     // The first of the item's two values failed after the attempt: the
     // second was not sent through the sub-pipe.
@@ -490,26 +629,28 @@ fn interrupted(value: u32) error{ Canceled, Odd }!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn countOdd(fallbacks: *Fallbacks, _: error{Odd}, _: u32) u32 {
+fn countOdd(fallbacks: *Fallbacks, _: anytype) u32 {
     fallbacks.count += 1;
     return 0;
 }
 
 test "attempt falls back from failures but never from a cancellation" {
-    var seen: Numbers = .{};
-    var fallbacks: Fallbacks = .{};
-    const result = program(range(u32, 0, 5), .{ attempt(.{map(interrupted)}, countOdd), forEach(record) }).run(.{ &seen, &fallbacks });
-    try std.testing.expectError(error.Canceled, result);
-    try seen.expect(&.{ 0, 0 });
-    try std.testing.expectEqual(@as(usize, 1), fallbacks.count);
+    inline for (.{ anyerror, error{ Canceled, Odd } }) |Taken| {
+        var seen: Numbers = .{};
+        var fallbacks: Fallbacks = .{};
+        const result = support.run(program(range(u32, 0, 5), .{ attempt(.{map(interrupted)}, Taken, .{map(countOdd)}), forEach(record) }), .{ &seen, &fallbacks });
+        try std.testing.expectError(error.Canceled, result);
+        try seen.expect(&.{ 0, 0 });
+        try std.testing.expectEqual(@as(usize, 1), fallbacks.count);
+    }
 }
 
 fn late(_: u32) error{Late}!u32 {
     return error.Late;
 }
-fn lateFallback(fallbacks: *Fallbacks, _: anyerror, value: u32) u32 {
+fn lateFallback(fallbacks: *Fallbacks, failed: Failed(anyerror, u32)) u32 {
     fallbacks.count += 1;
-    return value + 100;
+    return failed.item + 100;
 }
 
 test "an attempt keeps the sub-pipe's state across items and finishes it with the stream" {
@@ -521,10 +662,10 @@ test "an attempt keeps the sub-pipe's state across items and finishes it with th
             Counted{},
             map(evenOnly),
             fold(@as(u32, 0), add),
-        }, plusHundred),
+        }, ParseError, raised),
         forEach(record),
     });
-    try program(range(u32, 0, 5), work).run(.{ &seen, &lives, &fallbacks });
+    try support.run(program(range(u32, 0, 5), work), .{ &seen, &lives, &fallbacks });
     // The fallbacks as the items fail, then the one fold over the rest.
     try seen.expect(&.{ 101, 103, 6 });
     try std.testing.expectEqual(Lives{ .made = 1, .pushed = 5, .finished = 1 }, lives);
@@ -538,10 +679,10 @@ test "a failure of the sub-pipe's own end of stream is not an item's" {
             map(evenOnly),
             fold(@as(u32, 0), add),
             map(late),
-        }, lateFallback),
+        }, anyerror, .{map(lateFallback)}),
         forEach(record),
     });
-    const result = program(range(u32, 0, 3), work).run(.{ &seen, &fallbacks });
+    const result = support.run(program(range(u32, 0, 3), work), .{ &seen, &fallbacks });
     try std.testing.expectError(error.Late, result);
     try seen.expect(&.{101});
     try std.testing.expectEqual(@as(usize, 1), fallbacks.count);
@@ -553,11 +694,11 @@ test "done passes through an attempt, from the pipe after it and from the sub-pi
     var fallbacks: Fallbacks = .{};
     const after = pipe(.{
         tap(countPull),
-        attempt(.{map(evenOnly)}, plusHundred),
+        attempt(.{map(evenOnly)}, ParseError, raised),
         take(2),
         forEach(record),
     });
-    try program(range(u32, 0, 1000), after).run(.{ &seen, &pulls, &fallbacks });
+    try support.run(program(range(u32, 0, 1000), after), .{ &seen, &pulls, &fallbacks });
     try seen.expect(&.{ 0, 101 });
     try std.testing.expectEqual(@as(usize, 2), pulls.count);
 
@@ -566,12 +707,22 @@ test "done passes through an attempt, from the pipe after it and from the sub-pi
         attempt(.{
             take(3),
             map(evenOnly),
-        }, plusHundred),
+        }, ParseError, raised),
         forEach(record),
     });
-    try program(range(u32, 0, 1000), inside).run(.{ &seen, &pulls, &fallbacks });
+    try support.run(program(range(u32, 0, 1000), inside), .{ &seen, &pulls, &fallbacks });
     try seen.expect(&.{ 0, 101, 0, 101, 2 });
     try std.testing.expectEqual(@as(usize, 5), pulls.count);
+
+    // And from the error path: the first failure is the last item.
+    const once = pipe(.{
+        tap(countPull),
+        attempt(.{map(evenOnly)}, ParseError, .{ take(1), map(plusHundred) }),
+        forEach(record),
+    });
+    try support.run(program(range(u32, 0, 1000), once), .{ &seen, &pulls, &fallbacks });
+    try seen.expect(&.{ 0, 101, 0, 101, 2, 0, 101 });
+    try std.testing.expectEqual(@as(usize, 7), pulls.count);
 }
 
 test "attempt around each: an item whose source or sub-pipe fails becomes one value" {
@@ -580,10 +731,10 @@ test "attempt around each: an item whose source or sub-pipe fails becomes one va
     const sums = pipe(.{
         attempt(.{
             each(limited, .{ Counted{}, map(failAtTwo), fold(@as(u32, 0), add) }),
-        }, unsummed),
+        }, error{ TooMany, Two }, .{map(unsummed)}),
         forEach(recordPair),
     });
-    try program(range(u32, 1, 6), sums).run(.{ &seen, &lives, Limit{ .below = 4 } });
+    try support.run(program(range(u32, 1, 6), sums), .{ &seen, &lives, Limit{ .below = 4 } });
     try seen.expect(&.{
         .{ .source = 1, .item = 0 },
         .{ .source = 2, .item = 1 },
@@ -595,6 +746,6 @@ test "attempt around each: an item whose source or sub-pipe fails becomes one va
     try std.testing.expectEqual(Lives{ .made = 3, .pushed = 6, .finished = 2 }, lives);
 }
 
-fn unsummed(_: error{ TooMany, Two }, n: u32) Pair {
-    return .{ .source = n, .item = 999 };
+fn unsummed(failed: Failed(error{ TooMany, Two }, u32)) Pair {
+    return .{ .source = failed.item, .item = 999 };
 }

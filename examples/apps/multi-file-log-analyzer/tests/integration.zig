@@ -1,4 +1,5 @@
 const std = @import("std");
+const zrx = @import("zrx");
 const app = @import("app");
 const options = @import("options");
 const io = std.testing.io;
@@ -48,7 +49,7 @@ fn expectFrom(comptime side: []const u8, expected: []const u8, text: []const u8)
 fn analyze(left_log: []const u8, right_log: []const u8, alerts: *std.Io.Writer, report: *std.Io.Writer) !void {
     var left: std.Io.Reader = .fixed(left_log);
     var right: std.Io.Reader = .fixed(right_log);
-    try app.analyzer.run(.{
+    try tryRun(app.analyzer, .{
         io,
         app.Left{ .reader = &left },
         app.Right{ .reader = &right },
@@ -173,4 +174,19 @@ test "anything but three paths is refused" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     try invoke(temp.dir, &.{ "left", "right" }, 2, "", "fatal: InvalidArguments\n");
+}
+
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
 }

@@ -16,5 +16,5 @@ fn ignore(_: u32) void {}
 
 test {
     const one = program(range(u32, 0, 3), pipe(.{forEach(ignore)}));
-    try zrx.system(.{ one, one }).run(.{});
+    zrx.system(.{ one, one }).run(.{});
 }

@@ -18,5 +18,5 @@ fn add(sum: u64, value: u32) u32 {
     return @intCast(sum + value);
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ zrx.scan(0, add), zrx.drain() })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ zrx.scan(0, add), zrx.drain() })).run(.{});
 }

@@ -19,5 +19,5 @@ fn scale(factor: Scale, value: u32) u32 {
     return value * factor.by;
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ map(scale), forEach(ignore) })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ map(scale), forEach(ignore) })).run(.{});
 }

@@ -18,12 +18,12 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
 
 // A sub-pipe is an operator tuple or a pipe, also when it is one operator.
 test {
-    try program(range(u32, 0, 3), .{ each(below, fold(@as(u32, 0), add)), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ each(below, fold(@as(u32, 0), add)), forEach(ignore) }).run(.{});
 }

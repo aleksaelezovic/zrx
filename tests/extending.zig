@@ -49,7 +49,7 @@ const Counted = struct {
 test "a custom operator composes with the built-in ones" {
     var seen: Numbers = .{};
     var count: usize = 0;
-    try program(range(u32, 0, 100), pipe(.{ counted(), take(3), forEach(record) })).run(.{ &seen, &count });
+    try support.run(program(range(u32, 0, 100), pipe(.{ counted(), take(3), forEach(record) })), .{ &seen, &count });
     try seen.expect(&.{ 0, 1, 2 });
     try std.testing.expectEqual(@as(usize, 3), count);
 }
@@ -101,7 +101,7 @@ const Echoed = struct {
 test "stage hooks run in the documented order" {
     var seen: Numbers = .{};
     var journal: Journal = .{};
-    try program(range(u32, 1, 3), pipe(.{ echoed(9), forEach(record) })).run(.{ &seen, &journal });
+    try support.run(program(range(u32, 1, 3), pipe(.{ echoed(9), forEach(record) })), .{ &seen, &journal });
     try seen.expect(&.{ 1, 1, 2, 2, 9 });
     try journal.expect("ippf");
 }
@@ -114,7 +114,7 @@ fn failAtTwo(value: u32) error{Two}!u32 {
 test "a failed synchronous run skips finish" {
     var seen: Numbers = .{};
     var journal: Journal = .{};
-    const result = program(range(u32, 1, 3), pipe(.{ echoed(9), map(failAtTwo), forEach(record) })).run(.{ &seen, &journal });
+    const result = support.run(program(range(u32, 1, 3), pipe(.{ echoed(9), map(failAtTwo), forEach(record) })), .{ &seen, &journal });
     try std.testing.expectError(error.Two, result);
     try journal.expect("ipp");
 }
@@ -138,8 +138,8 @@ const Powers = struct {
 
 test "a custom source" {
     var seen: Numbers = .{};
-    try program(Powers{ .limit = 40 }, pipe(.{forEach(record)})).run(.{&seen});
-    try program(Powers{ .limit = 1 << 30 }, pipe(.{ take(2), forEach(record) })).run(.{&seen});
+    try support.run(program(Powers{ .limit = 40 }, pipe(.{forEach(record)})), .{&seen});
+    try support.run(program(Powers{ .limit = 1 << 30 }, pipe(.{ take(2), forEach(record) })), .{&seen});
     try seen.expect(&.{ 1, 2, 4, 8, 16, 32, 1, 2 });
 }
 
@@ -155,7 +155,7 @@ test "a custom source and operator run once for every item under each" {
         map(zrx.field(.item)),
         forEach(record),
     });
-    try program(range(u32, 3, 5), work).run(.{ &seen, &journal });
+    try support.run(program(range(u32, 3, 5), work), .{ &seen, &journal });
     try seen.expect(&.{ 1, 1, 2, 2, 0, 1, 1, 2, 2, 0 });
     // Constructed, pushed to and finished for each item in turn.
     try journal.expect("ippfippf");
@@ -185,7 +185,7 @@ fn withinLimit(limit: Limit, value: u32) bool {
 
 test "a custom composite handler forwards dependencies" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), forEach(record) })).run(.{ &seen, Limit{ .max = 3 } });
+    try support.run(program(range(u32, 0, 10), pipe(.{ filter(next(withinLimit)), forEach(record) })), .{ &seen, Limit{ .max = 3 } });
     try seen.expect(&.{ 0, 1, 2 });
 }
 
@@ -214,11 +214,11 @@ fn tallied(tally: *Tally, _: u32) void {
 test "a custom binding provides a value for the run and releases after it" {
     var report: Report = .{};
     const counting = program(range(u32, 0, 5), .{forEach(tallied)});
-    try counting.provide(.{Tallied{}}).run(.{&report});
+    try support.run(counting.provide(.{Tallied{}}), .{&report});
     try std.testing.expectEqual(@as(u32, 5), report.total);
     // Given to `run`, and written before what it needs.
     report = .{};
-    try counting.run(.{ Tallied{}, &report });
+    try support.run(counting, .{ Tallied{}, &report });
     try std.testing.expectEqual(@as(u32, 5), report.total);
 }
 
@@ -230,7 +230,7 @@ fn failAtThree(value: u32) error{Three}!u32 {
 test "what a custom binding does after the run is skipped when the run fails" {
     var report: Report = .{};
     const failing = program(range(u32, 0, 5), .{ map(failAtThree), forEach(tallied) });
-    try std.testing.expectError(error.Three, failing.provide(.{Tallied{}}).run(.{&report}));
+    try std.testing.expectError(error.Three, support.run(failing.provide(.{Tallied{}}), .{&report}));
     try std.testing.expectEqual(@as(u32, 0), report.total);
 }
 
@@ -239,15 +239,15 @@ test "what a custom binding does after the run is skipped when the run fails" {
 test "a boundary written against the contract splits the pipe like a queue" {
     var seen: Numbers = .{};
     const io = std.testing.io;
-    try program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.fold(@as(u32, 0), sumUp), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.fold(@as(u32, 0), sumUp), forEach(record) })), .{ io, &seen });
     try seen.expect(&.{190});
 
     var taken: Numbers = .{};
-    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ support.handoff(2), zrx.take(3), forEach(record) })).run(.{ io, &taken });
+    try support.run(program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ support.handoff(2), zrx.take(3), forEach(record) })), .{ io, &taken });
     try taken.expect(&.{ 0, 1, 2 });
 
     var failed: Numbers = .{};
-    const result = program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.map(failAtTwo), forEach(record) })).run(.{ io, &failed });
+    const result = support.run(program(range(u32, 0, 20), pipe(.{ support.handoff(2), zrx.map(failAtTwo), forEach(record) })), .{ io, &failed });
     try std.testing.expectError(error.Two, result);
     try failed.expect(&.{ 0, 1 });
 }
@@ -347,18 +347,18 @@ const Assisted = struct {
 
 test "a boundary registers auxiliary tasks with the existing task hooks" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 3), .{ Assisted{}, forEach(record) }).run(.{ std.testing.io, &seen });
+    try support.run(program(range(u32, 0, 3), .{ Assisted{}, forEach(record) }), .{ std.testing.io, &seen });
     try seen.expect(&.{ 1, 2, 3 });
 }
 
 test "concurrent workers use their own Io after a boundary with another Io" {
     var seen: Numbers = .{};
     const alternate = support.TaskStarts.over(std.testing.io);
-    try program(range(u32, 0, 3), .{
+    try support.run(program(range(u32, 0, 3), .{
         Assisted{},
         zrx.concurrent(2, .{zrx.take(100)}),
         forEach(record),
-    }).run(.{ std.testing.io, BoundaryIo{ .io = alternate }, &seen });
+    }), .{ std.testing.io, BoundaryIo{ .io = alternate }, &seen });
     try std.testing.expectEqual(@as(usize, 3), support.TaskStarts.count.load(.seq_cst));
     try std.testing.expectEqual(@as(usize, 3), seen.len);
     var sum: u32 = 0;

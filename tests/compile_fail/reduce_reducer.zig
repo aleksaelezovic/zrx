@@ -9,5 +9,5 @@ fn isLarger(total: u32, value: u32) bool {
 
 test {
     const rows = [_][2]u32{.{ 1, 2 }};
-    try program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, isLarger)), zrx.drain() }).run(.{});
+    program(zrx.fromSlice(&rows), .{ zrx.map(zrx.reduce(0, isLarger)), zrx.drain() }).run(.{});
 }

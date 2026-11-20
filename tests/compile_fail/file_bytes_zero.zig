@@ -18,11 +18,11 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
 
 test {
-    try program(zrx.fileBytes("input", 0), .{forEach(ignore)}).run(.{std.testing.io});
+    program(zrx.fileBytes("input", 0), .{forEach(ignore)}).run(.{std.testing.io});
 }

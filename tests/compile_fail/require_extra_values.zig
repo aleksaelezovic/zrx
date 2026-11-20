@@ -9,5 +9,5 @@ fn isEven(value: u32) bool {
 
 // A reducer is given the state and the item; `require` checks one item.
 test {
-    try program(range(u32, 0, 3), .{ zrx.fold(@as(u32, 0), zrx.require(isEven, error.Odd)), zrx.drain() }).run(.{});
+    program(range(u32, 0, 3), .{ zrx.fold(@as(u32, 0), zrx.require(isEven, error.Odd)), zrx.drain() }).run(.{});
 }

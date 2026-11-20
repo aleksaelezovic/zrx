@@ -6,7 +6,7 @@
 //! several programs together. Everything is resolved at compile time.
 //!
 //!     const total = pipe(.{ map(scale), filter(isLarge), fold(@as(u64, 0), add), forEach(report) });
-//!     try program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
+//!     program(fromSlice(&values), total).run(.{ io, Scale{ .by = 2 } });
 
 // Composition
 pub const pipe = @import("pipe.zig").pipe;
@@ -38,7 +38,6 @@ pub const takeWhile = transform.takeWhile;
 pub const flatten = transform.flatten;
 pub const batch = transform.batch;
 pub const Batch = transform.Batch;
-pub const recover = transform.recover;
 
 // Terminal operators
 const sink = @import("ops/sink.zig");
@@ -47,6 +46,7 @@ pub const drain = sink.drain;
 
 // Program resources
 pub const resource = @import("resources.zig").resource;
+pub const rescue = @import("resources.zig").rescue;
 
 // Flow operators
 const flow = @import("ops/flow.zig");
@@ -61,6 +61,8 @@ pub const concurrent = @import("ops/concurrent.zig").concurrent;
 const nested = @import("ops/nested.zig");
 pub const each = nested.each;
 pub const attempt = nested.attempt;
+pub const recover = nested.recover;
+pub const Failed = @import("failure.zig").Failed;
 
 const timing = @import("ops/timing.zig");
 pub const batchWithin = timing.batchWithin;
@@ -114,6 +116,8 @@ pub const Flow = @import("pipe.zig").Flow;
 pub const End = @import("pipe.zig").End;
 pub const di = @import("di.zig");
 pub const operator = @import("pipe.zig");
+/// Which errors something that takes failures takes, and what is left.
+pub const failure = @import("failure.zig");
 
 // For testing programs: a clock the test moves.
 pub const testing = @import("testing.zig");

@@ -28,7 +28,7 @@ fn closed(comptime status: []const u8) []const u8 {
 const Zrx = struct {
     fn serve(reader: *Io.Reader, writer: *Io.Writer) !void {
         const connection: http.Transport = .{ .reader = reader, .writer = writer };
-        try zrx.program(zrx.fromValue(connection), .{http.serve(app.api)}).run(.{});
+        try tryRun(zrx.program(zrx.fromValue(connection), .{http.serve(app.api)}), .{});
     }
 };
 
@@ -220,4 +220,19 @@ test "both executables announce their port and serve the workloads over loopback
             try overLoopback(exe, get ++ post ++ last_json, &answers),
         );
     }
+}
+
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
 }

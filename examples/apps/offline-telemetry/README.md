@@ -72,6 +72,9 @@ const north = feed.provide(.{
 - Nothing is shared between the two programs. Each has its own input, its
   own archive file and its own writer to standard output, so there is no
   lock.
+- A run returns nothing. What ends the system goes to the `rescue(fatal)`
+  it is run with, `rescue(fatal).provide(.{stderr(256)})`: the `fatal:`
+  line and the status `main` returns.
 
 ## Format and output
 

@@ -182,7 +182,7 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
         /// The type the fallback's error parameter is given: the one it
         /// declares, or the handler's whole error set when it is generic.
         fn Given(comptime Args: []const type) type {
-            return di.Param(fallback, Args.len + 1, 0) orelse Failure(Args);
+            return di.Param("orElse", fallback, Args.len + 1, 0) orelse Failure(Args);
         }
 
         /// The fallback's data: the error, then the handler's own data.
@@ -257,10 +257,8 @@ pub fn require(comptime predicate: anytype, comptime err: anytype) type {
 /// `map(reduce(Window{}, Window.add))`. The result is `seed` for an empty
 /// item. Where `fold` reduces a stream, this reduces one item.
 pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
-    // Checks the reducer's shape before its state parameter is looked at.
-    _ = di.requires("reduce", reducer, 2);
     // The reducer's declared state parameter, else the seed's type, as for `fold`.
-    const State = di.Param(reducer, 2, 0) orelse @TypeOf(seed);
+    const State = di.Param("reduce", reducer, 2, 0) orelse @TypeOf(seed);
     return struct {
         pub const zrx_handler = {};
 

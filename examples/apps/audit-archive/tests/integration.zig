@@ -101,10 +101,25 @@ test "a missing input and a wrong argument count are fatal" {
     try expectOnly(temp.dir, &.{});
 }
 
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
+}
+
 /// Runs the production program on `input` in memory.
 fn archive(input: []const u8, writer: *std.Io.Writer) !void {
     var reader: std.Io.Reader = .fixed(input);
-    try app.archiving.run(.{ io, app.Input{ .reader = &reader }, app.Archive{ .writer = writer } });
+    try tryRun(app.archiving, .{ io, app.Input{ .reader = &reader }, app.Archive{ .writer = writer } });
 }
 
 /// A writer in memory that counts how often it is flushed.
@@ -211,7 +226,7 @@ const Gate = struct {
 
     fn run(gate: *Gate) !void {
         const program = zrx.program(zrx.fromProducer(Line, produce), app.archive);
-        try program.run(.{ gate.observedIo(), gate, app.Archive{ .writer = &gate.writer } });
+        try tryRun(program, .{ gate.observedIo(), gate, app.Archive{ .writer = &gate.writer } });
     }
 };
 

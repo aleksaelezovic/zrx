@@ -1,6 +1,7 @@
 //! Timed operators, with input and clock advances controlled by the test.
 const std = @import("std");
 const zrx = @import("zrx");
+const support = @import("support.zig");
 const Io = std.Io;
 const io = std.testing.io;
 
@@ -72,7 +73,7 @@ const Output = struct {
 fn Run(comptime op: anytype) type {
     return struct {
         fn run(clock: Io, input: *Input, output: *Output) !void {
-            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock, input, output });
+            try support.run(zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(Output.collect) })), .{ clock, input, output });
         }
     };
 }
@@ -95,10 +96,10 @@ const Windows = struct {
 };
 
 fn collectWindows(timed: Io, input: *Input, windows: *Windows) !void {
-    try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{
+    try support.run(zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{
         zrx.batchWithin(8, .fromMilliseconds(200)),
         zrx.forEach(Windows.collect),
-    })).run(.{ timed, input, windows });
+    })), .{ timed, input, windows });
 }
 
 test "zrx.testing.Clock lets a test assert the exact batch of a source that is still open" {
@@ -323,14 +324,13 @@ test "timed operators emit nothing for empty input" {
         var clock: Clock = .init(io);
         var output: Output = .{};
         output.init();
-        try zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.forEach(Output.collect) })).run(.{ clock.io(), &output });
+        try support.run(zrx.program(zrx.range(u32, 0, 0), zrx.pipe(.{ op, zrx.forEach(Output.collect) })), .{ clock.io(), &output });
         var extra: [1]Result = undefined;
         try std.testing.expectEqual(@as(usize, 0), try output.results.get(io, &extra, 0));
     }
 }
 
 test "batchWithin preserves every item and a program can run again" {
-    const support = @import("support.zig");
     var seen: support.Recorder(u32) = .{};
     const work = zrx.program(zrx.range(u32, 0, 100), zrx.pipe(.{
         zrx.batchWithin(7, .fromSeconds(3600)),
@@ -339,7 +339,7 @@ test "batchWithin preserves every item and a program can run again" {
     }));
     for (0..2) |_| {
         seen.len = 0;
-        try work.run(.{ io, &seen });
+        try support.run(work, .{ io, &seen });
         try std.testing.expectEqual(@as(usize, 100), seen.len);
         for (seen.slice(), 0..) |item, index| try std.testing.expectEqual(@as(u32, @intCast(index)), item);
     }
@@ -352,7 +352,7 @@ fn RejectRun(comptime op: anytype) type {
         }
 
         fn run(clock: Io, input: *Input) !void {
-            try zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(reject) })).run(.{ clock, input });
+            try support.run(zrx.program(zrx.fromProducer(u32, Input.produce), zrx.pipe(.{ op, zrx.forEach(reject) })), .{ clock, input });
         }
     };
 }
@@ -376,19 +376,19 @@ test "timed operators stop at a done downstream and infer their errors" {
         var output: Output = .{};
         output.init();
         const work = zrx.program(zrx.range(u32, 0, 1000), zrx.pipe(.{ op, zrx.take(1), zrx.forEach(Output.collect) }));
-        try work.run(.{ io, &output });
+        try support.run(work, .{ io, &output });
         var extra: [1]Result = undefined;
         try std.testing.expectEqual(@as(usize, 1), try output.results.get(io, &extra, 0));
         try std.testing.expectEqual(@as(usize, 0), try output.results.get(io, &extra, 0));
 
-        // A timer expiry is internal, so Timeout stays out of run's errors.
+        // A timer expiry is internal, so Timeout is not among what the run
+        // can fail with. Made to fail, it says what is.
+        var backend: Io.Threaded = .init(std.testing.allocator, .{ .concurrent_limit = .nothing });
+        defer backend.deinit();
         const plain = zrx.program(zrx.fromValue(@as(u32, 1)), zrx.pipe(.{ op, zrx.drain() }));
-        const E = @typeInfo(@TypeOf(plain.run(.{io}))).error_union.error_set;
-        const names = comptime @typeInfo(E).error_set.error_names.?;
-        try std.testing.expectEqual(@as(usize, 2), names.len);
-        for (names) |name| {
-            try std.testing.expect(std.mem.eql(u8, name, "Canceled") or std.mem.eql(u8, name, "ConcurrencyUnavailable"));
-        }
+        const left = support.runLeft(plain, .{backend.io()});
+        try std.testing.expectEqualStrings("Canceled ConcurrencyUnavailable ", left.names());
+        try std.testing.expectEqual(error.ConcurrencyUnavailable, left.err.?);
     }
 }
 
@@ -397,10 +397,10 @@ test "timed operators need concurrency and use the Io they are given" {
     defer backend.deinit();
     inline for (.{ zrx.batchWithin(3, .fromSeconds(60)), zrx.debounce(.fromSeconds(60)) }) |op| {
         const work = zrx.program(zrx.fromValue(@as(u32, 1)), zrx.pipe(.{ op, zrx.drain() }));
-        try std.testing.expectError(error.ConcurrencyUnavailable, work.run(.{backend.io()}));
-        try work.provide(.{io}).run(.{});
+        try std.testing.expectError(error.ConcurrencyUnavailable, support.run(work, .{backend.io()}));
+        try support.run(work.provide(.{io}), .{});
         // The `Io` given to `run` replaces the default.
-        try work.provide(.{backend.io()}).run(.{io});
-        try std.testing.expectError(error.ConcurrencyUnavailable, work.provide(.{io}).run(.{backend.io()}));
+        try support.run(work.provide(.{backend.io()}), .{io});
+        try std.testing.expectError(error.ConcurrencyUnavailable, support.run(work.provide(.{io}), .{backend.io()}));
     }
 }

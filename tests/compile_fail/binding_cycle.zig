@@ -13,5 +13,5 @@ fn ignore(_: Session, _: u32) void {}
 
 test "two resources need each other" {
     const app = zrx.program(zrx.range(u32, 0, 3), .{zrx.forEach(ignore)}).provide(.{zrx.resource(openSession, null)});
-    try app.run(.{zrx.resource(connect, null)});
+    app.run(.{zrx.resource(connect, null)});
 }

@@ -3,5 +3,5 @@ const zrx = @import("zrx");
 const http = zrx.ext.http;
 
 test {
-    try zrx.program(zrx.range(u32, 0, 3), .{http.serve(.{http.status(.ok)})}).run(.{});
+    zrx.program(zrx.range(u32, 0, 3), .{http.serve(.{http.status(.ok)})}).run(.{});
 }

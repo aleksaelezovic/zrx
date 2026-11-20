@@ -43,7 +43,7 @@ fn add(sum: u32, value: u32) u32 {
 test "a queue delivers every item in order" {
     var seen: Numbers = .{};
     const capacity: usize = 8;
-    try program(range(u32, 0, 100), pipe(.{ map(double), queue(capacity), filter(isEven), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 0, 100), pipe(.{ map(double), queue(capacity), filter(isEven), forEach(record) })), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 100), seen.len);
     for (seen.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i * 2)), value);
 }
@@ -54,8 +54,8 @@ test "a borrowed queue can reuse the same slots on a later run" {
     var second: Numbers = .{};
     const work = program(range(u32, 0, 5), pipe(.{ queue(&slots), forEach(record) }));
 
-    try work.run(.{ io, &first });
-    try work.run(.{ io, &second });
+    try support.run(work, .{ io, &first });
+    try support.run(work, .{ io, &second });
     try first.expect(&.{ 0, 1, 2, 3, 4 });
     try second.expect(first.slice());
 }
@@ -67,14 +67,14 @@ fn slowly(clock: std.Io, value: u32) !u32 {
 
 test "a full queue makes the producer wait instead of dropping items" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 40), pipe(.{ queue(1), map(slowly), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 0, 40), pipe(.{ queue(1), map(slowly), forEach(record) })), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 40), seen.len);
     for (seen.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i)), value);
 }
 
 test "the stream end waits for the queue to drain, then finishes what follows it" {
     var seen: Numbers = .{};
-    try program(range(u32, 1, 101), pipe(.{ queue(4), fold(@as(u32, 0), add), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 1, 101), pipe(.{ queue(4), fold(@as(u32, 0), add), forEach(record) })), .{ io, &seen });
     try seen.expect(&.{5050});
 }
 
@@ -85,27 +85,27 @@ fn failAtFive(value: u32) error{Five}!u32 {
 
 test "an error after a queue fails the run" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 1000), pipe(.{ queue(2), map(failAtFive), forEach(record) })).run(.{ io, &seen });
+    const result = support.run(program(range(u32, 0, 1000), pipe(.{ queue(2), map(failAtFive), forEach(record) })), .{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
 test "an error before a queue stops its consumer" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 1000), pipe(.{ map(failAtFive), queue(2), forEach(record) })).run(.{ io, &seen });
+    const result = support.run(program(range(u32, 0, 1000), pipe(.{ map(failAtFive), queue(2), forEach(record) })), .{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try std.testing.expect(seen.len <= 5);
 }
 
 test "take after a queue stops an endless source" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ queue(4), take(3), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 0, std.math.maxInt(u32)), pipe(.{ queue(4), take(3), forEach(record) })), .{ io, &seen });
     try seen.expect(&.{ 0, 1, 2 });
 }
 
 test "queues compose: two boundaries in one pipe" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 50), pipe(.{ queue(2), map(double), queue(2), fold(@as(u32, 0), add), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(range(u32, 0, 50), pipe(.{ queue(2), map(double), queue(2), fold(@as(u32, 0), add), forEach(record) })), .{ io, &seen });
     try seen.expect(&.{2450});
 }
 
@@ -128,7 +128,7 @@ const PoolOrder = struct {
 test "concurrent workers overlap and emit without waiting for input order" {
     var state: PoolOrder = .{};
     var seen: Numbers = .{};
-    try program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolOrder.work)}), forEach(PoolOrder.collect) }).run(.{ io, &state, &seen });
+    try support.run(program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolOrder.work)}), forEach(PoolOrder.collect) }), .{ io, &state, &seen });
     try seen.expect(&.{ 2, 0 });
 }
 
@@ -162,7 +162,7 @@ const PoolSerial = struct {
 test "concurrent serializes downstream pushes while another worker is ready" {
     var state: PoolSerial = .{};
     const clock = support.GateWait.over(io, &state.release_first);
-    try program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolSerial.work)}), forEach(PoolSerial.collect) }).run(.{ clock, &state });
+    try support.run(program(range(u32, 0, 2), .{ concurrent(2, .{map(PoolSerial.work)}), forEach(PoolSerial.collect) }), .{ clock, &state });
     try std.testing.expect(support.GateWait.waiting.load(.seq_cst));
     try std.testing.expect(!state.overlapped.load(.seq_cst));
 }
@@ -170,7 +170,7 @@ test "concurrent serializes downstream pushes while another worker is ready" {
 test "concurrent shares every item once and rejoins a single fold" {
     var seen: Numbers = .{};
     const worker = pipe(.{ map(double), filter(isEven) });
-    try program(range(u32, 1, 101), .{ concurrent(4, worker), forEach(record) }).run(.{ io, &seen });
+    try support.run(program(range(u32, 1, 101), .{ concurrent(4, worker), forEach(record) }), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 100), seen.len);
     var received: [100]bool = @splat(false);
     for (seen.slice()) |item| {
@@ -180,7 +180,7 @@ test "concurrent shares every item once and rejoins a single fold" {
         received[index] = true;
     }
     seen.len = 0;
-    try program(range(u32, 1, 101), .{ concurrent(4, worker), fold(@as(u32, 0), add), forEach(record) }).run(.{ io, &seen });
+    try support.run(program(range(u32, 1, 101), .{ concurrent(4, worker), fold(@as(u32, 0), add), forEach(record) }), .{ io, &seen });
     try seen.expect(&.{10100});
 }
 
@@ -196,8 +196,8 @@ test "each concurrent worker owns its limits and finishes its state once on ever
         fold(@as(u32, 0), add),
         forEach(record),
     });
-    try app.run(.{ io, &seen, &counted });
-    try app.run(.{ io, &seen, &counted });
+    try support.run(app, .{ io, &seen, &counted });
+    try support.run(app, .{ io, &seen, &counted });
     try seen.expect(&.{ 8, 8 });
     try std.testing.expectEqual(@as(usize, 16), counted.count.load(.monotonic));
 }
@@ -229,10 +229,10 @@ const PoolHalfway = struct {
 test "one completed concurrent worker leaves input open for the others" {
     var state: PoolHalfway = .{};
     var seen: Numbers = .{};
-    try program(fromProducer(u32, PoolHalfway.produce), .{
+    try support.run(program(fromProducer(u32, PoolHalfway.produce), .{
         concurrent(2, .{ take(1), tap(PoolHalfway.took), fold(@as(u32, 0), countItem) }),
         forEach(PoolHalfway.collect),
-    }).run(.{ io, &state, &seen });
+    }), .{ io, &state, &seen });
     try seen.expect(&.{ 1, 1 });
     try std.testing.expect(state.stopped);
     try std.testing.expectEqual(@as(usize, 2), state.handled.load(.monotonic));
@@ -256,10 +256,10 @@ const PoolInputEnd = struct {
 test "the last concurrent input loop retires before its final emission" {
     var state: PoolInputEnd = .{};
     var seen: Numbers = .{};
-    try program(fromProducer(u32, PoolInputEnd.produce), .{
+    try support.run(program(fromProducer(u32, PoolInputEnd.produce), .{
         concurrent(1, .{ take(1), fold(@as(u32, 0), countItem), map(PoolInputEnd.awaitSource) }),
         forEach(record),
-    }).run(.{ io, &state, &seen });
+    }), .{ io, &state, &seen });
     try seen.expect(&.{1});
 }
 
@@ -292,33 +292,33 @@ const PoolStop = struct {
 test "concurrent worker limits wake the producer before their final emissions" {
     var state: PoolStop = .{};
     var seen: Numbers = .{};
-    try program(fromProducer(u32, PoolStop.produce), .{
+    try support.run(program(fromProducer(u32, PoolStop.produce), .{
         concurrent(2, .{ take(1), fold(@as(u32, 0), countItem), map(PoolStop.awaitSource) }),
         fold(@as(u32, 0), add),
         forEach(record),
-    }).run(.{ io, &state, &seen });
+    }), .{ io, &state, &seen });
     try seen.expect(&.{2});
 }
 
 test "a concurrent continuation limit wakes the producer while a worker is still running" {
     var state: PoolStop = .{};
     var seen: Numbers = .{};
-    try program(fromProducer(u32, PoolStop.produce), .{
+    try support.run(program(fromProducer(u32, PoolStop.produce), .{
         concurrent(2, .{map(PoolStop.work)}),
         take(1),
         forEach(record),
-    }).run(.{ io, &state, &seen });
+    }), .{ io, &state, &seen });
     try seen.expect(&.{1});
 }
 
 test "empty input still finishes each concurrent worker and downstream once" {
     var seen: Numbers = .{};
     const clock = support.WorkersAfterWait.over(io);
-    try program(range(u32, 0, 0), .{
+    try support.run(program(range(u32, 0, 0), .{
         concurrent(3, .{fold(@as(u32, 7), add)}),
         fold(@as(u32, 0), add),
         forEach(record),
-    }).run(.{ clock, &seen });
+    }), .{ clock, &seen });
     try seen.expect(&.{21});
 }
 
@@ -332,7 +332,7 @@ const PoolCount = struct {
 
 test "a concurrent worker pipe can terminate" {
     var state: PoolCount = .{};
-    try program(range(u32, 0, 100), .{concurrent(4, .{forEach(PoolCount.addOne)})}).run(.{ io, &state });
+    try support.run(program(range(u32, 0, 100), .{concurrent(4, .{forEach(PoolCount.addOne)})}), .{ io, &state });
     try std.testing.expectEqual(@as(usize, 100), state.count.load(.monotonic));
 }
 
@@ -351,7 +351,7 @@ test "concurrent starts the requested number of workers" {
     var state: PoolBarrier = .{};
     var seen: Numbers = .{};
     const clock = support.TaskStarts.over(io);
-    try program(range(u32, 0, 100), .{ concurrent(4, .{map(PoolBarrier.work)}), fold(@as(u32, 0), add), forEach(record) }).run(.{ clock, &state, &seen });
+    try support.run(program(range(u32, 0, 100), .{ concurrent(4, .{map(PoolBarrier.work)}), fold(@as(u32, 0), add), forEach(record) }), .{ clock, &state, &seen });
     try seen.expect(&.{4950});
     try std.testing.expectEqual(@as(usize, 100), state.entered.load(.acquire));
     // The source, the coordinating boundary, and four workers for the run.
@@ -373,7 +373,7 @@ const PoolWaiting = struct {
     }
 
     fn run(clock: std.Io, state: *PoolWaiting) !void {
-        try program(range(u32, 0, 4), .{ concurrent(4, .{map(work)}), drain() }).run(.{ clock, state });
+        try support.run(program(range(u32, 0, 4), .{ concurrent(4, .{map(work)}), drain() }), .{ clock, state });
     }
 };
 
@@ -395,29 +395,27 @@ test "concurrent fails when worker tasks cannot be started" {
     defer backend.deinit();
     var seen: Numbers = .{};
     const app = program(range(u32, 0, 10), .{ concurrent(4, .{map(double)}), forEach(record) });
-    try std.testing.expectError(error.ConcurrencyUnavailable, app.run(.{ backend.io(), &seen }));
+    try std.testing.expectError(error.ConcurrencyUnavailable, support.run(app, .{ backend.io(), &seen }));
     try seen.expect(&.{});
 }
 
-fn ignoreFive(_: error{Five}, _: u32) void {}
-
-test "recover inside a concurrent worker can handle an error from its downstream push" {
+test "recover inside a concurrent worker can take an error from its downstream push" {
     var seen: Numbers = .{};
-    try program(range(u32, 4, 7), .{
-        concurrent(1, .{ zrx.recover(ignoreFive), map(same) }),
+    try support.run(program(range(u32, 4, 7), .{
+        concurrent(1, .{ zrx.recover(error{Five}, .{drain()}), map(same) }),
         map(failAtFive),
         forEach(record),
-    }).run(.{ io, &seen });
+    }), .{ io, &seen });
     try seen.expect(&.{ 4, 6 });
 }
 
 test "a concurrent worker finish error fails the run without finishing downstream" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 0), .{
+    const result = support.run(program(range(u32, 0, 0), .{
         concurrent(2, .{ fold(@as(u32, 5), add), map(failAtFive) }),
         fold(@as(u32, 0), add),
         forEach(record),
-    }).run(.{ io, &seen });
+    }), .{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try seen.expect(&.{});
 }
@@ -473,7 +471,7 @@ test "a downstream limit wakes a producer without another item and all segments 
         pipe(.{ mark(0), concurrent(1, .{end}) }),
         // Sub-pipes within one item are constructed in a pipe that tracks demand.
         pipe(.{ mark(0), queue(1), each(twoFrom, .{map(same)}), map(untagged), end }),
-        pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), end }),
+        pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), end }),
     };
     inline for (shapes) |shape| {
         var state: StoppableSource = .{};
@@ -482,7 +480,7 @@ test "a downstream limit wakes a producer without another item and all segments 
         var upstream: Trace(0) = .{};
         var downstream: Trace(1) = .{};
         var fallbacks: Fallbacks = .{};
-        try program(source, shape).run(.{ io, &state, &seen, &ticks, &upstream, &downstream, &fallbacks });
+        try support.run(program(source, shape), .{ io, &state, &seen, &ticks, &upstream, &downstream, &fallbacks });
         try std.testing.expect(state.stopped);
         try seen.expect(&.{6});
         try upstream.events.expect("ipf");
@@ -503,7 +501,7 @@ test "a shared producer keeps running until both queued consumers are done" {
     inline for (shapes, 0..) |shape, i| {
         var state: StoppableSource = .{ .wait_for_left = true };
         var seen: Numbers = .{};
-        try program(fromProducer(u32, StoppableSource.produce), shape).run(.{ io, &state, &seen });
+        try support.run(program(fromProducer(u32, StoppableSource.produce), shape), .{ io, &state, &seen });
         try std.testing.expect(state.stopped);
         try seen.expect(if (i == 1) &.{2} else &.{ 1, 2 });
     }
@@ -514,7 +512,7 @@ test "a live direct branch still receives items when a queued branch stops" {
     var seen: Numbers = .{};
     const left = pipe(.{ queue(1), take(1), fold(@as(u32, 0), add), forEach(StoppableSource.leftFinished) });
     const work = pipe(.{branch(.{ left, pipe(.{forEach(record)}) })});
-    try program(fromProducer(u32, StoppableSource.produce), work).run(.{ io, &state, &seen });
+    try support.run(program(fromProducer(u32, StoppableSource.produce), work), .{ io, &state, &seen });
     try seen.expect(&.{ 1, 2 });
 }
 
@@ -524,7 +522,7 @@ test "a branch that stopped synchronously no longer holds shared upstream open" 
     const left = pipe(.{ take(1), queue(1), drain() });
     const right = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), forEach(record) });
     const work = program(fromProducer(u32, StoppableSource.produce), pipe(.{branch(.{ left, right })}));
-    try work.run(.{ io, &state, &seen });
+    try support.run(work, .{ io, &state, &seen });
     try std.testing.expect(state.stopped);
     try seen.expect(&.{1});
 }
@@ -534,7 +532,7 @@ test "a finish error still fails the run after a downstream limit" {
     const work = program(fromProducer(u32, StoppableSource.produce), pipe(.{
         queue(1), map(StoppableSource.waitForSource), take(1), queue(1), fold(@as(u32, 4), add), map(failAtFive), drain(),
     }));
-    try std.testing.expectError(error.Five, work.run(.{ io, &state }));
+    try std.testing.expectError(error.Five, support.run(work, .{ io, &state }));
 }
 
 const PendingInput = struct {
@@ -577,7 +575,7 @@ test "a producer can stop a pending input wait without canceling its segment" {
     var source: StoppableSource = .{};
     var seen: Numbers = .{};
     const work = pipe(.{ queue(1), map(StoppableSource.waitForSource), take(1), forEach(record) });
-    try program(fromProducer(u32, PendingInput.produce), work).run(.{ io, &pending, &source, &seen });
+    try support.run(program(fromProducer(u32, PendingInput.produce), work), .{ io, &pending, &source, &seen });
     try std.testing.expect(pending.interrupted);
     try seen.expect(&.{1});
 }
@@ -603,7 +601,7 @@ test "a queued downstream limit wakes an idle producer inside merge" {
     var seen: Numbers = .{};
     const source = zrx.merge(.{ zrx.fromValue(@as(u32, 1)), fromProducer(u32, MergedWait.idle) });
     const work = pipe(.{ queue(1), map(MergedWait.waitForIdle), take(1), forEach(record) });
-    try program(source, work).run(.{ io, &state, &seen });
+    try support.run(program(source, work), .{ io, &state, &seen });
     try std.testing.expect(state.stopped);
     try seen.expect(&.{1});
 }
@@ -619,7 +617,7 @@ test "a queued downstream limit wakes an idle producer inside mergeTagged" {
     var seen: Numbers = .{};
     const source = zrx.mergeTagged(Watch, .{ .value = zrx.fromValue(@as(u32, 1)), .idle = fromProducer(u32, MergedWait.idle) });
     const work = pipe(.{ queue(1), map(taggedItem), map(MergedWait.waitForIdle), take(1), forEach(record) });
-    try program(source, work).run(.{ io, &state, &seen });
+    try support.run(program(source, work), .{ io, &state, &seen });
     try std.testing.expect(state.stopped);
     try seen.expect(&.{1});
 }
@@ -637,7 +635,7 @@ const StoppingInput = struct {
 
     fn run(clock: std.Io, state: *StoppingInput) !void {
         const work = pipe(.{ queue(1), take(1), drain() });
-        return program(fromProducer(u32, produce), work).run(.{ clock, state });
+        return support.run(program(fromProducer(u32, produce), work), .{ clock, state });
     }
 };
 
@@ -667,7 +665,7 @@ test "branch hands every item to tuple and constructed sub-pipes" {
         .{ map(double), forEach(toLeft) },
         pipe(.{ filter(isEven), forEach(toRight) }),
     })});
-    try program(range(u32, 0, 5), work).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 5), work), .{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4, 6, 8 });
     try right.expect(&.{ 0, 2, 4 });
 }
@@ -685,7 +683,7 @@ test "a branch stops the source once every sub-pipe is done" {
         pipe(.{ take(2), forEach(toLeft) }),
         pipe(.{ take(4), forEach(toRight) }),
     }) });
-    try program(range(u32, 0, 1000), work).run(.{ &pulls, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 1000), work), .{ &pulls, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 1 });
     try right.expect(&.{ 0, 1, 2, 3 });
     try std.testing.expectEqual(@as(usize, 4), pulls.count);
@@ -698,7 +696,7 @@ test "branches finish in order when the stream ends" {
         pipe(.{ fold(@as(u32, 0), add), forEach(toLeft) }),
         pipe(.{ map(double), fold(@as(u32, 0), add), forEach(toRight) }),
     })});
-    try program(range(u32, 1, 5), work).run(.{ Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 1, 5), work), .{ Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{10});
     try right.expect(&.{20});
 }
@@ -710,7 +708,7 @@ test "a branch that starts with a queue runs beside its siblings" {
         .{ queue(4), map(slowly), forEach(toLeft) },
         pipe(.{ queue(4), map(double), forEach(toRight) }),
     })});
-    try program(range(u32, 0, 30), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 30), work), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectEqual(@as(usize, 30), left.len);
     try std.testing.expectEqual(@as(usize, 30), right.len);
     for (left.slice(), 0..) |value, i| try std.testing.expectEqual(@as(u32, @intCast(i)), value);
@@ -724,7 +722,7 @@ test "an error in a queued branch fails the run" {
         pipe(.{ queue(2), map(failAtFive), forEach(toLeft) }),
         pipe(.{ queue(2), forEach(toRight) }),
     })});
-    const result = program(range(u32, 0, 20), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    const result = support.run(program(range(u32, 0, 20), work), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Five, result);
     try left.expect(&.{ 0, 1, 2, 3, 4 });
 }
@@ -737,7 +735,7 @@ test "branches nest" {
         pipe(.{forEach(record)}),
         pipe(.{ map(double), branch(.{ pipe(.{forEach(toLeft)}), pipe(.{ filter(isEven), take(1), forEach(toRight) }) }) }),
     })});
-    try program(range(u32, 1, 4), work).run(.{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 1, 4), work), .{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try seen.expect(&.{ 1, 2, 3 });
     try left.expect(&.{ 2, 4, 6 });
     try right.expect(&.{2});
@@ -758,7 +756,7 @@ test "route sends each item to the first case that takes it" {
         when(isEven, pipe(.{forEach(toRight)})),
         otherwise(.{forEach(record)}),
     })});
-    try program(range(u32, 0, 8), work).run(.{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 8), work), .{ &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 1, 2 });
     try right.expect(&.{ 4, 6 });
     try seen.expect(&.{ 3, 5, 7 });
@@ -767,7 +765,7 @@ test "route sends each item to the first case that takes it" {
 test "an item no case takes is dropped" {
     var left: Numbers = .{};
     const work = pipe(.{route(.{when(isSmall, pipe(.{forEach(toLeft)}))})});
-    try program(range(u32, 0, 8), work).run(.{Left{ .seen = &left }});
+    try support.run(program(range(u32, 0, 8), work), .{Left{ .seen = &left }});
     try left.expect(&.{ 0, 1, 2 });
 }
 
@@ -784,7 +782,7 @@ test "cases that emit the same type rejoin the pipe" {
         }),
         forEach(record),
     });
-    try program(range(u32, 0, 5), work).run(.{&seen});
+    try support.run(program(range(u32, 0, 5), work), .{&seen});
     try seen.expect(&.{ 0, 101, 4, 103, 8 });
 }
 
@@ -797,7 +795,7 @@ test "a rejoining route stops when the pipe after it is done" {
         take(2),
         forEach(record),
     });
-    try program(range(u32, 0, 1000), work).run(.{ &seen, &pulls });
+    try support.run(program(range(u32, 0, 1000), work), .{ &seen, &pulls });
     try seen.expect(&.{ 0, 101 });
     try std.testing.expectEqual(@as(usize, 2), pulls.count);
 }
@@ -811,7 +809,7 @@ test "a case keeps its own state and finishes with the stream" {
         }),
         forEach(record),
     });
-    try program(range(u32, 0, 7), work).run(.{&seen});
+    try support.run(program(range(u32, 0, 7), work), .{&seen});
     try seen.expect(&.{ 1, 12 });
 }
 
@@ -829,7 +827,7 @@ test "once the pipe after a route is done, no case forwards to it again" {
         take(1),
         forEach(record),
     });
-    try program(range(u32, 0, 5), work).run(.{ &seen, &tapped });
+    try support.run(program(range(u32, 0, 5), work), .{ &seen, &tapped });
     try seen.expect(&.{6});
     try std.testing.expectEqual(@as(usize, 1), tapped.count);
 }
@@ -885,7 +883,7 @@ test "a route that is done asks no predicate" {
         take(1),
         forEach(record),
     });
-    try program(range(u32, 0, 5), work).run(.{ &seen, &asked });
+    try support.run(program(range(u32, 0, 5), work), .{ &seen, &asked });
     try seen.expect(&.{0});
     try std.testing.expectEqual(@as(usize, 1), asked.count);
 }
@@ -902,7 +900,7 @@ test "case predicates use program dependencies" {
         when(above, pipe(.{forEach(toLeft)})),
         otherwise(pipe(.{forEach(toRight)})),
     })});
-    try program(range(u32, 0, 8), work).run(.{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 8), work), .{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 3, 4, 5, 6, 7 });
     try right.expect(&.{ 0, 1, 2 });
 }
@@ -914,7 +912,7 @@ test "terminal cases can be queued" {
         when(isEven, pipe(.{ queue(2), forEach(toLeft) })),
         otherwise(pipe(.{ queue(2), map(double), forEach(toRight) })),
     })});
-    try program(range(u32, 0, 6), work).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 0, 6), work), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4 });
     try right.expect(&.{ 2, 6, 10 });
 }
@@ -1015,7 +1013,7 @@ test "the end of the stream travels with the data: each segment finishes once" {
         mark(2),
         forEach(record),
     });
-    try program(range(u32, 1, 11), work).run(.{ io, &seen, &ticks, &first, &second, &third });
+    try support.run(program(range(u32, 1, 11), work), .{ io, &seen, &ticks, &first, &second, &third });
     try seen.expect(&.{55});
     try first.events.expect("ippppppppppf");
     try second.events.expect("ippppppppppf");
@@ -1048,7 +1046,7 @@ test "queued sub-pipes of a branch each finish once when the stream ends" {
         mark(0),
         branch(.{ sum, echo }),
     });
-    try program(range(u32, 1, 6), work).run(.{ io, &ticks, &trunk, &summed, &echoed, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(program(range(u32, 1, 6), work), .{ io, &ticks, &trunk, &summed, &echoed, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{15});
     try right.expect(&.{ 1, 2, 3, 4, 5 });
     try trunk.events.expect("ipppppf");
@@ -1063,19 +1061,19 @@ fn failAnyhow(value: u32) anyerror!u32 {
 
 test "a queue works in a pipe whose handlers return anyerror" {
     var seen: Numbers = .{};
-    const result = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAnyhow), forEach(record) })).run(.{ io, &seen });
+    const result = support.run(program(range(u32, 0, 10), pipe(.{ queue(2), map(failAnyhow), forEach(record) })), .{ io, &seen });
     try std.testing.expectError(error.Five, result);
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
 test "concurrent supports handlers returning anyerror" {
-    const result = program(range(u32, 0, 10), .{ concurrent(3, .{map(failAnyhow)}), drain() }).run(.{io});
+    const result = support.run(program(range(u32, 0, 10), .{ concurrent(3, .{map(failAnyhow)}), drain() }), .{io});
     try std.testing.expectError(error.Five, result);
 }
 
 test "Io may be provided where the queue needs it" {
     var seen: Numbers = .{};
-    try program(range(u32, 0, 5), pipe(.{ queue(2), forEach(record) })).provide(.{io}).run(.{&seen});
+    try support.run(program(range(u32, 0, 5), pipe(.{ queue(2), forEach(record) })).provide(.{io}), .{&seen});
     try seen.expect(&.{ 0, 1, 2, 3, 4 });
 }
 
@@ -1098,7 +1096,7 @@ test "a failure after a queue ends the run while the source is waiting" {
     var seen: Numbers = .{};
     var stalled: Stalled = .{};
     const source = fromProducer(u32, PushThenStall(5).run);
-    const result = program(source, pipe(.{ queue(2), map(failAtFive), forEach(record) })).run(.{ io, &seen, &stalled });
+    const result = support.run(program(source, pipe(.{ queue(2), map(failAtFive), forEach(record) })), .{ io, &seen, &stalled });
     try std.testing.expectError(error.Five, result);
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
 }
@@ -1107,13 +1105,13 @@ test "a concurrent worker failure interrupts an idle source" {
     var stalled: Stalled = .{};
     var seen: Numbers = .{};
     const source = fromProducer(u32, PushThenStall(5).run);
-    try std.testing.expectError(error.Five, program(source, .{ concurrent(3, .{map(failAtFive)}), forEach(record) }).run(.{ io, &seen, &stalled }));
+    try std.testing.expectError(error.Five, support.run(program(source, .{ concurrent(3, .{map(failAtFive)}), forEach(record) }), .{ io, &seen, &stalled }));
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
 }
 
 test "concurrent retirement wakes waits that do not observe cancellation" {
     const clock = support.UncancelableWaits.over(io);
-    try std.testing.expectError(error.Ended, program(range(u32, 0, 1000), .{ concurrent(2, .{map(failAlways)}), drain() }).run(.{clock}));
+    try std.testing.expectError(error.Ended, support.run(program(range(u32, 0, 1000), .{ concurrent(2, .{map(failAlways)}), drain() }), .{clock}));
 }
 
 test "a failure behind two queues, or in a queued sub-pipe, ends the run while the source is waiting" {
@@ -1124,7 +1122,7 @@ test "a failure behind two queues, or in a queued sub-pipe, ends the run while t
     const deps = .{ io, &stalled, Left{ .seen = &left }, Right{ .seen = &right } };
 
     const twice = pipe(.{ queue(2), map(double), queue(2), map(failAtTen), forEach(toLeft) });
-    try std.testing.expectError(error.Ten, program(source, twice).run(deps));
+    try std.testing.expectError(error.Ten, support.run(program(source, twice), deps));
 
     const failing = pipe(.{
         queue(2),
@@ -1132,7 +1130,7 @@ test "a failure behind two queues, or in a queued sub-pipe, ends the run while t
         forEach(toLeft),
     });
     const split = pipe(.{branch(.{ failing, pipe(.{forEach(toRight)}) })});
-    try std.testing.expectError(error.Five, program(source, split).run(deps));
+    try std.testing.expectError(error.Five, support.run(program(source, split), deps));
 
     try std.testing.expect(!stalled.woke_by_itself.load(.seq_cst));
 }
@@ -1192,7 +1190,7 @@ test "nothing is released while a handler behind a queue is still using it" {
         queue(2),
         forEach(holdBoth),
     });
-    const result = program(fromProducer(u32, pushThenFail), work).provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) }).run(.{ io, &hold });
+    const result = support.run(program(fromProducer(u32, pushThenFail), work).provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) }), .{ io, &hold });
     try std.testing.expectError(error.SourceFailed, result);
     try std.testing.expect(!hold.woke_by_itself.load(.seq_cst));
     try std.testing.expect(!hold.released_while_held.load(.seq_cst));
@@ -1203,7 +1201,7 @@ test "resources outlive every concurrent worker on failure" {
     var hold: Hold = .{};
     const app = program(fromProducer(u32, pushThenFail), .{concurrent(3, .{forEach(holdBoth)})})
         .provide(.{ resource(acquireOuter, releaseOuter), resource(acquireInner, releaseInner) });
-    try std.testing.expectError(error.SourceFailed, app.run(.{ io, &hold }));
+    try std.testing.expectError(error.SourceFailed, support.run(app, .{ io, &hold }));
     try std.testing.expect(!hold.woke_by_itself.load(.seq_cst));
     try std.testing.expect(!hold.released_while_held.load(.seq_cst));
     try std.testing.expect(hold.outer_released.load(.seq_cst) and hold.inner_released.load(.seq_cst));
@@ -1288,7 +1286,7 @@ test "once a segment has failed, no other segment ends its stream normally" {
         mark(0),
         branch(.{ draining, failing }),
     });
-    const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &trunk, &summed, &ending, Left{ .seen = &left }, Right{ .seen = &right } });
+    const result = support.run(program(range(u32, 1, 4), work), .{ io, &ticks, &trunk, &summed, &ending, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Late, result);
     try left.expect(&.{});
     // The first segment had ended before the failure.
@@ -1317,7 +1315,7 @@ test "a source that returns after a failure elsewhere does not end the stream" {
         map(failAtFive),
         forEach(record),
     });
-    const result = program(fromProducer(u32, pushThenEndWhenInterrupted), work).run(.{ io, &seen, &ticks, &before });
+    const result = support.run(program(fromProducer(u32, pushThenEndWhenInterrupted), work), .{ io, &seen, &ticks, &before });
     try std.testing.expectError(error.Five, result);
     try before.events.expect("ip");
 }
@@ -1330,7 +1328,7 @@ fn Called(comptime Program: type, comptime Deps: type) type {
     return struct {
         fn run(called: *const Program, deps: Deps) ?anyerror {
             defer called_returned.store(true, .seq_cst);
-            called.run(deps) catch |err| return err;
+            support.run(called, deps) catch |err| return err;
             return null;
         }
     };
@@ -1429,7 +1427,7 @@ const Probe = struct {
 
     fn run(probe: *Probe, comptime shape: anytype, comptime ending: Way) !void {
         const deps = .{ io, &probe.ticks, &probe.t0, &probe.t1, &probe.t2, &probe.t3, &probe.t4, Left{ .seen = &probe.ended }, Right{ .seen = &probe.beside }, &probe.fallbacks };
-        const result = program(range(u32, 0, item_count), shape.build(ending)).run(deps);
+        const result = support.run(program(range(u32, 0, item_count), shape.build(ending)), deps);
         if (ending == .fails) {
             try std.testing.expectError(error.Ended, result);
         } else {
@@ -1678,9 +1676,9 @@ fn untagged(pair: zrx.Tagged(u32, u32)) u32 {
 fn neverFails(value: u32) error{Never}!u32 {
     return value;
 }
-fn countFallback(fallbacks: *Fallbacks, _: error{Never}, value: u32) u32 {
+fn countFallback(fallbacks: *Fallbacks, failed: zrx.Failed(error{Never}, u32)) u32 {
     _ = fallbacks.count.fetchAdd(1, .seq_cst);
-    return value;
+    return failed.item;
 }
 
 /// The sub-pipe of an `each` behind a queue: every item gives two values, of
@@ -1732,8 +1730,8 @@ const EachInWorkers = struct {
 
 /// The pipe after an `attempt`: its failure is not the sub-pipe's.
 const AfterAttempt = struct {
-    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) })) {
-        return pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, countFallback), mark(1), ender(ending), forEach(toLeft) });
+    fn build(comptime ending: Way) @TypeOf(pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), mark(1), ender(ending), forEach(toLeft) })) {
+        return pipe(.{ mark(0), queue(1), attempt(.{map(neverFails)}, error{Never}, .{map(countFallback)}), mark(1), ender(ending), forEach(toLeft) });
     }
     fn ended() usize {
         return item_count;
@@ -1832,7 +1830,7 @@ test "a segment decides to end its stream after it has retired, not before" {
         forEach(toRight),
     });
     const work = pipe(.{branch(.{ retiring, failing })});
-    const result = program(range(u32, 1, 4), work).run(.{ io, &ticks, &beyond, &gate, Left{ .seen = &left }, Right{ .seen = &right } });
+    const result = support.run(program(range(u32, 1, 4), work), .{ io, &ticks, &beyond, &gate, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Late, result);
     try left.expect(&.{ 1, 2, 3 });
     try beyond.events.expect("ippp");
@@ -1924,7 +1922,7 @@ test "a failure is on record before the queue behind it lets its producer go" {
         map(failAlways),
         forEach(toRight),
     });
-    const result = program(fromProducer(u32, pushUntilDone), work).run(.{ io, &ticks, &before, &gate, Right{ .seen = &right } });
+    const result = support.run(program(fromProducer(u32, pushUntilDone), work), .{ io, &ticks, &before, &gate, Right{ .seen = &right } });
     try std.testing.expectError(error.Ended, result);
     try std.testing.expectEqual(@as(usize, 0), before.count('f'));
 }
@@ -1934,9 +1932,9 @@ test "a failure while a segment ends its stream fails the run" {
     // Behind a queue, and in the source's own segment: the fold's final value
     // fails in the stage after it.
     const behind = pipe(.{ queue(2), fold(@as(u32, 0), add), map(failAlways), forEach(record) });
-    try std.testing.expectError(error.Ended, program(range(u32, 1, 4), behind).run(.{ io, &seen }));
+    try std.testing.expectError(error.Ended, support.run(program(range(u32, 1, 4), behind), .{ io, &seen }));
     const before = pipe(.{ fold(@as(u32, 0), add), map(failAlways), queue(2), forEach(record) });
-    try std.testing.expectError(error.Ended, program(range(u32, 1, 4), before).run(.{ io, &seen }));
+    try std.testing.expectError(error.Ended, support.run(program(range(u32, 1, 4), before), .{ io, &seen }));
     try seen.expect(&.{});
 }
 
@@ -1986,7 +1984,7 @@ test "every task is asked to cancel at once: one that does not notice does not s
         forEach(ignore),
     });
     const work = pipe(.{branch(.{ waiting, failing })});
-    const result = program(fromProducer(u32, pushThenAwaitAck), work).run(.{ io, &acked });
+    const result = support.run(program(fromProducer(u32, pushThenAwaitAck), work), .{ io, &acked });
     try std.testing.expectError(error.Late, result);
     try std.testing.expect(!acked.woke_by_itself.load(.seq_cst));
 }

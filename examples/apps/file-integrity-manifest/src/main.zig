@@ -22,10 +22,10 @@ const branch = zrx.branch;
 const map = zrx.map;
 const fold = zrx.fold;
 const forEach = zrx.forEach;
-const print = zrx.print;
 const write = zrx.write;
 const fileWriter = zrx.fileWriter;
 const stderr = zrx.stderr;
+const rescue = zrx.rescue;
 
 /// Where the rows go.
 pub const Manifest = struct { writer: *Io.Writer };
@@ -89,9 +89,10 @@ fn described(file: zrx.Tagged([]const u8, Hash)) Entry {
     return .{ .path = file.source, .bytes = file.item.bytes, .sha256 = std.fmt.bytesToHex(sha.finalResult(), .lower) };
 }
 
-/// A file that cannot be hashed is still a row.
-fn failed(err: anyerror, path: []const u8) Entry {
-    return .{ .path = path, .failure = @errorName(err) };
+/// A file that cannot be hashed is still a row. It is given a
+/// `Failed(anyerror, Path)`, whatever type the paths of this run have.
+fn failed(failure: anytype) Entry {
+    return .{ .path = failure.item, .failure = @errorName(failure.err) };
 }
 
 fn remember(exit: *Exit, outcome: Exit) void {
@@ -120,30 +121,42 @@ const exit_status = pipe(.{
 
 /// Needs `std.Io`, `Manifest` and the `*Exit` the outcome is stored in.
 pub const manifest = pipe(.{
-    concurrent(workers, .{attempt(hashed, failed)}),
+    concurrent(workers, .{attempt(hashed, anyerror, .{map(failed)})}),
     branch(.{
         rows,
         exit_status,
     }),
 });
 
-const fatal_report = pipe(.{print(zrx.Stderr, "fatal: {s}\n")});
+/// Whatever ends the run, or keeps it from starting: one best-effort line
+/// on stderr, and the status. There is no manifest then.
+fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+    exit.* = .failed;
+    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+    diagnostics.writer.flush() catch {};
+}
 
 /// `file-integrity-manifest OUTPUT FILE...`
 pub fn main(init: std.process.Init) u8 {
-    const args = init.minimal.args.toSlice(init.arena.allocator()) catch |err| return fatal(init.io, err);
-    if (args.len < 3) return fatal(init.io, error.InvalidArguments);
     var exit: Exit = .complete;
-    program(fromSlice(args[2..]), manifest).run(.{
-        init.io,
-        &exit,
-        fileWriter(Manifest, args[1], 8192, .{ .mode = .publish }),
-    }) catch |err| return fatal(init.io, err);
+    if (init.minimal.args.toSlice(init.arena.allocator())) |args| {
+        if (args.len < 3) {
+            refuse(init.io, &exit, error.InvalidArguments);
+        } else {
+            // A run returns nothing: what fails it goes to `fatal`, once
+            // the output has been closed without getting its name.
+            program(fromSlice(args[2..]), manifest).run(.{
+                init.io,
+                &exit,
+                rescue(fatal).provide(.{stderr(256)}),
+                fileWriter(Manifest, args[1], 8192, .{ .mode = .publish }),
+            });
+        }
+    } else |err| refuse(init.io, &exit, err);
     return @backingInt(exit);
 }
 
-/// One best-effort line on stderr.
-fn fatal(io: Io, err: anyerror) u8 {
-    program(fromValue(@errorName(err)), fatal_report).run(.{ io, stderr(256) }) catch {};
-    return @backingInt(Exit.failed);
+/// What fails before there is a run: a program of one item, the failure.
+fn refuse(io: Io, exit: *Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
 }

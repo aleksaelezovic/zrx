@@ -54,12 +54,32 @@ test "flattened" {
     }
 }
 
-test "recovered" {
+test "recovered, recoveredInto, recoveredOnce" {
+    for (inputs) |items| inline for (.{ cases.recovered, cases.recoveredInto, cases.recoveredOnce }) |case| {
+        var with: struct { u32, u64 } = .{ 0, 0 };
+        var without: struct { u32, u64 } = .{ 0, 0 };
+        case(true, items, &with[0], &with[1]);
+        case(false, items, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
+test "recoveredOrFailed" {
     for (inputs) |items| {
         var with: struct { u32, u64 } = .{ 0, 0 };
         var without: struct { u32, u64 } = .{ 0, 0 };
-        cases.recovered(true, items, &with[0], &with[1]);
-        cases.recovered(false, items, &without[0], &without[1]);
+        const failed = cases.recoveredOrFailed(true, items, &with[0], &with[1]);
+        try std.testing.expectEqual(cases.recoveredOrFailed(false, items, &without[0], &without[1]), failed);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "rescued" {
+    for (inputs) |items| {
+        var with: struct { u32, u64, bool } = .{ 0, 0, false };
+        var without: struct { u32, u64, bool } = .{ 0, 0, false };
+        cases.rescued(true, items, &with[0], &with[1], &with[2]);
+        cases.rescued(false, items, &without[0], &without[1], &without[2]);
         try std.testing.expectEqual(without, with);
     }
 }
@@ -154,8 +174,10 @@ test "printed" {
         var without_bytes: [256]u8 = undefined;
         var with: std.Io.Writer = .fixed(&with_bytes);
         var without: std.Io.Writer = .fixed(&without_bytes);
-        try std.testing.expect(cases.printed(true, items, &with));
-        try std.testing.expect(cases.printed(false, items, &without));
+        var failed: [2]bool = .{ false, false };
+        cases.printed(true, items, &with, &failed[0]);
+        cases.printed(false, items, &without, &failed[1]);
+        try std.testing.expectEqual([2]bool{ false, false }, failed);
         try std.testing.expectEqualStrings(without.buffered(), with.buffered());
     }
     // A writer that runs out of room fails both the same way.
@@ -163,7 +185,10 @@ test "printed" {
     var small_without: [3]u8 = undefined;
     var with: std.Io.Writer = .fixed(&small_with);
     var without: std.Io.Writer = .fixed(&small_without);
-    try std.testing.expectEqual(cases.printed(false, inputs[3], &without), cases.printed(true, inputs[3], &with));
+    var failed: [2]bool = .{ false, false };
+    cases.printed(true, inputs[3], &with, &failed[0]);
+    cases.printed(false, inputs[3], &without, &failed[1]);
+    try std.testing.expectEqual([2]bool{ true, true }, failed);
 }
 
 test "written" {
@@ -172,15 +197,20 @@ test "written" {
         var without_bytes: [256]u8 = undefined;
         var with: std.Io.Writer = .fixed(&with_bytes);
         var without: std.Io.Writer = .fixed(&without_bytes);
-        try std.testing.expect(cases.written(true, items, &with));
-        try std.testing.expect(cases.written(false, items, &without));
+        var failed: [2]bool = .{ false, false };
+        cases.written(true, items, &with, &failed[0]);
+        cases.written(false, items, &without, &failed[1]);
+        try std.testing.expectEqual([2]bool{ false, false }, failed);
         try std.testing.expectEqualStrings(without.buffered(), with.buffered());
     }
     var small_with: [3]u8 = undefined;
     var small_without: [3]u8 = undefined;
     var with: std.Io.Writer = .fixed(&small_with);
     var without: std.Io.Writer = .fixed(&small_without);
-    try std.testing.expectEqual(cases.written(false, inputs[3], &without), cases.written(true, inputs[3], &with));
+    var failed: [2]bool = .{ false, false };
+    cases.written(true, inputs[3], &with, &failed[0]);
+    cases.written(false, inputs[3], &without, &failed[1]);
+    try std.testing.expectEqual([2]bool{ true, true }, failed);
 }
 
 test "reduced" {

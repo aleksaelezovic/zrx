@@ -5,6 +5,7 @@ const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const program = zrx.program;
+const rescue = zrx.rescue;
 const range = zrx.range;
 const map = zrx.map;
 const tap = zrx.tap;
@@ -45,12 +46,22 @@ const report = pipe(.{
     print(zrx.Stderr, "batch sum: {d}\n"),
 });
 
-pub fn main(init: std.process.Init) !void {
+const Exit = struct { code: u8 = 0 };
+
+/// A run returns nothing: what ends it goes to a rescue, and here becomes
+/// the exit status.
+fn fail(exit: *Exit, _: anyerror) void {
+    exit.code = 1;
+}
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: Exit = .{};
     const app = program(range(u32, 1, 31), pipe(.{
         branch(.{
             archive,
             report,
         }),
     })).provide(.{ stdout(64), stderr(128) });
-    try app.run(.{init.io});
+    app.run(.{ init.io, &exit, rescue(fail) });
+    return exit.code;
 }

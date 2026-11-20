@@ -32,6 +32,67 @@ pub fn record(comptime T: type) fn (*Recorder(T), T) void {
     }.add;
 }
 
+/// Runs `runnable` and returns what it failed with. `run` itself returns
+/// nothing: a failure goes to a rescue. This binds one that takes
+/// everything, so a test can `try` a run or expect an error of it. A run
+/// that is given a rescue of its own is not run through here.
+pub fn run(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(Failure.note) });
+    if (failure.err) |err| return err;
+}
+
+/// What the rescue of `run` was given.
+pub const Failure = struct {
+    err: ?anyerror = null,
+
+    fn note(failure: *Failure, err: anyerror) void {
+        failure.err = err;
+    }
+};
+
+/// Runs `runnable` and returns what was left for it to fail with. The rescue
+/// bound here takes `anytype`, so it is given exactly the errors the run can
+/// still fail with, and writes their names down when it does fail: a test of
+/// what an operator takes away has to make the run fail with what is left.
+pub fn runLeft(runnable: anytype, deps: anytype) Left {
+    var left: Left = .{};
+    runnable.run(deps ++ .{ &left, zrx.rescue(Left.note) });
+    return left;
+}
+
+pub const Left = struct {
+    text: [256]u8 = undefined,
+    len: usize = 0,
+    err: ?anyerror = null,
+
+    fn note(left: *Left, err: anytype) void {
+        const sorted = comptime sorted: {
+            var list = @typeInfo(@TypeOf(err)).error_set.error_names.?[0..].*;
+            for (1..list.len) |i| {
+                var at = i;
+                while (at > 0 and std.mem.lessThan(u8, list[at], list[at - 1])) : (at -= 1) {
+                    std.mem.swap([:0]const u8, &list[at], &list[at - 1]);
+                }
+            }
+            break :sorted list;
+        };
+        inline for (sorted) |error_name| {
+            @memcpy(left.text[left.len..][0..error_name.len], error_name);
+            left.text[left.len + error_name.len] = ' ';
+            left.len += error_name.len + 1;
+        }
+        left.err = err;
+    }
+
+    /// The names of the errors the rescue could have been given, in
+    /// alphabetical order, each followed by a space. Empty if the run did
+    /// not fail.
+    pub fn names(left: *const Left) []const u8 {
+        return left.text[0..left.len];
+    }
+};
+
 /// Observes the selected thread blocking on a mutex, then releases the
 /// handler holding it. The test selects the thread immediately before its
 /// downstream push, so no amount of scheduler delay substitutes for a wait.

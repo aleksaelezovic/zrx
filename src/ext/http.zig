@@ -2,21 +2,21 @@
 //! of `std.http.Server`.
 //!
 //!     const api = pipe(.{
-//!         recover(http.fail),
+//!         recover(anyerror, .{http.fail()}),
 //!         route(.{
 //!             when(http.path("/sum"), .{ map(sum), http.text("{d}") }),
 //!             otherwise(.{http.status(.not_found)}),
 //!         }),
 //!     });
 //!     const server = program(http.connections(), .{
-//!         concurrent(64, .{ recover(http.disconnected), http.serve(api) }),
+//!         concurrent(64, .{ recover(http.Disconnected, .{drain()}), http.serve(api) }),
 //!     }).provide(.{http.listen(address, .{})});
 //!
 //! `listen` binds the listener for the run, `connections` accepts from it,
 //! and `serve` holds the conversation on one connection: it reads requests
 //! and pushes each as a `Request` through a copy of its pipe that it
 //! constructs for that connection, with a `Response` added to the
-//! dependencies. The responders (`text`, `json`, `status`) and `fail` find
+//! dependencies. The responders (`text`, `json`, `status`, `fail`) find
 //! the request to answer through that dependency, so they only work inside
 //! the pipe given to `serve`. A connection that is not to be served goes to
 //! `reject`, which closes it.
@@ -550,7 +550,8 @@ pub const Response = struct {
 /// A head that does not parse is answered 400, one larger than `head_bytes`
 /// 431, and the connection closed. A connection that breaks fails the push
 /// with `error.ReadFailed` or `error.WriteFailed`: put
-/// `recover(http.disconnected)` before `serve` so that it does not fail the run.
+/// `recover(http.Disconnected, .{drain()})` before `serve` so that it does not
+/// fail the run.
 pub fn serve(sub: anytype) Serve(core.NormalizedPipe("http.serve", @TypeOf(sub))) {
     return .{ .pipe = core.normalizePipe("http.serve", sub) };
 }
@@ -924,7 +925,7 @@ fn Coded(comptime code: Status) type {
 }
 
 // ---------------------------------------------------------------------------
-// Predicates and recover handlers
+// Predicates and failures
 // ---------------------------------------------------------------------------
 
 fn requestOf(comptime who: []const u8, args: anytype) Request {
@@ -966,26 +967,41 @@ pub fn method(comptime expected: Method) type {
     };
 }
 
-/// For `recover`, in the pipe given to `serve`: answers a request whose
-/// handling failed with the status of its error (see `Error`; anything else
-/// is 500). The connection goes on unless the request's body was left
-/// unread in a way that hides where the next request begins. A broken
-/// connection is not answered: its error passes on to `disconnected`.
-pub fn fail(response: Response, err: anyerror, _: anytype) error{ ReadFailed, WriteFailed }!void {
-    const code: Status = switch (err) {
-        error.ReadFailed => return error.ReadFailed,
-        error.WriteFailed => return error.WriteFailed,
-        error.BadRequest => .bad_request,
-        error.NotFound => .not_found,
-        error.MethodNotAllowed => .method_not_allowed,
-        error.LengthRequired => .length_required,
-        error.PayloadTooLarge => .payload_too_large,
-        error.ExpectationFailed => .expectation_failed,
-        else => .internal_server_error,
-    };
-    _ = try response.exchange.begin(code, null, 0);
+/// Ends an error path in the pipe given to `serve`:
+/// `recover(anyerror, .{http.fail()})` answers a request whose handling
+/// failed with the status of its error (see `Error`; anything else is 500).
+/// The connection goes on unless the request's body was left unread in a way
+/// that hides where the next request begins. A broken connection is not
+/// answered: its error passes on, for a `recover(http.Disconnected, ...)`
+/// before `serve`.
+pub fn fail() Responder("http.fail", Failure) {
+    return .{};
 }
 
-/// For `recover`, before `serve`: a connection that broke is dropped and
-/// the run goes on. Every other error still fails the run.
-pub fn disconnected(_: error{ ReadFailed, WriteFailed }, _: anytype) void {}
+const Failure = struct {
+    const sends_item = false;
+
+    fn send(x: *Exchange, failed: anytype) Exchange.Lost!void {
+        const Item = @TypeOf(failed);
+        if (comptime (@typeInfo(Item) != .@"struct" or !@hasField(Item, "err"))) @compileError(
+            "http.fail: answers a failure, got `" ++ @typeName(Item) ++ "`; end the error path of a recover with it: `recover(anyerror, .{http.fail()})`",
+        );
+        const code: Status = switch (@as(anyerror, failed.err)) {
+            error.ReadFailed => return error.ReadFailed,
+            error.WriteFailed => return error.WriteFailed,
+            error.BadRequest => .bad_request,
+            error.NotFound => .not_found,
+            error.MethodNotAllowed => .method_not_allowed,
+            error.LengthRequired => .length_required,
+            error.PayloadTooLarge => .payload_too_large,
+            error.ExpectationFailed => .expectation_failed,
+            else => .internal_server_error,
+        };
+        _ = try x.begin(code, null, 0);
+    }
+};
+
+/// What a connection that broke fails with. Before `serve`,
+/// `recover(http.Disconnected, .{drain()})` drops such a connection and the
+/// run goes on. Every other error still fails the run.
+pub const Disconnected = error{ ReadFailed, WriteFailed };

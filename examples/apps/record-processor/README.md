@@ -57,8 +57,9 @@ flowchart TD
 - The summary is written only after record output has been flushed successfully.
 
 `app.zig` is the boundary around it: it parses the command, runs the program
-with the bindings the command names and turns the totals into an outcome.
-`main.zig` owns exit codes.
+with the bindings the command names and turns the totals into an outcome. A
+run returns nothing: what fails it goes to `rescue(fatal)`, which writes the
+`fatal:` line and stores the status. `main.zig` returns that status.
 
 ## Format and policies
 
@@ -105,8 +106,8 @@ Every executable run has a 10-second deadline and is killed and reaped on failur
 
 ```text
 src/
-  main.zig                 exit codes and the fatal report
-  app.zig                  command dispatch, opening the input, running
+  main.zig                 the arguments in, the exit status out
+  app.zig                  command dispatch, opening the input, running, the fatal report
   composition.zig          the pipeline and its roles
   domain/
     commands.zig           option parsing and usage
@@ -121,7 +122,7 @@ This app existed for the previous zrx and was rebuilt on the rewritten API
 without changing the library, to find out what is missing. What it needed
 that was general has since been added to zrx: `orElse`, which turns a
 handler's error into a value (a rejected record has to continue downstream,
-and `recover` can only skip), the `.create_new` mode of `fileWriter`, and
+and `recover` takes the item out of the pipe), the `.create_new` mode of `fileWriter`, and
 `fileReader`, with which the input is a binding like the output. Bindings
 are acquired in the order they are written, so the input is opened before
 the output is created and a missing input leaves no file behind.
@@ -137,7 +138,7 @@ What is still plain Zig here:
 
 What needed nothing: the record cap (`scan` numbers, a handler enforces),
 injected rules, testing the production pipe against in-memory I/O, and the
-totals the caller needs for the exit status. A program ends with nothing or
-an error, and what it produces is an effect of its pipe: `tap(remember)`
+totals the caller needs for the exit status. A run returns nothing, and
+what it produces is an effect of its pipe: `tap(remember)`
 stores the totals through a `*Summary` dependency. Bounded text for a field
 (`Text(n)` in `records.zig`) is the domain's own type.

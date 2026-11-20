@@ -18,5 +18,5 @@ fn wide(value: u64) u64 {
     return value;
 }
 test {
-    try program(range(u32, 0, 3), pipe(.{ map(wide), forEach(ignore) })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ map(wide), forEach(ignore) })).run(.{});
 }

@@ -33,14 +33,14 @@ test "operator tuples accept reusable pipes and construct fresh state on each ru
     const operators = .{ take(2), total, forEach(record) };
     const app = program(range(u32, 1, 6), operators);
     try std.testing.expect(@TypeOf(app) == @TypeOf(program(range(u32, 1, 6), pipe(operators))));
-    try app.run(.{&seen});
-    try app.run(.{&seen});
+    try support.run(app, .{&seen});
+    try support.run(app, .{&seen});
     try seen.expect(&.{ 13, 13 });
 }
 
 test "fromValue emits one item" {
     var seen: Numbers = .{};
-    try program(fromValue(@as(u32, 42)), pipe(.{forEach(record)})).run(.{&seen});
+    try support.run(program(fromValue(@as(u32, 42)), pipe(.{forEach(record)})), .{&seen});
     try seen.expect(&.{42});
 }
 
@@ -48,8 +48,8 @@ test "fromSlice accepts slices and array pointers" {
     var seen: Numbers = .{};
     const array = [_]u32{ 1, 2, 3 };
     const slice: []const u32 = array[1..];
-    try program(fromSlice(&array), pipe(.{forEach(record)})).run(.{&seen});
-    try program(fromSlice(slice), pipe(.{forEach(record)})).run(.{&seen});
+    try support.run(program(fromSlice(&array), pipe(.{forEach(record)})), .{&seen});
+    try support.run(program(fromSlice(slice), pipe(.{forEach(record)})), .{&seen});
     try seen.expect(&.{ 1, 2, 3, 2, 3 });
 }
 
@@ -66,9 +66,9 @@ const Countdown = struct {
 test "fromIterator pulls until null and leaves the rest when stopped early" {
     var seen: Numbers = .{};
     var all: Countdown = .{ .left = 3 };
-    try program(fromIterator(&all), pipe(.{forEach(record)})).run(.{&seen});
+    try support.run(program(fromIterator(&all), pipe(.{forEach(record)})), .{&seen});
     var some: Countdown = .{ .left = 10 };
-    try program(fromIterator(&some), pipe(.{ take(2), forEach(record) })).run(.{&seen});
+    try support.run(program(fromIterator(&some), pipe(.{ take(2), forEach(record) })), .{&seen});
     try seen.expect(&.{ 2, 1, 0, 9, 8 });
     try std.testing.expectEqual(@as(u32, 8), some.left);
 }
@@ -86,7 +86,7 @@ const Flaky = struct {
 test "a failing iterator fails the run" {
     var seen: Numbers = .{};
     var flaky: Flaky = .{};
-    try std.testing.expectError(error.Broken, program(fromIterator(&flaky), pipe(.{forEach(record)})).run(.{&seen}));
+    try std.testing.expectError(error.Broken, support.run(program(fromIterator(&flaky), pipe(.{forEach(record)})), .{&seen}));
     try seen.expect(&.{ 1, 2 });
 }
 
@@ -98,15 +98,15 @@ fn countUp(start: Start, out: anytype) !void {
 
 test "fromProducer injects dependencies and stops when told" {
     var seen: Numbers = .{};
-    try program(fromProducer(u32, countUp), pipe(.{ take(3), forEach(record) })).run(.{ &seen, Start{ .at = 10 } });
+    try support.run(program(fromProducer(u32, countUp), pipe(.{ take(3), forEach(record) })), .{ &seen, Start{ .at = 10 } });
     try seen.expect(&.{ 10, 11, 12 });
 }
 
 test "a program is a value: every run starts from fresh state" {
     var seen: Numbers = .{};
     const total = program(range(u32, 1, 4), pipe(.{ fold(@as(u32, 0), add), forEach(record) }));
-    try total.run(.{&seen});
-    try total.run(.{&seen});
+    try support.run(total, .{&seen});
+    try support.run(total, .{&seen});
     try seen.expect(&.{ 6, 6 });
 }
 
@@ -116,7 +116,7 @@ test "merge delivers every item of every source, each in its own order" {
     var seen: Numbers = .{};
     const low = [_]u32{ 1, 2, 3, 4 };
     const high = [_]u32{ 100, 200, 300 };
-    try program(merge(.{ fromSlice(&low), fromSlice(&high) }), pipe(.{forEach(record)})).run(.{ io, &seen });
+    try support.run(program(merge(.{ fromSlice(&low), fromSlice(&high) }), pipe(.{forEach(record)})), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 7), seen.len);
     var last_low: u32 = 0;
     var last_high: u32 = 0;
@@ -136,7 +136,7 @@ test "merge delivers every item of every source, each in its own order" {
 test "merge stops every source when the pipe is done" {
     var seen: Numbers = .{};
     const endless = range(u32, 0, std.math.maxInt(u32));
-    try program(merge(.{ endless, endless }), pipe(.{ take(5), forEach(record) })).run(.{ io, &seen });
+    try support.run(program(merge(.{ endless, endless }), pipe(.{ take(5), forEach(record) })), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 5), seen.len);
 }
 
@@ -147,7 +147,7 @@ fn failAtTwo(value: u32) error{Two}!u32 {
 
 test "a failure under merge fails the run" {
     var seen: Numbers = .{};
-    const result = program(merge(.{ range(u32, 0, 100), range(u32, 0, 100) }), pipe(.{ map(failAtTwo), forEach(record) })).run(.{ io, &seen });
+    const result = support.run(program(merge(.{ range(u32, 0, 100), range(u32, 0, 100) }), pipe(.{ map(failAtTwo), forEach(record) })), .{ io, &seen });
     try std.testing.expectError(error.Two, result);
 }
 
@@ -163,7 +163,7 @@ test "mergeTagged marks every item with the source it came from" {
     const high = [_]u32{ 100, 200, 300 };
     // Named out of order: the tags, not the order they are written in, decide.
     const sources = mergeTagged(Side, .{ .right = fromSlice(&high), .left = fromSlice(&low) });
-    try program(sources, .{forEach(support.record(Sided))}).run(.{ io, &seen });
+    try support.run(program(sources, .{forEach(support.record(Sided))}), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 7), seen.len);
     var next: std.EnumArray(Side, usize) = .initFill(0);
     for (seen.slice()) |entry| {
@@ -196,14 +196,14 @@ test "mergeTagged feeds each variant of a tagged union from a source of its type
     var totals: Totals = .{};
     const words = [_][]const u8{ "ab", "cde" };
     const sources = mergeTagged(Input, .{ .count = range(u32, 1, 5), .word = fromSlice(&words) });
-    try program(sources, .{ fold(Totals{}, tally), forEach(keepTotals) }).run(.{ io, &totals });
+    try support.run(program(sources, .{ fold(Totals{}, tally), forEach(keepTotals) }), .{ io, &totals });
     try std.testing.expectEqual(Totals{ .count = 10, .letters = 5 }, totals);
 }
 
 test "mergeTagged stops every source when the pipe is done" {
     var seen: SidedLog = .{};
     const endless = range(u32, 0, std.math.maxInt(u32));
-    try program(mergeTagged(Side, .{ .left = endless, .right = endless }), .{ take(5), forEach(support.record(Sided)) }).run(.{ io, &seen });
+    try support.run(program(mergeTagged(Side, .{ .left = endless, .right = endless }), .{ take(5), forEach(support.record(Sided)) }), .{ io, &seen });
     try std.testing.expectEqual(@as(usize, 5), seen.len);
 }
 
@@ -211,7 +211,7 @@ const Only = enum { one };
 
 test "a mergeTagged of one source runs it in place and needs no Io" {
     var seen: support.Recorder(zrx.Tagged(Only, u32)) = .{};
-    try program(mergeTagged(Only, .{ .one = range(u32, 0, 2) }), .{forEach(support.record(zrx.Tagged(Only, u32)))}).run(.{&seen});
+    try support.run(program(mergeTagged(Only, .{ .one = range(u32, 0, 2) }), .{forEach(support.record(zrx.Tagged(Only, u32)))}), .{&seen});
     try seen.expect(&.{ .{ .source = .one, .item = 0 }, .{ .source = .one, .item = 1 } });
 }
 
@@ -231,14 +231,14 @@ test "a system runs every program with the same dependencies" {
     var right: Numbers = .{};
     const totals = program(range(u32, 1, 5), pipe(.{ fold(@as(u32, 0), add), forEach(toLeft) }));
     const echo = program(range(u32, 7, 10), pipe(.{ queue(2), forEach(toRight) }));
-    try system(.{ totals, echo }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(system(.{ totals, echo }), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{10});
     try right.expect(&.{ 7, 8, 9 });
 }
 
 test "a merge of one source runs it in place and needs no Io" {
     var seen: Numbers = .{};
-    try program(merge(.{range(u32, 0, 3)}), pipe(.{forEach(record)})).run(.{&seen});
+    try support.run(program(merge(.{range(u32, 0, 3)}), pipe(.{forEach(record)})), .{&seen});
     try seen.expect(&.{ 0, 1, 2 });
 }
 
@@ -250,8 +250,8 @@ test "systems nest, and a system of one needs no Io" {
     const a = program(fromValue(@as(u32, 1)), pipe(.{forEach(toLeft)}));
     const b = program(fromValue(@as(u32, 2)), pipe(.{forEach(toRight)}));
     const c = program(fromValue(@as(u32, 3)), pipe(.{forEach(record)}));
-    try system(.{a}).run(.{Left{ .seen = &left }});
-    try system(.{ system(.{a}), system(.{ b, c }) }).run(.{ io, &seen, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(system(.{a}), .{Left{ .seen = &left }});
+    try support.run(system(.{ system(.{a}), system(.{ b, c }) }), .{ io, &seen, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 1, 1 });
     try right.expect(&.{2});
     try seen.expect(&.{3});
@@ -289,11 +289,11 @@ test "what a system is given replaces program defaults, and a resource among it 
     const b = program(fromValue(@as(u32, 2)), .{forEach(depotToRight)}).provide(.{zrx.resource(openOwn, null)});
 
     // By itself, a program acquires its default.
-    try a.run(.{ Left{ .seen = &left }, &opened });
+    try support.run(a, .{ Left{ .seen = &left }, &opened });
     try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
 
     // In the system, both use the one depot the system was given.
-    try system(.{ a, b }).run(.{ zrx.resource(openShared, closeShared), io, &opened, Left{ .seen = &left }, Right{ .seen = &right } });
+    try support.run(system(.{ a, b }), .{ zrx.resource(openShared, closeShared), io, &opened, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 99, 10 });
     try right.expect(&.{10});
     try std.testing.expectEqual(@as(u32, 1), opened.own.load(.seq_cst));
@@ -333,11 +333,11 @@ test "what a resource provides reaches the programs of a system as the value it 
     const sinks = .{ Left{ .seen = &left }, Right{ .seen = &right } };
 
     // The resource provides a `Shaped`. A program takes it for that value...
-    try a.run(.{zrx.resource(shape, null)} ++ sinks);
+    try support.run(a, .{zrx.resource(shape, null)} ++ sinks);
     // ...and so do the programs of a system, of one member and of two,
     // which are handed what the system resolved.
-    try system(.{a}).run(.{zrx.resource(shape, null)} ++ sinks);
-    try system(.{ a, system(.{b}) }).run(.{ io, zrx.resource(shape, null) } ++ sinks);
+    try support.run(system(.{a}), .{zrx.resource(shape, null)} ++ sinks);
+    try support.run(system(.{ a, system(.{b}) }), .{ io, zrx.resource(shape, null) } ++ sinks);
     try left.expect(&.{ 7, 7, 7 });
     try right.expect(&.{7});
 }
@@ -367,12 +367,18 @@ const Lookalike = struct {
     }
 };
 
+/// A rescue that needs nothing, for a system of several: starting tasks can
+/// fail, so such a system is run with one.
+fn unexpected(_: anyerror) void {
+    unreachable;
+}
+
 test "a system calls a runnable's run, whatever else the runnable declares" {
     var left: Numbers = .{};
     var right: Numbers = .{};
     const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
-    try system(.{Lookalike{}}).run(.{Left{ .seen = &left }});
-    try system(.{ Lookalike{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    system(.{Lookalike{}}).run(.{Left{ .seen = &left }});
+    system(.{ Lookalike{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, zrx.rescue(unexpected) });
     try left.expect(&.{ 1, 3 });
     try right.expect(&.{2});
 }
@@ -381,11 +387,39 @@ test "a runnable of the caller's own is given a system's dependencies as a tuple
     var left: Numbers = .{};
     var right: Numbers = .{};
     const b = program(fromValue(@as(u32, 2)), .{forEach(toRight)});
-    try system(.{Custom{}}).run(.{Left{ .seen = &left }});
-    try system(.{ Custom{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
-    // What it counted: one dependency, then three.
+    system(.{Custom{}}).run(.{Left{ .seen = &left }});
+    system(.{ Custom{}, b }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, zrx.rescue(unexpected) });
+    // What it counted: one dependency, then three. A rescue is not one.
     try left.expect(&.{ 1, 3 });
     try right.expect(&.{2});
+}
+
+/// Two runnables that say exactly what they are given. They run at the same
+/// time in a system of two, so each writes to a log of its own.
+const ExactLeft = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const ExactLeft, deps: struct { std.Io, Left, Right }) void {
+        deps[1].seen.add(7);
+    }
+};
+const ExactRight = struct {
+    pub const zrx_program = {};
+
+    pub fn run(_: *const ExactRight, deps: struct { std.Io, Left, Right }) void {
+        deps[2].seen.add(8);
+    }
+};
+
+test "a runnable that names its dependencies is given those and nothing else, with or without a rescue" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const sinks = .{ Left{ .seen = &left }, Right{ .seen = &right } };
+    system(.{ExactLeft{}}).run(.{io} ++ sinks);
+    system(.{ExactLeft{}}).run(.{io} ++ sinks ++ .{zrx.rescue(unexpected)});
+    system(.{ ExactLeft{}, ExactRight{} }).run(.{io} ++ sinks ++ .{zrx.rescue(unexpected)});
+    try left.expect(&.{ 7, 7, 7 });
+    try right.expect(&.{8});
 }
 
 fn patiently(clock: std.Io, out: anytype) !void {
@@ -401,39 +435,96 @@ test "the first failure in a system is returned" {
     var right: Numbers = .{};
     const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), forEach(toLeft) }));
     const slow = program(fromProducer(u32, patiently), pipe(.{forEach(toRight)}));
-    const result = system(.{ failing, slow }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    const result = support.run(system(.{ failing, slow }), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.Two, result);
     try left.expect(&.{ 0, 1 });
 }
 
-fn has(comptime names: []const [:0]const u8, comptime wanted: []const u8) bool {
-    for (names) |name| if (std.mem.eql(u8, name, wanted)) return true;
-    return false;
+/// What a rescue was called with, and how often. One for a program and one
+/// for the system it is in: they are called on different tasks.
+const Failure = struct { err: ?anyerror = null, calls: u32 = 0 };
+const SystemFailure = struct { err: ?anyerror = null, calls: u32 = 0 };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+    failure.calls += 1;
+}
+fn noteSystemFailure(failure: *SystemFailure, err: anyerror) void {
+    failure.err = err;
+    failure.calls += 1;
 }
 
-test "run has a precise error set" {
+test "a rescue takes a failure from beyond a queue" {
+    var left: Numbers = .{};
+    var failure: Failure = .{};
+    const queued = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    queued.run(.{ io, Left{ .seen = &left }, &failure, zrx.rescue(noteFailure) });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, failure);
+    try left.expect(&.{ 0, 1 });
+}
+
+/// Names every error it can be given. A program with a task boundary can be
+/// cancelled and can find that tasks cannot be started: both are among them.
+fn noteQueued(failure: *Failure, err: anytype) void {
+    failure.err = switch (err) {
+        error.Two => error.Two,
+        error.ConcurrencyUnavailable => error.ConcurrencyUnavailable,
+        error.Canceled => error.Canceled,
+    };
+    failure.calls += 1;
+}
+
+test "a rescue of a program with a task boundary is given exactly its errors" {
+    var left: Numbers = .{};
+    var failure: Failure = .{};
+    const queued = program(range(u32, 0, 10), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    queued.run(.{ io, Left{ .seen = &left }, &failure, zrx.rescue(noteQueued) });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, failure);
+}
+
+test "a system's rescue takes the failure of a member, in place of the member's own" {
     var left: Numbers = .{};
     var right: Numbers = .{};
-    const queued = program(range(u32, 0, 2), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    var member: Failure = .{};
+    var whole: SystemFailure = .{};
+    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), forEach(toLeft) })).provide(.{zrx.rescue(noteFailure)});
+    const slow = program(fromProducer(u32, patiently), pipe(.{forEach(toRight)}));
+    system(.{ failing, slow }).run(.{ io, Left{ .seen = &left }, Right{ .seen = &right }, &member, &whole, zrx.rescue(noteSystemFailure) });
+    // What the system is given replaces a member's default: the failure
+    // ended the system, and the system's rescue was given it.
+    try std.testing.expectEqual(SystemFailure{ .err = error.Two, .calls = 1 }, whole);
+    try std.testing.expectEqual(Failure{}, member);
+    try left.expect(&.{ 0, 1 });
+}
+
+test "a system of one program leaves the failure to that program's rescue" {
+    var left: Numbers = .{};
+    var member: Failure = .{};
+    const failing = program(range(u32, 0, 10), pipe(.{ map(failAtTwo), forEach(toLeft) })).provide(.{zrx.rescue(noteFailure)});
+    // Nothing is left for the system to fail with: this compiles without a
+    // rescue of its own.
+    system(.{failing}).run(.{ Left{ .seen = &left }, &member });
+    try std.testing.expectEqual(Failure{ .err = error.Two, .calls = 1 }, member);
+    try left.expect(&.{ 0, 1 });
+}
+
+test "what a run can fail with is exactly what its parts can" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const queued = program(range(u32, 0, 4), pipe(.{ queue(2), map(failAtTwo), forEach(toLeft) }));
+    const workers = program(range(u32, 0, 4), .{ zrx.concurrent(2, .{map(failAtTwo)}), forEach(toLeft) });
     const plain = program(range(u32, 0, 2), pipe(.{forEach(toRight)}));
     const deps = .{ io, Left{ .seen = &left }, Right{ .seen = &right } };
 
-    const Queued = @typeInfo(@TypeOf(queued.run(deps))).error_union.error_set;
-    const queued_names = comptime @typeInfo(Queued).error_set.error_names.?;
-    try std.testing.expectEqual(@as(usize, 3), queued_names.len);
-    try std.testing.expect(comptime has(queued_names, "Two") and has(queued_names, "Canceled") and has(queued_names, "ConcurrencyUnavailable"));
+    // A task boundary adds a cancellation and tasks that cannot be started.
+    inline for (.{ queued, workers, system(.{ queued, plain }) }) |failing| {
+        const rest = support.runLeft(failing, deps);
+        try std.testing.expectEqualStrings("Canceled ConcurrencyUnavailable Two ", rest.names());
+        try std.testing.expectEqual(error.Two, rest.err.?);
+    }
 
-    const workers = program(range(u32, 0, 2), .{ zrx.concurrent(2, .{map(failAtTwo)}), forEach(toLeft) });
-    const Concurrent = @typeInfo(@TypeOf(workers.run(deps))).error_union.error_set;
-    const concurrent_names = comptime @typeInfo(Concurrent).error_set.error_names.?;
-    try std.testing.expectEqual(@as(usize, 3), concurrent_names.len);
-    try std.testing.expect(comptime has(concurrent_names, "Two") and has(concurrent_names, "Canceled") and has(concurrent_names, "ConcurrencyUnavailable"));
-
-    const Plain = @typeInfo(@TypeOf(plain.run(deps))).error_union.error_set;
-    try std.testing.expectEqual(@as(usize, 0), comptime @typeInfo(Plain).error_set.error_names.?.len);
-
-    const Both = @typeInfo(@TypeOf(system(.{ queued, plain }).run(deps))).error_union.error_set;
-    try std.testing.expectEqual(@as(usize, 3), comptime @typeInfo(Both).error_set.error_names.?.len);
+    // Nothing can fail here: this compiles without a rescue.
+    plain.run(deps);
 }
 
 // --- supervision ------------------------------------------------------------
@@ -462,9 +553,9 @@ test "merge cancels a source that is not pushing once the pipe is done" {
     var seen: Numbers = .{};
     var idle: Idle = .{};
     const first = merge(.{ fromValue(@as(u32, 7)), fromProducer(u32, idleThenPush) });
-    try program(first, pipe(.{ take(1), forEach(record) })).run(.{ io, &seen, &idle });
+    try support.run(program(first, pipe(.{ take(1), forEach(record) })), .{ io, &seen, &idle });
     const second = merge(.{ fromProducer(u32, idleThenPush), fromValue(@as(u32, 8)) });
-    try program(second, pipe(.{ take(1), forEach(record) })).run(.{ io, &seen, &idle });
+    try support.run(program(second, pipe(.{ take(1), forEach(record) })), .{ io, &seen, &idle });
     try seen.expect(&.{ 7, 8 });
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
@@ -473,7 +564,7 @@ test "merge cancels a source that is not pushing once another source's push fail
     var seen: Numbers = .{};
     var idle: Idle = .{};
     const sources = merge(.{ fromValue(@as(u32, 2)), fromProducer(u32, idleThenPush) });
-    const result = program(sources, pipe(.{ map(failAtTwo), forEach(record) })).run(.{ io, &seen, &idle });
+    const result = support.run(program(sources, pipe(.{ map(failAtTwo), forEach(record) })), .{ io, &seen, &idle });
     try std.testing.expectError(error.Two, result);
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
@@ -484,9 +575,9 @@ test "a system returns a failure while another program is waiting" {
     var idle: Idle = .{};
     const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), forEach(toLeft) }));
     const deps = .{ io, &idle, Left{ .seen = &left }, Right{ .seen = &right } };
-    try std.testing.expectError(error.Two, system(.{ failing, idleProgram() }).run(deps));
-    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing }).run(deps));
-    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing, idleProgram() }).run(deps));
+    try std.testing.expectError(error.Two, support.run(system(.{ failing, idleProgram() }), deps));
+    try std.testing.expectError(error.Two, support.run(system(.{ idleProgram(), failing }), deps));
+    try std.testing.expectError(error.Two, support.run(system(.{ idleProgram(), failing, idleProgram() }), deps));
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
 
@@ -500,11 +591,11 @@ test "members never run on the supervising task, however busy the async pool is"
     var idle: Idle = .{};
     const failing = program(fromValue(@as(u32, 2)), pipe(.{ map(failAtTwo), forEach(toLeft) }));
     const deps = .{ backend.io(), &idle, Left{ .seen = &left }, Right{ .seen = &right } };
-    try std.testing.expectError(error.Two, system(.{ idleProgram(), failing }).run(deps));
+    try std.testing.expectError(error.Two, support.run(system(.{ idleProgram(), failing }), deps));
 
     var seen: Numbers = .{};
     const sources = merge(.{ fromProducer(u32, idleThenPush), fromValue(@as(u32, 7)) });
-    try program(sources, pipe(.{ take(1), forEach(record) })).run(.{ backend.io(), &seen, &idle });
+    try support.run(program(sources, pipe(.{ take(1), forEach(record) })), .{ backend.io(), &seen, &idle });
     try seen.expect(&.{7});
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
@@ -516,14 +607,14 @@ test "without concurrency, a system and a merge fail before anything runs" {
     var right: Numbers = .{};
     const a = program(fromValue(@as(u32, 1)), pipe(.{forEach(toLeft)}));
     const b = program(fromValue(@as(u32, 2)), pipe(.{forEach(toRight)}));
-    const together = system(.{ a, b }).run(.{ backend.io(), Left{ .seen = &left }, Right{ .seen = &right } });
+    const together = support.run(system(.{ a, b }), .{ backend.io(), Left{ .seen = &left }, Right{ .seen = &right } });
     try std.testing.expectError(error.ConcurrencyUnavailable, together);
     try left.expect(&.{});
     try right.expect(&.{});
 
     var seen: Numbers = .{};
     const merged = program(merge(.{ fromValue(@as(u32, 1)), fromValue(@as(u32, 2)) }), pipe(.{forEach(record)}));
-    try std.testing.expectError(error.ConcurrencyUnavailable, merged.run(.{ backend.io(), &seen }));
+    try std.testing.expectError(error.ConcurrencyUnavailable, support.run(merged, .{ backend.io(), &seen }));
     try seen.expect(&.{});
 }
 
@@ -532,7 +623,7 @@ test "running out of concurrency part-way cancels the members already started" {
     defer backend.deinit();
     var right: Numbers = .{};
     var idle: Idle = .{};
-    const result = system(.{ idleProgram(), idleProgram() }).run(.{ backend.io(), &idle, Right{ .seen = &right } });
+    const result = support.run(system(.{ idleProgram(), idleProgram() }), .{ backend.io(), &idle, Right{ .seen = &right } });
     try std.testing.expectError(error.ConcurrencyUnavailable, result);
     try std.testing.expect(!idle.woke_by_itself.load(.seq_cst));
 }
@@ -545,7 +636,7 @@ test "cancelling the caller cancels every member" {
     const Deps = struct { std.Io, *Idle, Right };
     const Caller = struct {
         fn run(members: *const Both, deps: Deps) ?anyerror {
-            members.run(deps) catch |err| return err;
+            support.run(members, deps) catch |err| return err;
             return null;
         }
     };

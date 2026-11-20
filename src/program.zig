@@ -43,9 +43,10 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
         }
 
         /// Runs with the given bindings, values and resources alike, and
-        /// with the defaults they do not replace.
-        pub fn run(self: *const Self, deps: anytype) !void {
-            return resources.run(self.bindings, deps, Run{ .program = self });
+        /// with the defaults they do not replace. It returns nothing: a
+        /// run whose failure nobody takes does not compile.
+        pub fn run(self: *const Self, deps: anytype) void {
+            return whole("program", resources.run(self.bindings, deps, Run{ .program = self }));
         }
 
         pub const zrx_own: Own = .{};
@@ -53,14 +54,14 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
         /// What a `system` calls for its members: `env` is an environment
         /// that is already resolved, so every element of it is a value,
         /// whatever its type looks like. The defaults still apply.
-        fn runResolved(self: *const Self, env: anytype) !void {
-            return resources.run(self.bindings, resources.resolved(env), Run{ .program = self });
+        fn runResolved(self: *const Self, env: anytype, comptime rescued: bool) !void {
+            return resources.run(self.bindings, resources.resolved(env, rescued), Run{ .program = self });
         }
 
         const Run = struct {
             program: *const Self,
 
-            pub fn call(body: @This(), env: anytype) !void {
+            pub fn call(body: @This(), env: anytype, comptime _: bool) !void {
                 return body.program.runBound(env);
             }
         };
@@ -116,6 +117,31 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
             return Frame.withLocals(Body{ .program = self, .env = env });
         }
     };
+}
+
+/// The end of a run: `result` is what it came to, and there must be nothing
+/// left in it to fail with. What is left is named, so that it can be taken.
+fn whole(comptime who: []const u8, result: anytype) void {
+    const Left = @typeInfo(@TypeOf(result)).error_union.error_set;
+    const names = comptime @typeInfo(Left).error_set.error_names orelse @compileError(
+        who ++ ": this run can fail with any error, because a handler or a source of it returns `anyerror`, and `run` returns nothing; " ++
+            "bind a rescue that takes every error: `rescue(handler)` with `fn (deps..., err: anyerror) void`",
+    );
+    if (comptime names.len != 0) @compileError(left: {
+        // In alphabetical order: the order of an inferred set is the
+        // compiler's, and differs from one build mode to the next.
+        var sorted = names[0..].*;
+        for (1..sorted.len) |i| {
+            var at = i;
+            while (at > 0 and std.mem.lessThan(u8, sorted[at], sorted[at - 1])) : (at -= 1) {
+                std.mem.swap([:0]const u8, &sorted[at], &sorted[at - 1]);
+            }
+        }
+        var text: []const u8 = who ++ ": this run can still fail with ";
+        for (sorted, 0..) |error_name, i| text = text ++ (if (i == 0) "" else ", ") ++ "`error." ++ error_name ++ "`";
+        break :left text ++ ", and `run` returns nothing; take it in the pipe (`recover`, `attempt`, `orElse`) or bind a `rescue(handler)` whose handler takes it";
+    });
+    result catch |err| switch (err) {};
 }
 
 fn Joined(comptime A: type, comptime B: type) type {
@@ -189,33 +215,36 @@ pub fn System(comptime Ps: type) type {
         pub const zrx_program = {};
 
         /// Runs with the given bindings. A resource among them is acquired
-        /// once, around all the programs.
-        pub fn run(self: *const @This(), deps: anytype) !void {
+        /// once, around all the programs. Like a program's `run`, it
+        /// returns nothing.
+        pub fn run(self: *const @This(), deps: anytype) void {
             const Run = struct {
                 system: *const System(Ps),
 
-                pub fn call(body: @This(), env: anytype) !void {
-                    return body.system.runBound(env);
+                pub fn call(body: @This(), env: anytype, comptime rescued: bool) !void {
+                    return body.system.runBound(env, rescued);
                 }
             };
-            return resources.run(.{}, deps, Run{ .system = self });
+            return whole("system", resources.run(.{}, deps, Run{ .system = self }));
         }
 
         pub const zrx_own: Own = .{};
 
         /// A system inside a system: nothing is left to resolve.
-        fn runResolved(self: *const @This(), env: anytype) !void {
-            return self.runBound(env);
+        fn runResolved(self: *const @This(), env: anytype, comptime rescued: bool) !void {
+            return self.runBound(env, rescued);
         }
 
-        fn runBound(self: *const @This(), env: anytype) !void {
+        /// `rescued`: whether a rescue stands outside this system. Its
+        /// programs are told, and leave their own out.
+        fn runBound(self: *const @This(), env: anytype, comptime rescued: bool) !void {
             const Env = @TypeOf(env);
-            if (members.len == 1) return runMember(&self.programs[0], env);
+            if (members.len == 1) return runMember(&self.programs[0], env, rescued);
             if (comptime !di.has(Env, Io)) @compileError("system: needs `std.Io` to run programs together; pass `io` to `run(.{ io, ... })`");
 
             const list = comptime blk: {
                 var types: [members.len]type = undefined;
-                for (members, 0..) |P, i| types[i] = Member(P, Env);
+                for (members, 0..) |P, i| types[i] = Member(P, Env, rescued);
                 break :blk types;
             };
             var group: @Tuple(&list) = undefined;
@@ -226,13 +255,13 @@ pub fn System(comptime Ps: type) type {
     };
 }
 
-fn Member(comptime P: type, comptime Env: type) type {
+fn Member(comptime P: type, comptime Env: type, comptime rescued: bool) type {
     return struct {
         program: *const P,
         env: Env,
 
         pub fn run(self: @This()) !void {
-            return runMember(self.program, self.env);
+            return runMember(self.program, self.env, rescued);
         }
     };
 }
@@ -251,7 +280,7 @@ fn isOwn(comptime M: type) bool {
 /// of this library takes it as resolved values. Any other runnable (a type
 /// with `zrx_program` and `run`) is given the tuple itself, as `run` always
 /// was, and never sees how this library marks one.
-fn runMember(member: anytype, env: anytype) !void {
+fn runMember(member: anytype, env: anytype, comptime rescued: bool) !void {
     const M = @TypeOf(member.*);
-    return if (comptime isOwn(M)) member.runResolved(env) else member.run(env);
+    return if (comptime isOwn(M)) member.runResolved(env, rescued) else member.run(env);
 }

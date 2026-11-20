@@ -25,7 +25,7 @@ fn process(storage: *[3][512]u8, input: []const u8, rules: app.records.Rules) !R
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
     var summary: Summary = .{};
-    try composition.processing.run(.{
+    try tryRun(composition.processing, .{
         rules,
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
@@ -73,7 +73,7 @@ test "exceeding the record limit is fatal and reports no summary" {
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
     var summary: Summary = .{};
-    const result = composition.processing.run(.{
+    const result = tryRun(composition.processing, .{
         app.records.Rules{ .max_records = 2 },
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
@@ -95,7 +95,7 @@ test "a failed record write fails the run before any summary" {
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
     var summary: Summary = .{};
-    const result = composition.processing.run(.{
+    const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
@@ -115,7 +115,7 @@ test "a failed summary write is an error even when every record was accepted" {
     var small: [4]u8 = undefined;
     var console: std.Io.Writer = .fixed(&small);
     var summary: Summary = .{};
-    const result = composition.processing.run(.{
+    const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
@@ -339,4 +339,19 @@ test "help and invalid usage create no output" {
     try simulate(temp.dir, &.{ "--input", "missing", "--output", "output", "--unknown" }, 2, "", "fatal: InvalidArguments\n" ++ app.commands.usage);
     try expectFile(temp.dir, "input", "");
     try std.testing.expectError(error.FileNotFound, temp.dir.openFile(io, "output", .{}));
+}
+
+/// What a run failed with. `run` returns nothing: a failure goes to a
+/// rescue, and a test binds one that hands it back.
+const Failure = struct { err: ?anyerror = null };
+
+fn noteFailure(failure: *Failure, err: anyerror) void {
+    failure.err = err;
+}
+
+/// Runs `runnable` and returns what it failed with.
+fn tryRun(runnable: anytype, deps: anytype) anyerror!void {
+    var failure: Failure = .{};
+    runnable.run(deps ++ .{ &failure, zrx.rescue(noteFailure) });
+    if (failure.err) |err| return err;
 }

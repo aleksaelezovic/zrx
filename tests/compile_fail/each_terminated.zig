@@ -18,12 +18,12 @@ fn evenOnly(value: u32) error{Odd}!u32 {
     if (value % 2 == 1) return error.Odd;
     return value;
 }
-fn zero(_: error{Odd}, _: u32) u32 {
+fn zero(_: zrx.Failed(error{Odd}, u32)) u32 {
     return 0;
 }
 fn ignore(_: anytype) void {}
 
 // What the sub-pipe emits is what goes on: it cannot end in a sink.
 test {
-    try program(range(u32, 0, 3), .{ each(below, .{forEach(ignore)}), forEach(ignore) }).run(.{});
+    program(range(u32, 0, 3), .{ each(below, .{forEach(ignore)}), forEach(ignore) }).run(.{});
 }

@@ -15,5 +15,5 @@ fn isEven(value: u32) bool {
 fn ignore(_: u32) void {}
 
 test {
-    try program(range(u32, 0, 3), pipe(.{ zrx.flatten(), forEach(ignore) })).run(.{});
+    program(range(u32, 0, 3), pipe(.{ zrx.flatten(), forEach(ignore) })).run(.{});
 }
