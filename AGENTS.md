@@ -288,12 +288,20 @@ to this file; edit `AGENTS.md`, not copies.
   do with one; the extension has no operator. What is written is a
   `Pattern(Node)`: the nodes that match are private types, and a pattern is
   told by a private `Mark`, not by a name. Matching goes left to right and
-  nothing is tried twice (`repeat` gives nothing back, `oneOf` takes its
-  first choice for good). That is on purpose and is not to be softened: it
-  is the scanner one writes by hand, which is what the `lean_pattern_*`
-  fixtures compare with, and it has no text that takes exponentially long,
-  which matters where the text is a request's path. It is also why this is
-  not called a regular expression. What that rule makes unmatchable is a
+  what matched is not given back (`repeat` gives nothing back, `oneOf`
+  takes its first choice for good). That is on purpose and is not to be
+  softened: it is the scanner one writes by hand, which is what the
+  `lean_pattern_*` fixtures compare with, and it has no text that takes
+  exponentially long, which matters where the text is a request's path.
+  It is also why this is not called a regular expression. Do not say that
+  nothing is read twice, or that the cost is that of the hand-written
+  scanner on any text: the first draft said both, and a review measured
+  the square of the length. A part that fails has been read, and the next
+  choice of a `oneOf`, or what follows an `optional`, reads it again, once
+  per round inside a `repeat`. The guide says so and shows what to write.
+  It is not a compile error, because it cannot be seen: two choices that
+  share a beginning and take the same bytes are linear. Writing the
+  shared part once is what a planning pass would do. What that rule makes unmatchable is a
   compile error where it can be seen (a part behind a `repeat` that took
   its first bytes, a choice behind its own beginning, a choice behind one
   that matches nothing): say nothing where it cannot be seen, rather than

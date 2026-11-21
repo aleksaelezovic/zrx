@@ -1043,14 +1043,13 @@ holds for a text whose numbers it could not hand out.
 
 ### How a pattern matches
 
-From left to right, and nothing is tried twice:
+From left to right, and what has matched is not given back:
 
 - `repeat` takes as much as it can and gives nothing back.
 - `oneOf` takes its first choice that matches, for good.
 
-That is the scanner one writes by hand, and it is why a pattern costs about
-what that scanner costs, on a text of any shape. It is *not* a regular
-expression, which goes back and tries again:
+That is the scanner one writes by hand. It is *not* a regular expression,
+which goes back and tries again:
 `seq(.{ repeat(lower, .{ .max = 3 }), "x" })` does not hold for `abx`,
 because the `repeat` took the `x`. End a `repeat` before the byte that
 follows it: `repeat(except(set("/")), .{})`.
@@ -1062,6 +1061,33 @@ taken, a choice behind another that is its beginning (`"info"` before
 
 Patterns work on bytes. A string holds whatever bytes it holds, UTF-8
 included; the sets and classes are single bytes.
+
+### What a pattern costs
+
+A part that matches is read once. A part that does not match has been read
+for nothing: the next choice of a `oneOf`, and what follows an `optional`,
+begin where it began. Mostly that is a byte or a word. It adds up where such
+a part reads far before it fails and stands inside a `repeat`, which reads
+it again in every round:
+
+```zig
+const shout = seq(.{ repeat(lower, .{ .min = 1 }), "!" });
+const slow = repeat(oneOf(.{ shout, lower }), .{});
+```
+
+On a text of letters, `shout` reads to the end, finds no `!`, and `lower`
+takes one letter; the next round does the same from one letter further.
+That is the square of the length: twice the text takes four times as long.
+Nothing rewrites a pattern for you, so write what the choices share once:
+
+```zig
+const fast = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});
+```
+
+It describes the same texts and reads each byte once. Where the shared part
+cannot be written once, give the `repeat` inside the choice a `.max`: a
+round then reads no further than that. Either way, bound the length of a
+text that comes from outside before a pattern is put to it.
 
 ## HTTP
 

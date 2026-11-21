@@ -107,6 +107,24 @@ test "repeat matches between its least and its most" {
     try expectAll(repeat(word, .{ .min = 2, .max = 3 }), false, &.{ "a,", "a,b,c,d,", "a,b" });
 }
 
+test "a bound of repeat that no text reaches is a bound like any other" {
+    // In bytes, each of these is more than a `usize` counts.
+    const most = std.math.maxInt(usize);
+    const half = most / 2 + 1;
+    inline for (.{ most, half }) |bound| {
+        try expectAll(repeat("ab", .{ .max = bound }), true, &.{ "", "ab", "abab" });
+        try expectAll(repeat("ab", .{ .max = bound }), false, &.{ "a", "aba" });
+        try expectAll(repeat("ab", .{ .min = bound }), false, &.{ "", "ab", "abab" });
+        try expectAll(repeat("ab", .{ .min = bound, .max = bound }), false, &.{ "", "abab" });
+        const twice = repeat(digit, .{ .min = bound, .max = bound });
+        try expectAll(seq(.{ twice, twice }), false, &.{ "", "12" });
+    }
+    try expectAll(repeat(digit, .{ .max = most }), true, &.{ "", "2026" });
+    const word = seq(.{ repeat(lower, .{ .min = 1 }), "," });
+    try expectAll(repeat(word, .{ .max = most }), true, &.{ "", "a,bc," });
+    try expectAll(repeat(word, .{ .min = most }), false, &.{ "", "a,bc," });
+}
+
 test "a date is three runs of digits of fixed length" {
     const date = seq(.{
         repeat(digit, .{ .min = 4, .max = 4 }),
@@ -128,7 +146,7 @@ test "oneOf takes the first choice that matches" {
     try expectAll(sign, false, &.{ "+", "--5", "5-" });
 }
 
-test "nothing is tried twice: a repeat gives nothing back and a choice is taken for good" {
+test "what matched is not given back: a repeat keeps what it took and a choice is taken for good" {
     // A regular expression would give the `x` back and match "abx".
     const greedy = seq(.{ repeat(lower, .{ .max = 3 }), "x" });
     try expectAll(greedy, true, &.{"abcx"});
@@ -147,6 +165,23 @@ test "a text that makes a backtracking matcher try every split is one pass here"
     try std.testing.expect(!ask(p, &text));
     text[4096] = 'b';
     try std.testing.expect(ask(p, &text));
+}
+
+test "what two choices share can be written once, and describes the same texts" {
+    // The first reads the rest of the letters in every round before it
+    // settles for one: the square of the length. The second reads them once.
+    const shout = seq(.{ repeat(lower, .{ .min = 1 }), "!" });
+    const twice = repeat(oneOf(.{ shout, lower }), .{});
+    const once = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});
+    const texts: []const []const u8 = &.{ "", "a", "a!", "ab!c", "ab!c!", "a!b!c", "abc", "!", "a!!", "!a", "a!b!!", "aB", "a! " };
+    for (texts) |text| {
+        std.testing.expectEqual(ask(twice, text), ask(once, text)) catch |err| {
+            std.debug.print("text: \"{s}\"\n", .{text});
+            return err;
+        };
+    }
+    try expectAll(once, true, &.{ "", "a", "ab!c!" });
+    try expectAll(once, false, &.{ "!", "a!!", "aB" });
 }
 
 // --- numbers -----------------------------------------------------------------------

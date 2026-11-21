@@ -13,12 +13,19 @@
 //! `?Extracted(pattern)`, a predicate that finds a value: `when`, `require`
 //! and the last place of `all` take it.
 //!
-//! Matching goes from left to right and nothing is tried twice. `repeat`
-//! takes as much as it can and gives nothing back; `oneOf` takes its first
-//! choice that matches, for good. That is the scanner one writes by hand,
-//! and it is not a regular expression: what such a scanner cannot match, a
-//! pattern cannot either. Where a pattern can be seen never to match for
-//! that reason, it does not compile.
+//! Matching goes from left to right and what has matched is not given
+//! back. `repeat` takes as much as it can and gives nothing back; `oneOf`
+//! takes its first choice that matches, for good. That is the scanner one
+//! writes by hand, and it is not a regular expression: what such a scanner
+//! cannot match, a pattern cannot either. Where a pattern can be seen never
+//! to match for that reason, it does not compile.
+//!
+//! What did not match has still been read. The next choice of a `oneOf`,
+//! and what follows an `optional`, begin where the part that failed began,
+//! and inside a `repeat` that is once for every round: a choice that reads
+//! far before it fails makes a long text cost the square of its length.
+//! Nothing here factors what two choices share; the guide says how to write
+//! it once.
 //!
 //! Nothing here is known to the core: a pattern is a composite handler.
 const std = @import("std");
@@ -285,7 +292,9 @@ pub fn seq(comptime parts: anytype) type {
         pub const ends_before: ?Bytes = Ns[Ns.len - 1].ends_before;
         pub const width: ?usize = blk: {
             var sum: usize = 0;
-            for (Ns) |N| sum += N.width orelse break :blk null;
+            // Saturating, here and in `repeat`: a width or a bound that
+            // does not fit a `usize` is more than any text has.
+            for (Ns) |N| sum +|= N.width orelse break :blk null;
             break :blk sum;
         };
         pub const kept: []const Kept = blk: {
@@ -377,7 +386,7 @@ pub fn repeat(comptime p: anytype, comptime count: Count) type {
         pub const first: Bytes = N.first;
         /// Without a maximum, it stops only at a byte its pattern is not.
         pub const ends_before: ?Bytes = if (count.max == null and @hasDecl(N, "members")) N.members else null;
-        pub const width: ?usize = if (count.max == count.min) (if (N.width) |each| each * count.min else null) else null;
+        pub const width: ?usize = if (count.max == count.min) (if (N.width) |each| each *| count.min else null) else null;
         pub const kept: []const Kept = &.{};
 
         pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
@@ -385,11 +394,11 @@ pub fn repeat(comptime p: anytype, comptime count: Count) type {
             if (comptime N.width) |each| {
                 // Rounds are counted by how far it got, as by hand.
                 if (comptime count.max) |max| {
-                    while (end - at < max * each) end = N.match(input, end, {}) orelse break;
+                    while (end - at < max *| each) end = N.match(input, end, {}) orelse break;
                 } else {
                     while (true) end = N.match(input, end, {}) orelse break;
                 }
-                return if (end - at >= count.min * each) end else null;
+                return if (end - at >= count.min *| each) end else null;
             }
             var rounds: usize = 0;
             if (comptime count.max) |max| {
