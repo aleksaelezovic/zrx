@@ -16,6 +16,14 @@ pub const Stop = struct {
         var event: Io.Event = .unset;
         return event.wait(io);
     }
+
+    /// `wait` with an end: `error.Timeout` once `timeout` is over, and for
+    /// a wake that is neither, as `std.Io.Event.waitTimeout` reports one.
+    pub fn waitTimeout(stop: Stop, io: Io, timeout: Io.Timeout) Io.Event.WaitTimeoutError!void {
+        if (stop.signal) |signal| return signal.event.waitTimeout(signal.io, timeout);
+        var event: Io.Event = .unset;
+        return event.waitTimeout(io, timeout);
+    }
 };
 
 pub const Signal = struct {

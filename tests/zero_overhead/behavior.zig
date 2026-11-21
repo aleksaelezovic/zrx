@@ -148,6 +148,46 @@ test "takenWhile" {
     };
 }
 
+/// An `Io` whose clocks say the next of a list of times, in milliseconds,
+/// every time one is read. One at a time: its state is global.
+const Scripted = struct {
+    var vtable: std.Io.VTable = undefined;
+    var times: []const i64 = &.{};
+    var read: usize = 0;
+
+    fn over(script: []const i64) std.Io {
+        vtable = std.testing.io.vtable.*;
+        vtable.now = now;
+        times = script;
+        read = 0;
+        return .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
+    }
+
+    fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        defer read += 1;
+        return std.Io.Timestamp.zero.addDuration(.fromMilliseconds(times[read % times.len]));
+    }
+};
+
+test "stamped, throttled" {
+    // With a window of 100 ms, the items read at 0, 100, 200, 450, 550, 700
+    // and 900 pass.
+    const script = [_]i64{ 0, 40, 100, 130, 199, 200, 450, 460, 549, 550, 700, 701, 900 };
+    for (inputs) |items| inline for (.{ cases.stamped, cases.throttled }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, items, Scripted.over(&script), &with);
+        case(false, items, Scripted.over(&script), &without);
+        try std.testing.expectEqual(without, with);
+    };
+    var passed: u64 = 0;
+    cases.throttled(true, inputs[2], Scripted.over(&script), &passed);
+    try std.testing.expectEqual(@as(u64, 1 + 3 + 6 + 7 + 10 + 11 + 13), passed);
+    var summed: u64 = 0;
+    cases.stamped(true, inputs[1], Scripted.over(script[1..]), &summed);
+    try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms + 7), summed);
+}
+
 test "batched" {
     for (inputs) |items| {
         var with: u64 = 99;

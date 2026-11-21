@@ -111,6 +111,7 @@ pub const ext = struct {
     pub const json = @import("ext/json.zig");
     pub const http = @import("ext/http.zig");
     pub const pattern = @import("ext/pattern.zig");
+    pub const time = @import("ext/time.zig");
 };
 
 // For writing operators, sources and handlers of your own.

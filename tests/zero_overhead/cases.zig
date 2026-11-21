@@ -544,6 +544,67 @@ export fn same_take_while(ptr: [*]const u32, len: usize, below: u32, out: *u64) 
     takenWhile(exported_with_zrx, ptr[0..len], below, out);
 }
 
+// --- time (zrx.ext.time) --------------------------------------------------------------------------
+
+const time = zrx.ext.time;
+
+/// The low bits of a time: enough to show that the time read was the one used.
+fn low(at: std.Io.Timestamp) u64 {
+    return @truncate(@as(u96, @bitCast(at.nanoseconds)));
+}
+
+fn addStamped(sum: u64, pair: time.Stamped(u32)) u64 {
+    return sum +% low(pair.at) +% pair.item;
+}
+
+fn stampedNow(io: std.Io, value: u32) time.Stamped(u32) {
+    return .{ .at = std.Io.Clock.awake.now(io), .item = value };
+}
+
+/// Reading the clock is a call through the `std.Io` in both variants; what
+/// must match is everything around it. The pair is built by a function by
+/// hand as well: written in place, the slot the clock writes its answer to
+/// is declared under another type, which is all that then differs.
+pub fn stamped(comptime with_zrx: bool, items: []const u32, io: std.Io, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(time.stamp(.awake)), fold(@as(u64, 0), addStamped), forEach(store) });
+        run(program(fromSlice(items), total), .{ io, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| sum = addStamped(sum, stampedNow(io, value));
+        out.* = sum;
+    }
+}
+
+export fn same_time_stamp(ptr: [*]const u32, len: usize, io: *const std.Io, out: *u64) void {
+    stamped(exported_with_zrx, ptr[0..len], io.*, out);
+}
+
+pub const throttle_window: std.Io.Duration = .fromMilliseconds(100);
+
+/// Both keep the end of the window in 64 bits, as the stage does and says
+/// why. The `@intCast` is an assumption in this build mode, not code.
+pub fn throttled(comptime with_zrx: bool, items: []const u32, io: std.Io, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ time.throttle(throttle_window), fold(@as(u64, 0), add), forEach(store) });
+        run(program(fromSlice(items), total), .{ io, Result{ .out = out } });
+    } else {
+        var sum: u64 = 0;
+        var open_at: i64 = std.math.minInt(i64);
+        for (items) |value| {
+            const now: i64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+            if (now < open_at) continue;
+            open_at = now + @as(i64, @intCast(throttle_window.nanoseconds));
+            sum +%= value;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_time_throttle(ptr: [*]const u32, len: usize, io: *const std.Io, out: *u64) void {
+    throttled(exported_with_zrx, ptr[0..len], io.*, out);
+}
+
 // --- batch --------------------------------------------------------------------------------------
 
 /// The largest item of a group, times how many items the group has.

@@ -69,6 +69,19 @@ export fn zrx_cross_file_bytes(io: *const std.Io, path: [*:0]const u8) bool {
     return true;
 }
 
+export fn zrx_cross_time(io: *const std.Io) bool {
+    const time = zrx.ext.time;
+    const beat = program(time.ticks(.fromSeconds(1)), pipe(.{
+        zrx.queue(1),
+        time.throttle(.fromSeconds(5)),
+        zrx.map(time.stamp(.real)),
+        zrx.take(1),
+        zrx.drain(),
+    }));
+    if (!ran(beat, .{io.*})) return false;
+    return true;
+}
+
 export fn zrx_cross_timing(io: *const std.Io, first: u32, end: u32) bool {
     const batches = program(zrx.range(u32, first, end), pipe(.{
         zrx.batchWithin(1000, .fromSeconds(60)),
