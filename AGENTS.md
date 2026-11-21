@@ -278,6 +278,37 @@ to this file; edit `AGENTS.md`, not copies.
   always called with its options, and there is no sink that hides
   `write(Role, "{f}\n")`. No general serialization layer for one format.
   Decoding is not there.
+- **A text pattern is a handler, and it does not go back.**
+  `src/ext/pattern.zig`, exported as `zrx.ext.pattern` and analyzed only
+  when referenced, is written against the handler contract alone. A
+  pattern is a composite handler as `gt(80)` is, a predicate on one
+  `[]const u8` item: there is no `match(p)` that makes a handler of it.
+  One that extracts answers `?Extracted(p)`, a predicate that finds a
+  value, and everything else follows from what `when`, `require` and `all`
+  do with one; the extension has no operator. What is written is a
+  `Pattern(Node)`: the nodes that match are private types, and a pattern is
+  told by a private `Mark`, not by a name. Matching goes left to right and
+  nothing is tried twice (`repeat` gives nothing back, `oneOf` takes its
+  first choice for good). That is on purpose and is not to be softened: it
+  is the scanner one writes by hand, which is what the `lean_pattern_*`
+  fixtures compare with, and it has no text that takes exponentially long,
+  which matters where the text is a request's path. It is also why this is
+  not called a regular expression. What that rule makes unmatchable is a
+  compile error where it can be seen (a part behind a `repeat` that took
+  its first bytes, a choice behind its own beginning, a choice behind one
+  that matches nothing): say nothing where it cannot be seen, rather than
+  guess. Types are in the pattern (`int(T)`), so the struct is inferred and
+  a number that does not fit does not match: a draft that converted after
+  matching had a route take a path whose number then failed to parse.
+  `std` has no matcher, so this is the one extension that is not a layer
+  over `std`: keep it to bytes, with no Unicode classes. Not there, and
+  back only by decision: a format string read backwards (`"/items/{id}"`
+  would be a string language of our own), going back, finding the places a
+  pattern matches inside a text, and items that are not `[]const u8` (a
+  `Line` is a value; text extracted from it would point into a copy). The
+  fixtures are `lean`: a pattern carries a position through its parts. A
+  pass that plans a pattern before matching may close that later, inside
+  the extension, without changing what a user writes.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`

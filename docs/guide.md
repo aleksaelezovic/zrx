@@ -969,6 +969,100 @@ reports, which for `std.Io.Reader` is `error.ReadFailed`.
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
 
+## Text patterns
+
+`zrx.ext.pattern` says what a text looks like, as a value built from parts,
+and what to take out of it. It is an extension: handlers written against the
+public contract, compiled only when a program uses them.
+
+```zig
+const pattern = zrx.ext.pattern;
+const seq = pattern.seq;
+const oneOf = pattern.oneOf;
+const repeat = pattern.repeat;
+const optional = pattern.optional;
+const extract = pattern.extract;
+const int = pattern.int;
+
+/// A line of the log: four columns between tabs.
+const record = seq(.{
+    extract(.ts_ms, int(u64)),
+    "\t",
+    extract(.level, oneOf(.{ "info", "warn", "error" })),
+    "\t",
+    extract(.service, repeat(oneOf(.{ pattern.alnum, pattern.set("-_") }), .{ .min = 1 })),
+    "\t",
+    extract(.latency_ms, int(u32)),
+    optional("\r"),
+});
+
+fn slowest(worst: u32, entry: pattern.Extracted(record)) u32 {
+    return @max(worst, entry.latency_ms);
+}
+
+const report = pipe(.{
+    recover(error{InvalidRecord}, rejections),
+    map(require(record, error.InvalidRecord)),
+    fold(@as(u32, 0), slowest),
+    print(zrx.Stdout, "{d}\n"),
+});
+```
+
+A pattern is a handler, as `gt(80)` is: a predicate on one `[]const u8`
+item. It holds when the pattern describes the *whole* text, not a part of
+it. What it answers depends on whether it extracts:
+
+- A pattern without `extract` answers `bool`: `filter(service_name)`.
+- A pattern with `extract` finds a value (see [route](#route)). It answers
+  `?Extracted(pattern)`, a struct with a field for each `extract`. `require`
+  turns that into the struct or an error, as above. A case of a `route` is
+  given it with the text: `when(record, .{ ... })`. It goes last in `all`,
+  and after the handler that yields the text in `compose`.
+
+| | |
+|---|---|
+| `"text"` | A string among the parts of a pattern is that text. |
+| `set("-_")`, `between('a', 'f')`, `except(set)` | One byte: any of those named, any from the first to the last, any that the set is not. |
+| `byte`, `digit`, `lower`, `upper`, `alpha`, `alnum` | One byte: any, or of that ASCII class. |
+| `seq(.{ a, b })` | Each part, one after the other. |
+| `oneOf(.{ a, b })` | The first choice that matches. |
+| `repeat(p, .{ .min = 1, .max = 3 })` | `p` as often as it matches, between `min` (0 unless given) and `max` (no limit unless given) times. |
+| `optional(p)` | `p`, or nothing where it does not match. |
+| `int(T)` | A decimal number that fits the integer type `T`, with a `-` before it when `T` is signed. |
+| `extract(.name, p)` | `p`, with what it matched kept under `name`. |
+| `Extracted(pattern)` | The type of what a pattern extracts. A handler that names its item writes it; `anytype` takes it too. |
+
+The struct is read off the pattern. A field is the matched text
+(`[]const u8`), or a `T` where the part is an `int(T)`. It is optional where
+its `extract` is inside `optional` or `oneOf`, and null when that part is not
+in the text. The text of a field points into the item: use it while the item
+lives.
+
+A number that does not fit its type does not match. So a pattern never
+holds for a text whose numbers it could not hand out.
+
+### How a pattern matches
+
+From left to right, and nothing is tried twice:
+
+- `repeat` takes as much as it can and gives nothing back.
+- `oneOf` takes its first choice that matches, for good.
+
+That is the scanner one writes by hand, and it is why a pattern costs about
+what that scanner costs, on a text of any shape. It is *not* a regular
+expression, which goes back and tries again:
+`seq(.{ repeat(lower, .{ .max = 3 }), "x" })` does not hold for `abx`,
+because the `repeat` took the `x`. End a `repeat` before the byte that
+follows it: `repeat(except(set("/")), .{})`.
+
+Where a pattern can be seen never to match for that reason, it does not
+compile: a part that begins only with bytes the `repeat` before it has
+taken, a choice behind another that is its beginning (`"info"` before
+`"information"`), a choice behind one that can match nothing.
+
+Patterns work on bytes. A string holds whatever bytes it holds, UTF-8
+included; the sets and classes are single bytes.
+
 ## HTTP
 
 `zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a
@@ -1346,8 +1440,9 @@ case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
 Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
-`same`; `take`, `batch`, the handler combinators, `attempt` and a `recover`
-whose path has stages of its own are `lean`, each with the reason next to it.
+`same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
+whose path has stages of its own and the text patterns are `lean`, each with
+the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it
@@ -1373,6 +1468,11 @@ gracefully, is proposed in [the segments spec](spec-segments.md).
 A resource acquired for one item (opened before the item's sub-pipe and
 released after it) is not here. `each` covers the case where the item
 becomes a stream.
+
+Text patterns test a `[]const u8`. A `Line` is a value that holds its
+bytes, so a pattern cannot be put to one yet: text extracted from it would
+point into a copy. Finding every place a pattern matches within a text is
+not there either; a pattern describes the whole of it.
 
 HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
