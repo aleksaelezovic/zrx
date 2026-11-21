@@ -21,10 +21,30 @@ terms and nothing after the dot. Comments and empty lines are not copied.
 |---|---|
 | Exit 0 | Every line was a statement, a comment or empty. |
 | Exit 1 | Some line was none of those; the others are still written. |
-| Exit 2 | The run failed: `fatal: <error>` on stderr, and no output file. |
+| Exit 2, no output file | The input could not be read to its end, or the output could not be written: `fatal: <error>` on stderr. |
+| Exit 2, with the output file | The file was read and the output published, and then the summary could not be written to stdout: `fatal: WriteFailed`. |
 
 The output is published once the input has been read to its end, and is not
-written over a file that exists. A line longer than 512 bytes fails the run.
+written over a file that exists. The summary is printed after that, so a
+failure to print it leaves the output where it is. A line longer than 512
+bytes fails the run.
+
+## Where it differs from the specification
+
+This is a check of syntax written as patterns, not a conforming parser.
+
+- **Line ends.** A line ends at a line feed, and one carriage return before
+  it is taken. The specification also lets a bare carriage return end a
+  line; here two statements with only that between them are one line, and
+  no statement.
+- **Names of blank nodes.** Patterns work on bytes. Any byte from 0x80 is
+  taken as a letter, which is more than the ranges of code points the
+  grammar allows.
+- **Absolute IRIs.** An IRI must begin with a scheme and a colon, so
+  `<relative>` is refused. Nothing more of an IRI's own grammar is checked.
+- **Escapes.** An escaped code point such as `\u00E9` is checked for its
+  form and written back as it was, not decoded.
+- **Triple terms** are those of RDF 1.2, as objects only, to a written depth.
 
 ## The grammar is the pattern
 
@@ -32,9 +52,10 @@ written over a file that exists. A line longer than 512 bytes fails the run.
 [text patterns](../../../docs/guide.md#text-patterns), rule by rule:
 
 ```zig
-/// `<http://example.org/s>`
+/// `<http://example.org/s>`: a scheme, a colon, and the rest.
+const scheme = seq(.{ alpha, repeat(oneOf(.{ alnum, set("+-.") }), .{}) });
 const iri_byte = except(oneOf(.{ between(0, ' '), set("<>\"{}|^`\\") }));
-const iri = seq(.{ "<", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
+const iri = seq(.{ "<", scheme, ":", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
 
 /// `subject predicate object graph? .`
 pub const statement = seq(.{
@@ -119,17 +140,12 @@ extracted: an `extract` at every level would be the same field many times.
 
 Nothing is worked around. What it shows is missing:
 
-- **Unicode.** Patterns work on bytes. The names of blank nodes take any
-  byte from 0x80 as a letter, which is more than the grammar's ranges of
-  code points allow.
 - **Two cases, one total.** The cases of the route end separately, so one
   `fold` cannot count both. The counters are kept by `tap` through a
   `*Summary`, and `execute` runs a second program of one item, the summary,
   to print it.
 - **The parts of a nested term.** A pattern extracts a flat struct. A tree
   of triple terms would need somewhere to put it.
-- **Escapes are checked, not decoded.** `é` is accepted and written
-  back as it was.
 
 ## Checks
 

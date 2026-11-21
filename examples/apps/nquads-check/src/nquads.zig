@@ -42,9 +42,11 @@ const echar = seq(.{ "\\", set("tbnrf\"'\\") });
 
 // --- terms -----------------------------------------------------------------------
 
-/// `<http://example.org/s>`
+/// `<http://example.org/s>`. An IRI here is absolute: it begins with a
+/// scheme and a colon, which a relative one such as `<s>` has not.
+const scheme = seq(.{ alpha, repeat(oneOf(.{ alnum, set("+-.") }), .{}) });
 const iri_byte = except(oneOf(.{ between(0, ' '), set("<>\"{}|^`\\") }));
-const iri = seq(.{ "<", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
+const iri = seq(.{ "<", scheme, ":", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
 
 /// `_:b1`, `_:a.b`. Bytes of UTF-8 beyond ASCII are taken as letters.
 const name_start = oneOf(.{ alnum, set("_:"), between(0x80, 0xFF) });
@@ -159,47 +161,47 @@ test "a statement is three terms, or four with its graph" {
     try std.testing.expectEqualStrings("<http://ex.org/p>", quad.predicate.text());
     try std.testing.expectEqualStrings("\"chat\"@fr-BE", quad.object.text());
     try std.testing.expectEqualStrings("<http://ex.org/g>", quad.graph.?.text());
-    try std.testing.expectEqual(null, (try read("_:a <p> _:b .")).quad.?.graph);
+    try std.testing.expectEqual(null, (try read("_:a <x:p> _:b .")).quad.?.graph);
 }
 
 test "a statement is written the one way whatever stood between its terms" {
-    try expectTidy("<s> <p> <o> .", "<s> <p> <o> .");
-    try expectTidy("<s> <p> <o> .", "\t<s>   <p>\t<o>  .  # said twice\r");
-    try expectTidy("<s> <p> <o> .", "<s><p><o>.");
-    try expectTidy("_:a <p> _:b _:g .", "_:a <p> _:b _:g.");
-    try expectTidy("_:a.b <p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string> .", "_:a.b <p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string>.");
-    try expectTidy("<s> <p> \"\" <g> .", "<s> <p> \"\" <g> .");
-    try expectTidy("<s> <p> \"caf\xc3\xa9 # no comment\" .", "<s> <p> \"caf\xc3\xa9 # no comment\" .");
+    try expectTidy("<x:s> <x:p> <x:o> .", "<x:s> <x:p> <x:o> .");
+    try expectTidy("<x:s> <x:p> <x:o> .", "\t<x:s>   <x:p>\t<x:o>  .  # said twice\r");
+    try expectTidy("<x:s> <x:p> <x:o> .", "<x:s><x:p><x:o>.");
+    try expectTidy("_:a <x:p> _:b _:g .", "_:a <x:p> _:b _:g.");
+    try expectTidy("_:a.b <x:p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string> .", "_:a.b <x:p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string>.");
+    try expectTidy("<x:s> <x:p> \"\" <x:g> .", "<x:s> <x:p> \"\" <x:g> .");
+    try expectTidy("<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .", "<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .");
 }
 
 test "a triple term is an object, and may hold another to a depth" {
-    try expectTidy("<s> <says> <<( <a> <p> \"c\" )>> .", "<s> <says> <<( <a> <p> \"c\" )>> .");
-    try expectTidy("<s> <says> <<(<a> <p> <<(_:b <q> <<(<c> <r> <<(<d> <t> <e>)>>)>>)>>)>> <g> .", "<s> <says> <<(<a> <p> <<(_:b <q> <<(<c> <r> <<(<d> <t> <e>)>>)>>)>>)>> <g> .");
+    try expectTidy("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .", "<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .");
+    try expectTidy("<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .", "<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .");
     for ([_][]const u8{
         // One deeper than `max_nesting`.
-        "<s> <says> <<(<a> <p> <<(<b> <q> <<(<c> <r> <<(<d> <t> <<(<e> <u> <f>)>>)>>)>>)>>)>> .",
-        "<s> <says> <<( <a> <p> \"c\" .",
-        "<<( <a> <p> <c> )>> <says> <o> .",
-        "<s> <says> <<( \"a\" <p> <c> )>> .",
+        "<x:s> <x:says> <<(<x:a> <x:p> <<(<x:b> <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <<(<x:e> <x:u> <x:f>)>>)>>)>>)>>)>> .",
+        "<x:s> <x:says> <<( <x:a> <x:p> \"c\" .",
+        "<<( <x:a> <x:p> <x:c> )>> <x:says> <x:o> .",
+        "<x:s> <x:says> <<( \"a\" <x:p> <x:c> )>> .",
     }) |text| try std.testing.expectEqual(null, (try read(text)).quad);
 }
 
 test "what is not a statement" {
     for ([_][]const u8{
-        "<s> <p> <o>",
-        "<s> <p> .",
-        "\"s\" <p> <o> .",
-        "<s> _:p <o> .",
-        "<s> <p> \"o\" \"g\" .",
-        "<s> <p> <o> <g> <h> .",
-        "<s> <p> \"unterminated .",
-        "<s> <p> \"bad \\x escape\" .",
-        "<s> <p> \"o\"@ .",
-        "<s> <p> \"o\"^^_:b .",
-        "<s with space> <p> <o> .",
-        "<s> <p> <o> . junk",
-        "<s> <p> \"\\u12\" .",
-        "_:a. <p> <o> .",
+        "<x:s> <x:p> <x:o>",
+        "<x:s> <x:p> .",
+        "\"s\" <x:p> <x:o> .",
+        "<x:s> _:p <x:o> .",
+        "<x:s> <x:p> \"o\" \"g\" .",
+        "<x:s> <x:p> <x:o> <x:g> <x:h> .",
+        "<x:s> <x:p> \"unterminated .",
+        "<x:s> <x:p> \"bad \\x escape\" .",
+        "<x:s> <x:p> \"o\"@ .",
+        "<x:s> <x:p> \"o\"^^_:b .",
+        "<x:s with space> <x:p> <x:o> .",
+        "<x:s> <x:p> <x:o> . junk",
+        "<x:s> <x:p> \"\\u12\" .",
+        "_:a. <x:p> <x:o> .",
     }) |text| {
         const seen = try read(text);
         std.testing.expect(seen.quad == null and !seen.empty) catch |err| {
@@ -210,14 +212,39 @@ test "what is not a statement" {
 }
 
 test "a line with nothing or a comment holds no statement" {
-    for ([_][]const u8{ "", "   ", "\t# only a comment", "# <s> <p> <o> .", "\r", " # with\ttabs\r" }) |text| {
+    for ([_][]const u8{ "", "   ", "\t# only a comment", "# <x:s> <x:p> <x:o> .", "\r", " # with\ttabs\r" }) |text| {
         try std.testing.expect((try read(text)).empty);
     }
 }
 
 test "a term longer than a Term is no statement" {
-    const long = "<" ++ @as([max_term - 1]u8, @splat('x')) ++ ">";
-    try std.testing.expectEqual(null, (try read(long ++ " <p> <o> .")).quad);
-    const fits = "<" ++ @as([max_term - 2]u8, @splat('x')) ++ ">";
-    try std.testing.expectEqualStrings(fits, (try read(fits ++ " <p> <o> .")).quad.?.subject.text());
+    const long = "<x:" ++ @as([max_term - 3]u8, @splat('x')) ++ ">";
+    try std.testing.expectEqual(null, (try read(long ++ " <x:p> <x:o> .")).quad);
+    const fits = "<x:" ++ @as([max_term - 4]u8, @splat('x')) ++ ">";
+    try std.testing.expectEqualStrings(fits, (try read(fits ++ " <x:p> <x:o> .")).quad.?.subject.text());
+}
+
+test "an IRI is absolute: it begins with a scheme" {
+    for ([_][]const u8{
+        "<urn:isbn:1> <x:p> <x:o> .",
+        "<a+b-c.d1:x> <x:p> <x:o> .",
+        "<x:> <x:p> <x:o> .",
+        "<x:s> <x:p> \"1\"^^<xsd:integer> .",
+    }) |text| try std.testing.expect((try read(text)).quad != null);
+    for ([_][]const u8{
+        "<relative> <x:p> <x:o> .",
+        "<x:s> <p> <x:o> .",
+        "<x:s> <x:p> <o> .",
+        "<x:s> <x:p> <x:o> <g> .",
+        "<x:s> <x:p> \"1\"^^<integer> .",
+        "</path> <x:p> <x:o> .",
+        "<1x:s> <x:p> <x:o> .",
+        "<:s> <x:p> <x:o> .",
+        "<x:s> <x:says> <<( <a> <x:p> <x:o> )>> .",
+    }) |text| {
+        std.testing.expectEqual(null, (try read(text)).quad) catch |err| {
+            std.debug.print("line: {s}\n", .{text});
+            return err;
+        };
+    }
 }

@@ -55,6 +55,16 @@ test "statements are written the one way, and the other lines reported by number
     try std.testing.expectEqual(app.Summary{ .statements = 4, .in_graphs = 2, .rejected = 2 }, log.summary);
 }
 
+test "the summary that cannot be written fails by itself, after the statements were" {
+    var none: [0]u8 = .{};
+    var console: std.Io.Writer = .fixed(&none);
+    var exit: app.Exit = .{};
+    try std.testing.expectError(error.WriteFailed, tryRun(
+        zrx.program(zrx.fromValue(app.Summary{ .statements = 1 }), app.report),
+        .{ &exit, app.Console{ .writer = &console } },
+    ));
+}
+
 test "a file of comments and nothing else holds no statement and no fault" {
     var buffers: [2][64]u8 = undefined;
     var log: Log = .init(&buffers[0], &buffers[1]);
@@ -148,7 +158,7 @@ test "the executable tidies a file, reports what is no statement and says what i
 test "the executable replaces no output and reads no missing input" {
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
-    try temp.dir.writeFile(io, .{ .sub_path = "in.nq", .data = "<s> <p> <o> .\n" });
+    try temp.dir.writeFile(io, .{ .sub_path = "in.nq", .data = "<x:s> <x:p> <x:o> .\n" });
     try temp.dir.writeFile(io, .{ .sub_path = "out.nq", .data = "kept\n" });
     const taken = try invoke(temp.dir, &.{ "in.nq", "out.nq" });
     defer taken.deinit();
