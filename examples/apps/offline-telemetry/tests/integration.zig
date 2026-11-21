@@ -90,6 +90,21 @@ test "a malformed or implausible reading fails the run" {
     }
 }
 
+test "a number is digits, with a minus only where it may be negative, and a line ends once" {
+    // Each was a reading for the parser this replaced, which went through
+    // `std.fmt.parseInt` and trimmed every trailing carriage return.
+    for ([_][]const u8{ "+1,3500\n", "1,+3500\n", "-0,3500\n", "1_000,3500\n", "1,3_500\n", "1,3500\r\r\n" }) |input| {
+        var buffers: [2][256]u8 = undefined;
+        var log: Log = .init(&buffers[0], &buffers[1]);
+        try std.testing.expectError(error.InvalidReading, replay(.north, input, &log));
+    }
+    // A temperature may be negative, zero included, and one carriage return is taken.
+    var buffers: [2][256]u8 = undefined;
+    var log: Log = .init(&buffers[0], &buffers[1]);
+    try replay(.north, "1,-0\r\n2,-1", &log);
+    try std.testing.expectEqualStrings("{\"sensor\":\"north\",\"ts_ms\":2,\"temp_mc\":-1}\n", log.alerts.buffered());
+}
+
 /// A feed the test holds open: three routine readings, then nothing until
 /// the test closes it.
 const OpenFeed = struct {

@@ -1,0 +1,343 @@
+//! What a line of N-Quads looks like, and what is kept of it.
+//!
+//! The grammar is RDF 1.1 N-Quads, with the triple terms of RDF 1.2 as
+//! objects. It is written with `zrx.ext.pattern`: every rule below is a
+//! value, and `statement` is the pattern a line is put to.
+const std = @import("std");
+const zrx = @import("zrx");
+const pattern = zrx.ext.pattern;
+
+const seq = pattern.seq;
+const oneOf = pattern.oneOf;
+const repeat = pattern.repeat;
+const optional = pattern.optional;
+const extract = pattern.extract;
+const as = pattern.as;
+const recursive = pattern.recursive;
+const set = pattern.set;
+const between = pattern.between;
+const except = pattern.except;
+const digit = pattern.digit;
+const alpha = pattern.alpha;
+const alnum = pattern.alnum;
+
+/// The longest line, not counting its newline, and the longest term.
+pub const max_line = 512;
+pub const max_term = 256;
+/// How many triple terms deep an object may be, the outermost counted.
+pub const max_nesting = 4;
+
+/// A term as it is written, held as a value.
+pub const Term = zrx.Line(max_term);
+
+// --- escapes ---------------------------------------------------------------------
+
+const hex = oneOf(.{ digit, between('a', 'f'), between('A', 'F') });
+/// `\u00E9`, `\U0001F600`
+const uchar = oneOf(.{
+    seq(.{ "\\u", repeat(hex, .{ .min = 4, .max = 4 }) }),
+    seq(.{ "\\U", repeat(hex, .{ .min = 8, .max = 8 }) }),
+});
+/// `\n`, `\"`, `\\`
+const echar = seq(.{ "\\", set("tbnrf\"'\\") });
+
+// --- terms -----------------------------------------------------------------------
+
+/// `<http://example.org/s>`. An IRI here is absolute: it begins with a
+/// scheme and a colon, which a relative one such as `<s>` has not.
+const scheme = seq(.{ alpha, repeat(oneOf(.{ alnum, set("+-.") }), .{}) });
+const iri_byte = except(oneOf(.{ between(0, ' '), set("<>\"{}|^`\\") }));
+const iri = seq(.{ "<", scheme, ":", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
+
+/// `_:b1`, `_:a.b`. Bytes of UTF-8 beyond ASCII are taken as letters.
+const name_start = oneOf(.{ alnum, set("_:"), between(0x80, 0xFF) });
+const name = oneOf(.{ name_start, set("-") });
+/// Dots only inside a label: a round that ends on a dot takes nothing, so
+/// the dot that ends a statement is left to it.
+const dotted = seq(.{ repeat(".", .{ .min = 1 }), repeat(name, .{ .min = 1 }) });
+const blank_node = seq(.{ "_:", name_start, repeat(name, .{}), repeat(dotted, .{}) });
+
+/// `"chat"`, `"chat"@fr-BE`, `"1"^^<http://www.w3.org/2001/XMLSchema#integer>`
+const string_byte = except(set("\"\\\n\r"));
+const string = seq(.{ "\"", repeat(oneOf(.{ string_byte, echar, uchar }), .{}), "\"" });
+const language = seq(.{ repeat(alpha, .{ .min = 1 }), repeat(seq(.{ "-", repeat(alnum, .{ .min = 1 }) }), .{}) });
+const literal = seq(.{
+    string,
+    optional(oneOf(.{
+        seq(.{ "^^", iri }),
+        seq(.{ "@", language }),
+    })),
+});
+
+const ws = repeat(set(" \t"), .{});
+
+/// A term that is not a triple term.
+const plain = oneOf(.{ iri, blank_node, literal });
+
+/// `<<( <s> <p> "o" )>>`, whose object may be another one: `self` is the
+/// triple term one level further in.
+fn tripleTerm(comptime self: type) type {
+    return seq(.{
+        "<<(",
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{ .triple = self, .term = as(Term, plain) })),
+        ws,
+        ")>>",
+    });
+}
+
+// --- a line ----------------------------------------------------------------------
+
+const comment = seq(.{ "#", repeat(except(set("\n\r")), .{}) });
+const line_end = seq(.{ ws, optional(comment), optional("\r") });
+
+/// A line that holds no statement: nothing, or a comment.
+pub const empty = line_end;
+
+/// `subject predicate object graph? .`, with triple terms `nesting` deep.
+fn statementOf(comptime nesting: usize) type {
+    return seq(.{
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{
+            .triple = recursive(tripleTerm, .{ .depth = nesting }),
+            .term = as(Term, plain),
+        })),
+        ws,
+        optional(seq(.{ extract(.graph, as(Term, oneOf(.{ iri, blank_node }))), ws })),
+        ".",
+        line_end,
+    });
+}
+
+pub const statement = statementOf(max_nesting);
+
+/// A statement but for how deep its triple terms go, as far as this looks:
+/// what a line is told to be when it is that and not a statement.
+pub const deeper_statement = statementOf(4 * max_nesting);
+
+/// What a statement holds, read off its pattern: a subject, a predicate,
+/// an object that is a `term` or a `triple`, and maybe a `graph`. A triple
+/// term holds the same but the graph, level by level.
+pub const Quad = pattern.Extracted(statement);
+
+/// `subject predicate object`, where the object is a term or a triple term,
+/// which is the same again one level in. Given a pointer to it.
+fn writeTriple(writer: *std.Io.Writer, triple: anytype) std.Io.Writer.Error!void {
+    // Further in than the innermost triple term there is nothing.
+    if (@TypeOf(triple.*) == void) return;
+    try writer.print("{f} {f} ", .{ triple.subject, triple.predicate });
+    switch (triple.object) {
+        .term => |term| try writer.print("{f}", .{term}),
+        .triple => |*inner| {
+            try writer.writeAll("<<( ");
+            try writeTriple(writer, inner);
+            try writer.writeAll(" )>>");
+        },
+    }
+}
+
+/// How long `writeTriple` writes a triple.
+fn tripleLength(triple: anytype) usize {
+    if (@TypeOf(triple.*) == void) return 0;
+    return triple.subject.len + " ".len + triple.predicate.len + " ".len + switch (triple.object) {
+        .term => |*term| term.len,
+        .triple => |*inner| "<<( ".len + tripleLength(inner) + " )>>".len,
+    };
+}
+
+/// A statement written the one way: a space between its terms, nothing after its dot.
+pub const Tidy = struct {
+    quad: Quad,
+
+    pub fn of(quad: Quad) Tidy {
+        return .{ .quad = quad };
+    }
+
+    /// How many bytes `format` writes.
+    pub fn length(tidy: *const Tidy) usize {
+        const graph = if (tidy.quad.graph) |*graph| " ".len + graph.len else 0;
+        return tripleLength(&tidy.quad) + graph + " .".len;
+    }
+
+    /// Whether it is a line this can read again. Writing a statement the
+    /// one way can make it longer: a space is put where there was none.
+    pub fn fits(tidy: Tidy) bool {
+        return tidy.length() <= max_line;
+    }
+
+    pub fn format(tidy: Tidy, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writeTriple(writer, &tidy.quad);
+        if (tidy.quad.graph) |graph| try writer.print(" {f}", .{graph});
+        try writer.writeAll(" .");
+    }
+};
+
+// --- tests -----------------------------------------------------------------------
+
+const Line = zrx.Line(max_line);
+const Seen = struct { quad: ?Quad = null, empty: bool = false, too_deep: bool = false };
+
+fn keep(seen: *Seen, quad: Quad) void {
+    seen.quad = quad;
+}
+
+fn noteEmpty(seen: *Seen, _: Line) void {
+    seen.empty = true;
+}
+
+fn noteTooDeep(seen: *Seen, _: anytype) void {
+    seen.too_deep = true;
+}
+
+fn ignore(_: Line) void {}
+
+/// What the grammar makes of one line.
+fn read(text: []const u8) !Seen {
+    var seen: Seen = .{};
+    zrx.program(zrx.fromValue(try Line.from(text)), .{zrx.route(.{
+        zrx.when(empty, .{zrx.forEach(noteEmpty)}),
+        zrx.when(statement, .{ zrx.map(zrx.field(.found)), zrx.forEach(keep) }),
+        zrx.when(deeper_statement, .{zrx.forEach(noteTooDeep)}),
+        zrx.otherwise(.{zrx.forEach(ignore)}),
+    })}).run(.{&seen});
+    return seen;
+}
+
+fn expectTidy(expected: []const u8, text: []const u8) !void {
+    const quad = (try read(text)).quad orelse {
+        std.debug.print("not a statement: {s}\n", .{text});
+        return error.TestUnexpectedResult;
+    };
+    var buffer: [max_line]u8 = undefined;
+    try std.testing.expectEqualStrings(expected, try std.fmt.bufPrint(&buffer, "{f}", .{Tidy.of(quad)}));
+}
+
+test "a statement is three terms, or four with its graph" {
+    const quad = (try read("<http://ex.org/s> <http://ex.org/p> \"chat\"@fr-BE <http://ex.org/g> . # a cat")).quad.?;
+    try std.testing.expectEqualStrings("<http://ex.org/s>", quad.subject.text());
+    try std.testing.expectEqualStrings("<http://ex.org/p>", quad.predicate.text());
+    try std.testing.expectEqualStrings("\"chat\"@fr-BE", quad.object.term.text());
+    try std.testing.expectEqualStrings("<http://ex.org/g>", quad.graph.?.text());
+    try std.testing.expectEqual(null, (try read("_:a <x:p> _:b .")).quad.?.graph);
+}
+
+test "a statement is written the one way whatever stood between its terms" {
+    try expectTidy("<x:s> <x:p> <x:o> .", "<x:s> <x:p> <x:o> .");
+    try expectTidy("<x:s> <x:p> <x:o> .", "\t<x:s>   <x:p>\t<x:o>  .  # said twice\r");
+    try expectTidy("<x:s> <x:p> <x:o> .", "<x:s><x:p><x:o>.");
+    try expectTidy("_:a <x:p> _:b _:g .", "_:a <x:p> _:b _:g.");
+    try expectTidy("_:a.b <x:p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string> .", "_:a.b <x:p> \"1\\n\\u00E9\"^^<http://www.w3.org/2001/XMLSchema#string>.");
+    try expectTidy("<x:s> <x:p> \"\" <x:g> .", "<x:s> <x:p> \"\" <x:g> .");
+    try expectTidy("<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .", "<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .");
+}
+
+test "a triple term is an object, taken apart level by level, and may hold another to a depth" {
+    const quad = (try read("<x:s> <x:says> <<( <x:a> <x:p> <<( _:b <x:q> \"c\"@en )>> )>> <x:g> .")).quad.?;
+    const outer = quad.object.triple;
+    try std.testing.expectEqualStrings("<x:a>", outer.subject.text());
+    try std.testing.expectEqualStrings("_:b", outer.object.triple.subject.text());
+    try std.testing.expectEqualStrings("\"c\"@en", outer.object.triple.object.term.text());
+    try std.testing.expectEqualStrings("<x:g>", quad.graph.?.text());
+
+    // Written the one way inside too.
+    try expectTidy("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .", "<x:s> <x:says> <<(<x:a>   <x:p>\t\"c\")>>.");
+    try expectTidy(
+        "<x:s> <x:says> <<( <x:a> <x:p> <<( _:b <x:q> <<( <x:c> <x:r> <<( <x:d> <x:t> <x:e> )>> )>> )>> )>> <x:g> .",
+        "<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .",
+    );
+    // One deeper than `max_nesting` is no statement, and is told to be too deep.
+    const deeper = try read("<x:s> <x:says> <<(<x:a> <x:p> <<(<x:b> <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <<(<x:e> <x:u> <x:f>)>>)>>)>>)>>)>> .");
+    try std.testing.expect(deeper.quad == null and deeper.too_deep);
+    try std.testing.expect(!(try read("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .")).too_deep);
+    for ([_][]const u8{
+        "<x:s> <x:says> <<( <x:a> <x:p> \"c\" .",
+        "<<( <x:a> <x:p> <x:c> )>> <x:says> <x:o> .",
+        "<x:s> <x:says> <<( \"a\" <x:p> <x:c> )>> .",
+    }) |text| {
+        const seen = try read(text);
+        try std.testing.expect(seen.quad == null and !seen.too_deep);
+    }
+}
+
+test "what is not a statement" {
+    for ([_][]const u8{
+        "<x:s> <x:p> <x:o>",
+        "<x:s> <x:p> .",
+        "\"s\" <x:p> <x:o> .",
+        "<x:s> _:p <x:o> .",
+        "<x:s> <x:p> \"o\" \"g\" .",
+        "<x:s> <x:p> <x:o> <x:g> <x:h> .",
+        "<x:s> <x:p> \"unterminated .",
+        "<x:s> <x:p> \"bad \\x escape\" .",
+        "<x:s> <x:p> \"o\"@ .",
+        "<x:s> <x:p> \"o\"^^_:b .",
+        "<x:s with space> <x:p> <x:o> .",
+        "<x:s> <x:p> <x:o> . junk",
+        "<x:s> <x:p> \"\\u12\" .",
+        "_:a. <x:p> <x:o> .",
+    }) |text| {
+        const seen = try read(text);
+        std.testing.expect(seen.quad == null and !seen.empty) catch |err| {
+            std.debug.print("line: {s}\n", .{text});
+            return err;
+        };
+    }
+}
+
+test "a line with nothing or a comment holds no statement" {
+    for ([_][]const u8{ "", "   ", "\t# only a comment", "# <x:s> <x:p> <x:o> .", "\r", " # with\ttabs\r" }) |text| {
+        try std.testing.expect((try read(text)).empty);
+    }
+}
+
+test "a term longer than a Term is no statement" {
+    const long = "<x:" ++ @as([max_term - 3]u8, @splat('x')) ++ ">";
+    try std.testing.expectEqual(null, (try read(long ++ " <x:p> <x:o> .")).quad);
+    const fits = "<x:" ++ @as([max_term - 4]u8, @splat('x')) ++ ">";
+    try std.testing.expectEqualStrings(fits, (try read(fits ++ " <x:p> <x:o> .")).quad.?.subject.text());
+}
+
+test "an IRI is absolute: it begins with a scheme" {
+    for ([_][]const u8{
+        "<urn:isbn:1> <x:p> <x:o> .",
+        "<a+b-c.d1:x> <x:p> <x:o> .",
+        "<x:> <x:p> <x:o> .",
+        "<x:s> <x:p> \"1\"^^<xsd:integer> .",
+    }) |text| try std.testing.expect((try read(text)).quad != null);
+    for ([_][]const u8{
+        "<relative> <x:p> <x:o> .",
+        "<x:s> <p> <x:o> .",
+        "<x:s> <x:p> <o> .",
+        "<x:s> <x:p> <x:o> <g> .",
+        "<x:s> <x:p> \"1\"^^<integer> .",
+        "</path> <x:p> <x:o> .",
+        "<1x:s> <x:p> <x:o> .",
+        "<:s> <x:p> <x:o> .",
+        "<x:s> <x:says> <<( <a> <x:p> <x:o> )>> .",
+    }) |text| {
+        std.testing.expectEqual(null, (try read(text)).quad) catch |err| {
+            std.debug.print("line: {s}\n", .{text});
+            return err;
+        };
+    }
+}
+
+test "the length of a tidy statement is what is written of it" {
+    for ([_][]const u8{
+        "<x:s> <x:p> <x:o> .",
+        "<x:s><x:p>\"o\"@en<x:g>.",
+        "_:a <x:p> <<(<x:a> <x:p> <<(_:b <x:q> \"c\")>>)>> _:g .",
+    }) |text| {
+        const tidy: Tidy = .of((try read(text)).quad.?);
+        var buffer: [max_line]u8 = undefined;
+        try std.testing.expectEqual((try std.fmt.bufPrint(&buffer, "{f}", .{tidy})).len, tidy.length());
+    }
+}

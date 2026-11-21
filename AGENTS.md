@@ -300,8 +300,11 @@ to this file; edit `AGENTS.md`, not copies.
   choice of a `oneOf`, or what follows an `optional`, reads it again, once
   per round inside a `repeat`. The guide says so and shows what to write.
   It is not a compile error, because it cannot be seen: two choices that
-  share a beginning and take the same bytes are linear. Writing the
-  shared part once is what a planning pass would do. What that rule makes unmatchable is a
+  share a beginning and take the same bytes are linear. Nothing writes the
+  shared part once for the user: a pass could only merge parts that are
+  the same part, and the case that was measured (`lower` again and again,
+  then `!`, or else one `lower`) shares no part, only bytes. What that rule
+  makes unmatchable is a
   compile error where it can be seen (a part behind a `repeat` that took
   its first bytes, a choice behind its own beginning, a choice behind one
   that matches nothing): say nothing where it cannot be seen, rather than
@@ -309,14 +312,88 @@ to this file; edit `AGENTS.md`, not copies.
   a number that does not fit does not match: a draft that converted after
   matching had a route take a path whose number then failed to parse.
   `std` has no matcher, so this is the one extension that is not a layer
-  over `std`: keep it to bytes, with no Unicode classes. Not there, and
+  over `std`: keep it to bytes, with no Unicode classes. A pattern is
+  put to a `[]const u8`, or to a value that reads its text with `text()`,
+  as a `Line` does; told by that name, since it is what a caller's own
+  type may declare. What is taken out of a value is a value: a handler is
+  given a copy of its item, so a piece of its text would point into
+  something gone when the handler returns, and such an `extract` does not
+  compile. `as(T, p)` keeps what `p` matched as a `T` that `T.from(text)`
+  makes, which `Line(n)` already had and the apps already called by hand
+  (`Service.from(column)`); a text `from` fails for does not match, the
+  rule of `int`. It is one contract for a copy of bounded length and for
+  the words of a format as an enum, not two nodes. Whether what `as` keeps is
+  a value is read off `T`, not off how the pattern is written: a `T` with
+  a pointer anywhere in it is taken to point into the text `from` was
+  given (`holdsPointer`), so it is extracted from a `[]const u8` and
+  refused from a `Line`. Review showed a `from` that kept its slice being
+  extracted from a `Line` as if it were a copy. Offsets into the line
+  and a borrowed text that lives as long as the push were considered:
+  the first makes every handler put a span back to its line, the second
+  dangles behind a `queue` and needs the operators to hand a predicate a
+  pointer. A rule that holds
+  itself is `recursive(rule, .{ .depth })`, where `rule` builds the pattern
+  from `self`. It is not recursion: the rule is built `depth` times at
+  compile time, each from the one further in, and the innermost `self` is
+  a node that never matches. So the matcher is straight code, the text
+  does not choose the depth of the stack (a prototype that called itself
+  matched 20,000 levels and overran the stack at 200,000), and every
+  compile-time check works on each level. A comptime function over the
+  depth could already write this, and the helper is there by the user's
+  decision all the same: the base case and the limit are the library's,
+  not each caller's, and it is what makes nested extraction possible.
+  What a level extracts is a struct of its own (`Recorded`), a typed node
+  as `int` is, so the names of one level clash with no other and the
+  whole has a size; that is why the depth is written. That a part can
+  match without taking a byte (`nullable`) is not that it always matches:
+  an `as` over a part that may be empty can still refuse what was matched
+  (`refuses`), and `oneOf` tells a choice the ones after it cannot be
+  reached only where it always matches. Review found a fallback refused
+  behind `as(Line(0), optional("x"))`. `optional` refuses only a part that
+  always matches, for the same reason: review found
+  `optional(as(Line(0), optional("x")))` refused. `repeat` still asks
+  only whether a part can match nothing, since that is what would never
+  stop. A level is told to
+  be dead by `never`, which `seq`, `oneOf`, `repeat`, `as` and `extract`
+  pass on: a rule that is dead at depth 1 has no way to end and does not
+  compile, and `seq` does not take a dead part for the mistake of a part
+  that can never match. Choices of a `oneOf` may be written with names,
+  `oneOf(.{ .inner = self, .word = as(Word, letters) })`, and extracted
+  they are a tagged union that says which one matched, each choice
+  holding what it keeps (its value, a struct of its extracts, or `void`).
+  Without names an extracted `oneOf` is the text that matched, as
+  before: names are what a union needs, and two unnamed choices of
+  different types have none to give. That is why the user's
+  `extract(.object, oneOf(.{ self, as(Term, plain) }))` is written with
+  names. A choice that is only text holds `void` and not that text: a
+  slice would make every literal choice a borrow on a `Line`. A named
+  choice with extracts inside is the one way to group the extracts of an
+  ordinary part into a struct; there is no node for that alone. A rule has
+  no fixture, because it is not `lean`: against the same rule written by
+  hand as a function built for each depth, a filter over a rule three
+  deep measured 80 instructions to 73, no call and no `alloca`, and two
+  more loads of a byte (a choice that fails on a byte and the next that
+  reads it again). Timed on 818 MB of nested text it took 0.45 s, the
+  hand-written rule 0.58 s and a hand-written depth counter 0.61 s, and
+  eight levels took what three did. Say those numbers and not "zero
+  overhead". The first measurement was 97 instructions: a string of one
+  byte went through `std.mem.startsWith`, which asks first whether the
+  two texts are the same memory, and it is now compared as a byte. Not there, and
   back only by decision: a format string read backwards (`"/items/{id}"`
-  would be a string language of our own), going back, finding the places a
-  pattern matches inside a text, and items that are not `[]const u8` (a
-  `Line` is a value; text extracted from it would point into a copy). The
-  fixtures are `lean`: a pattern carries a position through its parts. A
-  pass that plans a pattern before matching may close that later, inside
-  the extension, without changing what a user writes.
+  would be a string language of our own), going back, and finding the
+  places a pattern matches inside a text. The
+  fixtures are `lean`: a pattern carries a position through its parts.
+  A plan for that was built and measured, and is not there: the last part
+  of a pattern was asked "is all that is left yours" (`finish`) and not
+  "where do you end", as the loop by hand that leaves at the first wrong
+  byte. `lean_pattern_route` went from 80 instructions to 70 (71 by
+  hand) and `lean_pattern_filter` from 40 to 38, while
+  `lean_pattern_require` went from 102 to 107 and `lean_pattern_line`
+  from 114 to 136, past what `lean` allows. The fixtures by hand are
+  written in both shapes, and that plan matches one of them. This is what
+  that one experiment measured, not a finding about every plan: another
+  optimization is judged by the same fixtures, and is worth having if it
+  improves them all.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -437,6 +514,15 @@ to this file; edit `AGENTS.md`, not copies.
   not "the same program": wiring is not compared, `behavior.zig` covers
   results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
+- A handler is given its item as a value (`di.invoke` builds a tuple), and
+  for an item that holds its bytes the optimizer does not take the copy
+  out: one `memcpy` of a `Line(n)` for each handler it is given to. That
+  was found when the first fixture with such an item failed as `lean`
+  with a function handler exactly as with a pattern, so it is the
+  contract's cost and not the pattern's. `lean_pattern_line` has the copy
+  on both sides and says so; the guide says so. Do not hide it by other
+  means, and do not change how a handler is called to remove it without a
+  decision: every composite handler takes its arguments as that tuple.
 
 ## Diagnostics
 

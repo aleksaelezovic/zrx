@@ -288,6 +288,31 @@ test "namesCounted, pathsRouted, readingsRequired" {
     }
 }
 
+test "rowsRouted" {
+    const texts = [_][]const u8{
+        "north,17",            "south,-4",      "",             "north",   "north,",    ",4",   "northerly,1",
+        "abcdefgh,2147483647", "x,-2147483648", "x,2147483648", "North,1", "north,1,2", "n,+1", "east,7 ",
+        "west,0",
+    };
+    var rows: [texts.len]cases.Row = undefined;
+    for (&rows, texts) |*row, text| row.* = try cases.Row.from(text);
+    for ([_][]const cases.Row{ &.{}, rows[0..3], &rows }) |some| {
+        var with: struct { u64, cases.Sensor, u64 } = .{ 99, try cases.Sensor.from("none"), 98 };
+        var without: struct { u64, cases.Sensor, u64 } = .{ 99, try cases.Sensor.from("none"), 98 };
+        cases.rowsRouted(true, some, &with[0], &with[1], &with[2]);
+        cases.rowsRouted(false, some, &without[0], &without[1], &without[2]);
+        try std.testing.expectEqual(without[0], with[0]);
+        try std.testing.expectEqualStrings(without[1].text(), with[1].text());
+        try std.testing.expectEqual(without[2], with[2]);
+    }
+    var sum: u64 = 0;
+    var sensor = try cases.Sensor.from("none");
+    var others: u64 = 0;
+    cases.rowsRouted(true, &rows, &sum, &sensor, &others);
+    try std.testing.expectEqualStrings("west", sensor.text());
+    try std.testing.expectEqual(10, others);
+}
+
 test "nested" {
     const values = [_]u32{ 1, 6, 7, 2, 100, 5, 6, 1000 };
     const groups = [_]cases.Group{

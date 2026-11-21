@@ -37,8 +37,18 @@ const windows = pipe(.{
     write(Archive, "{f}\n"),
 });
 
+/// A line of a feed: when it was read, and thousandths of a degree Celsius.
+const reading_line = seq(.{
+    extract(.ts_ms, int(u64)),
+    ",",
+    extract(.temp_mc, int(i32)),
+    optional("\r"),
+});
+
+pub const Reading = pattern.Extracted(reading_line);
+
 pub const readings = pipe(.{
-    map(parse),
+    map(require(reading_line, error.InvalidReading)),
     map(require(isPlausible, error.InvalidReading)),
     route(.{
         when(needsAlert, alerts),
@@ -65,9 +75,18 @@ const north = feed.provide(.{
 - The predicates are combinators. `needsAlert` is
   `compose(.{ field(.temp_mc), any(.{ lt(0), gt(8000) }) })`, and
   `isPlausible` is the same with `all(.{ ge(-100_000), le(150_000) })`.
-- Three handlers are functions: `parse` (a line to a reading), `alert`
-  (labels a reading with the `Sensor` dependency) and the reducer
-  `Window.add`, which gets count, minimum, maximum, sum and the first and
+- A line is taken apart by a [text pattern](../../../docs/guide.md#text-patterns),
+  not by a function: `reading_line` says what a line looks like, and
+  `Reading` is the struct read off it. A line it does not describe, or a
+  number that does not fit its type, is `error.InvalidReading`.
+- The pattern is stricter than the function it replaced, which converted
+  numbers with `std.fmt.parseInt` and trimmed every trailing carriage
+  return. A reading is now invalid where it was accepted before if a
+  number has a `+` or an underscore in it, if the timestamp is `-0`, or if
+  the line ends in more than one carriage return. A temperature may still
+  be negative, and one carriage return before the line feed is taken.
+- Two handlers are functions: `alert` (labels a reading with the `Sensor`
+  dependency) and the reducer `Window.add`, which gets count, minimum, maximum, sum and the first and
   last timestamp from one fold over the window's readings.
 - Nothing is shared between the two programs. Each has its own input, its
   own archive file and its own writer to standard output, so there is no

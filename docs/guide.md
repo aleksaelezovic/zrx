@@ -1008,9 +1008,10 @@ const report = pipe(.{
 });
 ```
 
-A pattern is a handler, as `gt(80)` is: a predicate on one `[]const u8`
-item. It holds when the pattern describes the *whole* text, not a part of
-it. What it answers depends on whether it extracts:
+A pattern is a handler, as `gt(80)` is: a predicate on one item that is
+text, a `[]const u8` or a [line](#lines-and-values). It holds when the
+pattern describes the *whole* text, not a part of it. What it answers
+depends on whether it extracts:
 
 - A pattern without `extract` answers `bool`: `filter(service_name)`.
 - A pattern with `extract` finds a value (see [route](#route)). It answers
@@ -1026,20 +1027,222 @@ it. What it answers depends on whether it extracts:
 | `byte`, `digit`, `lower`, `upper`, `alpha`, `alnum` | One byte: any, or of that ASCII class. |
 | `seq(.{ a, b })` | Each part, one after the other. |
 | `oneOf(.{ a, b })` | The first choice that matches. |
+| `oneOf(.{ .x = a, .y = b })` | The same, with [names](#choices-with-names): extracted, a tagged union that says which one matched. |
 | `repeat(p, .{ .min = 1, .max = 3 })` | `p` as often as it matches, between `min` (0 unless given) and `max` (no limit unless given) times. |
 | `optional(p)` | `p`, or nothing where it does not match. |
 | `int(T)` | A decimal number that fits the integer type `T`, with a `-` before it when `T` is signed. |
+| `as(T, p)` | `p`, kept as a `T` that `T.from(text)` makes: a `Line(32)`, or a type of your own. A text `from` fails for does not match. |
 | `extract(.name, p)` | `p`, with what it matched kept under `name`. |
+| `recursive(rule, .{ .depth = 4 })` | A [rule that holds itself](#a-rule-that-holds-itself), to a depth of 8 unless one is given. |
 | `Extracted(pattern)` | The type of what a pattern extracts. A handler that names its item writes it; `anytype` takes it too. |
 
 The struct is read off the pattern. A field is the matched text
-(`[]const u8`), or a `T` where the part is an `int(T)`. It is optional where
+(`[]const u8`), or a `T` where the part is an `int(T)` or an `as(T, ...)`.
+It is optional where
 its `extract` is inside `optional` or `oneOf`, and null when that part is not
 in the text. The text of a field points into the item: use it while the item
 lives.
 
 A number that does not fit its type does not match. So a pattern never
 holds for a text whose numbers it could not hand out.
+
+### Lines and values
+
+Text extracted from a `[]const u8` points into it. That is right for a text
+that stays where it is, and wrong for a `Line`: a line is a value that holds
+its bytes, a handler is given a copy of it, and the copy is gone when the
+handler returns. So a pattern put to a line extracts values, and an
+`extract` that would keep a piece of its text does not compile.
+
+`as(T, p)` keeps what `p` matched as a `T`, made by `T.from(text)`.
+`Line(n).from` copies up to `n` bytes, which makes `as(Line(32), p)` a text
+of at most 32 bytes held as a value. A text that is longer does not match,
+as a number that does not fit does not.
+
+```zig
+const Service = zrx.Line(32);
+
+/// The words of the format, as what they stand for.
+const Level = enum {
+    info,
+    warn,
+    failure,
+
+    pub fn from(word: []const u8) error{UnknownLevel}!Level { ... }
+};
+
+const record = seq(.{
+    extract(.ts_ms, int(u64)),
+    "\t",
+    extract(.level, as(Level, repeat(pattern.lower, .{ .min = 1 }))),
+    "\t",
+    extract(.service, as(Service, repeat(oneOf(.{ pattern.alnum, pattern.set("-_") }), .{ .min = 1 }))),
+    "\t",
+    extract(.latency_ms, int(u32)),
+    optional("\r"),
+});
+
+/// What a record holds, read off the pattern: `{ ts_ms: u64, level: Level, service: Service, latency_ms: u32 }`.
+const Entry = pattern.Extracted(record);
+
+const report = pipe(.{
+    recover(error{InvalidRecord}, rejections),
+    map(require(record, error.InvalidRecord)),
+    queue(64),
+    fold(@as(u32, 0), slowest),
+    print(zrx.Stdout, "{d}\n"),
+});
+
+program(fileLines(path, 128), report)
+```
+
+- Every field is a value, so what was extracted crosses a `queue`, waits in
+  a `batch` and is kept by a `fold` like any item.
+- `T` is any struct, enum or union with
+  `pub fn from(text: []const u8) !T` (or one that returns a `T` and cannot
+  fail). Use it for the words of a format, as `Level` above.
+- The text `from` is given lives only as long as the item. A `T` with a
+  pointer anywhere in it is taken to point into that text, whatever its
+  `from` does: it can be extracted from a `[]const u8`, and from a `Line`
+  it does not compile. A `T` that is to be a value has no pointer in it.
+- `as` is not only for lines. It makes a value of text from any item, such
+  as a name from a request's path that has to outlive the request's head.
+- A case of a `route` is given the values with the line they were taken
+  from: `.found` and `.item`.
+- A line that came with something else, such as the `Tagged` of
+  `mergeTagged`, is reached through its field:
+  `when(compose(.{ field(.item), record }), .{ ... })`.
+- Any value that reads its text with `pub fn text(*const T) []const u8` is
+  taken as a `Line` is.
+
+A copy costs what it copies. A handler is given its item as a value, and a
+`Line(n)` is `n` bytes: the fixture `lean_pattern_line` shows one copy of
+the line for each handler it is given to, with a pattern as with a function
+of your own.
+
+### Choices with names
+
+`extract(.name, oneOf(.{ a, b }))` keeps the text that matched, whichever
+choice it was. Give the choices names and what is kept says which one:
+
+```zig
+const Word = zrx.Line(16);
+
+const token = extract(.token, oneOf(.{
+    .number = int(u32),
+    .word = as(Word, repeat(lower, .{ .min = 1 })),
+    .dash = "-",
+}));
+
+// Extracted(token) is:
+//   struct { token: union(enum) { number: u32, word: Word, dash: void } }
+
+fn describe(found: pattern.Extracted(token)) u32 {
+    return switch (found.token) {
+        .number => |number| number,
+        .word => |*word| @intCast(word.len),
+        .dash => 0,
+    };
+}
+```
+
+A choice holds what it keeps: its value where it is one (`int`, `as`), a
+struct of its own where it has `extract`s inside, and nothing (`void`)
+otherwise. A choice that is only text, such as `"-"`, holds nothing: wrap
+it in `as` to keep it. Matching is what it is without names: the first
+choice that matches is taken for good. Not extracted, choices with names
+only match.
+
+### A rule that holds itself
+
+A group in parentheses may hold another group; a triple term may hold
+another triple term. Such a rule is written as a function of `self`, the
+rule one level further in, and `recursive` makes the pattern of it:
+
+```zig
+const recursive = pattern.recursive;
+
+/// `(a(b(c)))`: letters, and groups of them in parentheses.
+fn group(comptime self: type) type {
+    return seq(.{
+        "(",
+        repeat(oneOf(.{ lower, self }), .{}),
+        ")",
+    });
+}
+
+const nested = recursive(group, .{ .depth = 4 });
+```
+
+A pattern is a value and cannot contain itself, and nothing here calls
+itself as deep as a text asks. `recursive` builds the rule `depth` times,
+each from the one further in, and the innermost `self` describes nothing.
+So the depth is written, 8 unless you say otherwise, and it is not the
+text's to choose: a text nested deeper does not match, and the rule does
+not call itself, so how deep a text nests does not decide how much stack
+is used.
+
+**What a level extracts is a struct of its own.** An `extract` in the rule
+is a field of its level, not of the pattern around it, so the same names
+at every level do not clash. `self` is a value like an `int`: as a choice
+with a name it is the level further in.
+
+```zig
+/// `<a b>`, or `<a <b c>>`: a name, then a word or another of these.
+fn term(comptime self: type) type {
+    return seq(.{
+        "<",
+        extract(.name, as(Word, repeat(lower, .{ .min = 1 }))),
+        " ",
+        extract(.object, oneOf(.{
+            .inner = self,
+            .word = as(Word, repeat(lower, .{ .min = 1 })),
+        })),
+        ">",
+    });
+}
+
+const nested_term = recursive(term, .{ .depth = 3 });
+
+// "<a <b c>>" is found as:
+//   .name = "a",
+//   .object = .{ .inner = .{ .name = "b", .object = .{ .word = "c" } } }
+```
+
+- A rule is a part like any other. `extract(.said, nested_term)` keeps its
+  outermost level under `said`; without an `extract` it is matched and
+  nothing of it is kept; `as(Line(64), nested_term)` keeps its text.
+- Put to a text alone, a rule that extracts answers the struct of its
+  outermost level, which is also `Extracted(nested_term)`.
+- The struct has a size, known when the program is compiled: nothing is
+  allocated. Each level holds the next, so the size grows with the depth,
+  and doubles with each level where a rule holds itself in two places.
+- Each level is a type of its own. A handler that walks them is generic,
+  and at the innermost level the choice of `self` holds a `void` and is
+  never the one that matched. Take a pointer, so that the text of a value
+  is read where the value is:
+
+  ```zig
+  /// The word a term ends in, however deep.
+  fn lastWord(level: anytype) []const u8 {
+      if (@TypeOf(level.*) == void) return "";
+      return switch (level.object) {
+          .word => |*word| word.text(),
+          .inner => |*inner| lastWord(inner),
+      };
+  }
+  ```
+- `self` can be extracted by itself too, `extract(.inner, self)`: inside a
+  `oneOf` without names that is an optional field of the level.
+- A rule needs a way to end. One that holds itself whatever it describes,
+  such as `seq(.{ "(", self, ")" })`, does not compile.
+- The depth is a bound set when the program is compiled: a deeper rule is
+  a larger program, each level being code of its own. What it costs in
+  time has been measured on one kind of text only, where eight levels took
+  what three did. That is a measurement, not a promise for every rule.
+
+The [N-Quads check](../examples/apps/nquads-check/README.md) reads the
+triple terms of RDF 1.2 this way.
 
 ### How a pattern matches
 
@@ -1532,6 +1735,12 @@ Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
 whose path has stages of its own and the text patterns are `lean`, each with
 the reason next to it.
 
+The fixtures carry small items. A handler is given its item as a value, and
+for an item that holds its bytes, such as a `Line(n)`, that is a copy the
+optimizer does not take out. `lean_pattern_line` has that copy in the loop
+by hand as well, so that it compares the pattern; the loop one would write,
+over pointers, does not copy.
+
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it
 cannot hide an extra call, load, store, branch or comparison, but it does not
@@ -1557,10 +1766,8 @@ A resource acquired for one item (opened before the item's sub-pipe and
 released after it) is not here. `each` covers the case where the item
 becomes a stream.
 
-Text patterns test a `[]const u8`. A `Line` is a value that holds its
-bytes, so a pattern cannot be put to one yet: text extracted from it would
-point into a copy. Finding every place a pattern matches within a text is
-not there either; a pattern describes the whole of it.
+Finding every place a text pattern matches within a text is not there; a
+pattern describes the whole of it.
 
 HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
