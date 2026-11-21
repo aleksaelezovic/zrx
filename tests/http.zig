@@ -348,12 +348,16 @@ const parameters = pipe(.{
         when(http.path(isShort), .{http.status(.no_content)}),
         when(http.path(&.{ '/', 'r', 'a', 'w' }), .{http.status(.no_content)}),
         when(http.path(spelled), .{http.status(.no_content)}),
+        when(http.path(@as([]const u8, @ptrCast(&signed))), .{http.status(.no_content)}),
         otherwise(.{http.status(.not_found)}),
     }),
 });
 
 /// A string that is not a literal.
 const spelled: []const u8 = "/spelled";
+/// Bytes of another type: the cast is told what to make of them, since
+/// `http.path` takes more than a string and cannot tell it.
+const signed = [_]i8{ '/', 'c', 'a', 's', 't' };
 
 fn expectOfParameters(comptime answer: []const u8, comptime request: []const u8) !void {
     var wire: Wire = undefined;
@@ -404,11 +408,12 @@ test "any predicate of text can be put to a path" {
     try expectOfParameters(empty("404 Not Found", .open), get("/abc"));
 }
 
-test "a path is a string however Zig writes one: a literal, a slice, a list of bytes" {
+test "a path is a string however Zig writes one: a literal, a slice, a list of bytes, a cast that names its type" {
     try expectOfParameters("HTTP/1.1 204 No Content\r\n\r\n", get("/raw"));
     try expectOfParameters("HTTP/1.1 204 No Content\r\n\r\n", get("/spelled"));
     try expectOfParameters(empty("404 Not Found", .open), get("/rawx"));
     try expectOfParameters(empty("404 Not Found", .open), get("/spelle"));
+    try expectOfParameters("HTTP/1.1 204 No Content\r\n\r\n", get("/cast"));
 }
 
 test "requests on one connection are each given what their own path holds" {

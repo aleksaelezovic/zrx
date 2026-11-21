@@ -1227,6 +1227,11 @@ route(.{
   it before the body: reading the body overwrites the head (see
   [Requests](#requests)). A number is a value and stays.
 - Nothing is percent-decoded before the path is put to the predicate.
+- A string is a literal, a `[]const u8`, or a list of bytes
+  `&.{ '/', 'x' }`. `http.path` took only a string before and gave its
+  argument that type. It no longer does, so an expression that takes its
+  type from where it stands has to name it: `http.path(@ptrCast(&chars))`
+  is now `http.path(@as([]const u8, @ptrCast(&chars)))`.
 - A path is as long as the request head allows, 8 KiB for a socket, and
   whoever sends the request chooses it. [What a pattern
   costs](#what-a-pattern-costs) says which patterns read such a text more

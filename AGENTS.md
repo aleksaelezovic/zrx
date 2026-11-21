@@ -380,7 +380,11 @@ to this file; edit `AGENTS.md`, not copies.
   text, and answers what that answers, so a pattern that extracts makes the
   case's item a `Found` of the values and the request. HTTP imports nothing
   of the pattern extension and has no router of its own; do not give it
-  one. What it does is
+  one. Taking either made the parameter `anytype`, which gives its
+  argument no type: a list of bytes is told by its shape and still taken,
+  an expression that needs a result type (`@ptrCast`) has to name it, and
+  the guide says so. A second function for predicates would have kept the
+  typed parameter and been a second spelling. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a
   behavior goes into that section together with its test. Performance is
   stated only in the benchmark app's README, with the measurement behind it.

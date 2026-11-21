@@ -943,12 +943,16 @@ fn requestOf(comptime who: []const u8, args: anytype) Request {
 /// the answer is that predicate's: with one that finds a value, the case of
 /// a `route` is given what it found, with the request. Text found in a path
 /// points into the request's head, as the path itself does.
+///
+/// Taking either, the parameter has no type to give: an expression that
+/// takes its type from where it stands names it, as in
+/// `http.path(@as([]const u8, @ptrCast(&chars)))`.
 pub fn path(comptime expected: anytype) type {
     if (comptime di.isHandler(expected)) return PathPut(expected);
     const Given = @TypeOf(expected);
-    // Whatever a `[]const u8` parameter took, which this was: a slice, a
-    // string literal, or a list of bytes `&.{ '/', 'x' }`, whose elements
-    // the coercion below checks.
+    // What a `[]const u8` parameter took, which this was, as far as it has
+    // a type of its own: a slice, a string literal, or a list of bytes
+    // `&.{ '/', 'x' }`, whose elements the coercion below checks.
     const is_string = switch (@typeInfo(Given)) {
         .pointer => |pointer| switch (pointer.size) {
             .slice => pointer.child == u8,
