@@ -1227,6 +1227,10 @@ route(.{
   it before the body: reading the body overwrites the head (see
   [Requests](#requests)). A number is a value and stays.
 - Nothing is percent-decoded before the path is put to the predicate.
+- A path is as long as the request head allows, 8 KiB for a socket, and
+  whoever sends the request chooses it. [What a pattern
+  costs](#what-a-pattern-costs) says which patterns read such a text more
+  than once.
 
 ### Answers
 

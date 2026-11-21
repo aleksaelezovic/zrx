@@ -946,10 +946,16 @@ fn requestOf(comptime who: []const u8, args: anytype) Request {
 pub fn path(comptime expected: anytype) type {
     if (comptime di.isHandler(expected)) return PathPut(expected);
     const Given = @TypeOf(expected);
+    // Whatever a `[]const u8` parameter took, which this was: a slice, a
+    // string literal, or a list of bytes `&.{ '/', 'x' }`, whose elements
+    // the coercion below checks.
     const is_string = switch (@typeInfo(Given)) {
         .pointer => |pointer| switch (pointer.size) {
             .slice => pointer.child == u8,
-            .one => @typeInfo(pointer.child) == .array and @typeInfo(pointer.child).array.child == u8,
+            .one => switch (@typeInfo(pointer.child)) {
+                .array => |array| array.child == u8,
+                else => di.isTuple(pointer.child),
+            },
             else => false,
         },
         else => false,
