@@ -1116,14 +1116,33 @@ program(fileLines(path, 128), report)
   taken as a `Line` is.
 
 A copy costs what it copies. An item goes from stage to stage as a value,
-and the optimizer takes those copies out, except where a handler reads the
-item's bytes at a place it knows only when it runs, as a pattern or any
-scan does. Then the bytes of a `Line(n)` are copied to the stack: once for
-a handler that scans, and no more than once for each such handler. The
-fixture `lean_pattern_line` shows it, with a pattern as with a function of
-your own. A pipe whose items are references to lines (`*const Line(n)`)
-has no such copy. A reference is good only while what it names is there,
-which is why the line sources push values: a value can cross a `queue`.
+and whether the optimizer takes a copy out depends on the pipe. There is no
+rule to give, only what was measured: copies of a `Line(120)` for each
+item, in these pipes over a slice of lines, compiled optimized for aarch64.
+
+| Pipe | Copies |
+|---|---|
+| `filter`, `map`, `forEach`, the handlers reading only the length | none |
+| The same with one handler that scans the bytes, a function or a pattern | the line, once |
+| The same with three handlers that read the bytes | the line, twice |
+| `batch(128)`, `flatten()`, then a handler reading only the length | the line once, and the whole batch twice |
+| Items that are references, `*const Line(120)`, with a handler that scans | none |
+
+Two of these are held by fixtures: `lean_pattern_line` the second, and
+`same_line_reference` the last. Another pipe may differ.
+
+A pattern is put to text, not to a pointer. Where the items are references
+to lines, put the handler that yields the text before it:
+
+```zig
+const Row = zrx.Line(120);
+
+// The items are `*const Row`.
+filter(compose(.{ Row.text, service_name }))
+```
+
+A reference is good only while what it names is there, which is why the
+line sources push values: a value can cross a `queue`.
 
 ### Choices with names
 
@@ -1741,11 +1760,12 @@ whose path has stages of its own and the text patterns are `lean`, each with
 the reason next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
-value, and for one that holds its bytes, such as a `Line(n)`, a handler
-that scans those bytes makes that a copy the optimizer does not take out.
-`lean_pattern_line` has that copy in the loop by hand as well, so that it
-compares the pattern. `same_line_reference` is the pipe over references to
-lines, which has none, as the loop one would write over pointers has none.
+value, and for one that holds its bytes, such as a `Line(n)`, the
+optimizer does not take every copy out: [Lines and values](#lines-and-values)
+has what was measured, pipe by pipe. `lean_pattern_line` is one of those
+pipes, and has its copy in the loop by hand as well, so that it compares
+the pattern. `same_line_reference` is the pipe over references to lines,
+which has none, as the loop one would write over pointers has none.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it

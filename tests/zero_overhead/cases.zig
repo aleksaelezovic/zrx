@@ -1019,10 +1019,10 @@ pub fn rowsRouted(comptime with_zrx: bool, rows: []const Row, sum: *u64, sensor:
 /// `lean`, not `same`, for the reason given at `lean_pattern_filter`.
 ///
 /// The loop by hand copies each row before it reads it, which nobody would
-/// write. An item goes from stage to stage as a value, and for one that
-/// holds its bytes a handler that scans them makes that a copy the
-/// optimizer does not take out: one `memcpy` of the row here, with a
-/// function of one's own as the predicate just as with a pattern. It is in
+/// write. An item goes from stage to stage as a value, and in this pipe
+/// the optimizer does not take that copy out: one `memcpy` of the row,
+/// with a function of one's own as the predicate just as with a pattern.
+/// That is a measurement of this pipe, not a rule for others. It is in
 /// both loops so that what is compared is the pattern. Without it the loop
 /// by hand has 107 instructions and no copy. `same_line_reference` is the
 /// pipe that has none either.

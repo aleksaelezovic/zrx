@@ -514,13 +514,15 @@ to this file; edit `AGENTS.md`, not copies.
   not "the same program": wiring is not compared, `behavior.zig` covers
   results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
-- An item goes from stage to stage as a value. For a small item, or one
-  whose handlers read only its fields, the optimizer takes every copy
-  out. For an item that holds its bytes, such as a `Line(n)`, it does not
-  once a handler reads those bytes at a place known only at run time (a
-  scan, a pattern): the bytes are then copied to the stack. Measured on a
-  `Line(120)`: no copy where the handlers read only the length, one with
-  one handler that scans, two with three. That was found when the first
+- An item goes from stage to stage as a value, and whether the optimizer
+  takes a copy out depends on the pipe. Give the measurements and no
+  rule: a rule was written here twice and was wrong twice ("one copy for
+  each handler", then "only where a handler scans the bytes"). Measured
+  on a `Line(120)` from a slice, optimized for aarch64: no copy with
+  `filter`, `map` and `forEach` where the handlers read only the length;
+  the line once with one handler that scans; twice with three; and
+  behind `batch(128)` and `flatten()` the line once and the whole batch
+  twice, though the handler reads only the length. That was found when the first
   fixture with such an item failed as `lean` with a function handler
   exactly as with a pattern, so it is not the pattern's cost.
   `lean_pattern_line` has the copy on both sides and says so; the guide
