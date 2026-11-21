@@ -75,9 +75,10 @@ A pattern is put to a `[]const u8`, or to a value that reads its text with
 `text()`, as a `Line` does. That is told by the name `text`, since it is
 what a caller's own type may declare.
 
-**What is taken out of a value is a value.** A handler is given a copy of
-its item, so a piece of its text would point into something gone when the
-handler returns. Such an `extract` does not compile.
+**What is taken out of a value is a value.** A handler is given its item
+by value, and a `Line` holds its text inside it, so a piece of that text
+lives no longer than the call. An `extract` cannot return a borrow into a
+value's own storage, and one that would does not compile.
 
 Two other designs were considered:
 

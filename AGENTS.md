@@ -296,9 +296,10 @@ to this file; edit `AGENTS.md`, not copies.
   - What is taken out of a value, such as a `Line`, is a value. Whether a
     `T` is one is read off the type: a pointer anywhere in it borrows.
   - That a part can match nothing (`nullable`) is not that it always
-    matches (`refuses`), nor that it never does (`never`). `oneOf` and
-    `optional` ask whether it always matches, `repeat` whether it can
-    match nothing.
+    matches: what it matched may still be refused (`refuses`). It always
+    matches where it is `nullable` and does not refuse. Nor is it that it
+    never matches (`never`). `oneOf` and `optional` ask whether it always
+    matches, `repeat` whether it can match nothing.
   - `recursive` builds its levels at compile time. Nothing calls itself
     as deep as a text asks.
   - A rule has no fixture and no claim of zero overhead. A second way to
