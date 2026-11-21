@@ -1749,8 +1749,8 @@ of every exported function:
   matches the identical `x >= c + 1`; a comparison does not match its negation;
 - `lean_*` functions may differ in loop shape, but the zrx variant must contain
   no calls, no more stack slots, loads or stores than the hand-written one,
-  and at most a quarter more instructions. A stack slot the hand-written
-  loop has too is allowed: `lean_pattern_line` has one on each side;
+  and at most a quarter more instructions. Stack slots the hand-written
+  loop has too are allowed, as in `lean_pattern_line`;
 - a function that exists in only one variant fails, which is how a stage that
   was not inlined shows up.
 
