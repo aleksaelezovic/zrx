@@ -350,9 +350,10 @@ to this file; edit `AGENTS.md`, not copies.
   hand) and `lean_pattern_filter` from 40 to 38, while
   `lean_pattern_require` went from 102 to 107 and `lean_pattern_line`
   from 114 to 136, past what `lean` allows. The fixtures by hand are
-  written in both shapes, and each plan matches one of them: what is left
-  of the gap is the shape of a loop, not work a plan can take out. Do not
-  add a second way to match for it.
+  written in both shapes, and that plan matches one of them. This is what
+  that one experiment measured, not a finding about every plan: another
+  optimization is judged by the same fixtures, and is worth having if it
+  improves them all.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
