@@ -365,7 +365,8 @@ pub fn oneOf(comptime choices: anytype) type {
 }
 
 /// How often `repeat` matches its pattern: at least `min` times, and no
-/// more than `max` when there is one.
+/// more than `max` when there is one. Both count rounds, not bytes: a round
+/// is as long as the pattern makes it.
 pub const Count = struct { min: usize = 0, max: ?usize = null };
 
 /// `p` again and again: as often as it matches, up to `count.max`, and at

@@ -1085,9 +1085,19 @@ const fast = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});
 ```
 
 It describes the same texts and reads each byte once. Where the shared part
-cannot be written once, give the `repeat` inside the choice a `.max`: a
-round then reads no further than that. Either way, bound the length of a
-text that comes from outside before a pattern is put to it.
+cannot be written once, bound how far the choice reads before it fails.
+`.max` does that only where what is repeated has a length of its own, a
+byte or a string: it counts rounds, not bytes.
+
+```zig
+// At most 16 bytes are read before the choice fails.
+const short = seq(.{ repeat(lower, .{ .min = 1, .max = 16 }), "!" });
+// One round, which still reads to the end of the letters.
+const long = repeat(shout, .{ .min = 1, .max = 1 });
+```
+
+Either way, bound the length of a text that comes from outside before a
+pattern is put to it.
 
 ## HTTP
 
