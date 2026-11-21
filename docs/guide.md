@@ -1117,19 +1117,23 @@ program(fileLines(path, 128), report)
 
 A copy costs what it copies. An item goes from stage to stage as a value,
 and whether the optimizer takes a copy out depends on the pipe. There is no
-rule to give, only what was measured: copies of a `Line(120)` for each
-item, in these pipes over a slice of lines, compiled optimized for aarch64.
+rule to give, only what was measured: the copies of a `Line(120)` in the
+code of these pipes over a slice of lines, compiled optimized for aarch64.
 
 | Pipe | Copies |
 |---|---|
 | `filter`, `map`, `forEach`, the handlers reading only the length | none |
 | The same with one handler that scans the bytes, a function or a pattern | the line, once |
-| The same with three handlers that read the bytes | the line, twice |
-| `batch(128)`, `flatten()`, then a handler reading only the length | the line once, and the whole batch twice |
+| The same with three handlers that read the bytes | the line once, and once more for an item the first filter lets through |
+| `batch(128)`, `flatten()`, then a handler reading only the length | the line once, into the buffer, and the buffer once for each batch that is emitted |
 | Items that are references, `*const Line(120)`, with a handler that scans | none |
 
-Two of these are held by fixtures: `lean_pattern_line` the second, and
-`same_line_reference` the last. Another pipe may differ.
+Another pipe may differ. No test holds these counts. Two fixtures are
+related examples, each with a `Line(32)`: `lean_pattern_line` is a pipe of
+the second kind, with its copy on both sides of the comparison, and
+`same_line_reference` one of the last kind. What they hold is that the
+pipe has no more instructions, loads, stores and stack slots than the loop
+by hand it is compared with.
 
 A pattern is put to text, not to a pointer. Where the items are references
 to lines, put the handler that yields the text before it:

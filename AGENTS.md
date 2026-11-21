@@ -520,9 +520,15 @@ to this file; edit `AGENTS.md`, not copies.
   each handler", then "only where a handler scans the bytes"). Measured
   on a `Line(120)` from a slice, optimized for aarch64: no copy with
   `filter`, `map` and `forEach` where the handlers read only the length;
-  the line once with one handler that scans; twice with three; and
-  behind `batch(128)` and `flatten()` the line once and the whole batch
-  twice, though the handler reads only the length. That was found when the first
+  the line once with one handler that scans; with three, once and once
+  more for an item the first filter lets through; and behind `batch(128)`
+  and `flatten()` the line once, into the buffer, and the buffer once for
+  each batch that is emitted, though the handler reads only the length.
+  Those are the copies in the compiled code, read off the optimized IR by
+  where each stands: the first table counted two places that copy a batch
+  as two copies of it, and one is taken when a batch fills and the other
+  at the end of the stream. No test holds the counts; the two fixtures
+  named here use a `Line(32)` and hold their own comparison. That was found when the first
   fixture with such an item failed as `lean` with a function handler
   exactly as with a pattern, so it is not the pattern's cost.
   `lean_pattern_line` has the copy on both sides and says so; the guide
@@ -532,7 +538,8 @@ to this file; edit `AGENTS.md`, not copies.
   same copies, so do not add that as a second way to write a handler.
   What has none is a pipe whose items are references from the source on
   (`*const Row`), which needs nothing new: `same_line_reference` holds
-  it. The line sources push values so that a line can cross a `queue`. A
+  that such a pipe is the loop over pointers, for a `Line(32)`. The line
+  sources push values so that a line can cross a `queue`. A
   source of references would be good only up to the next boundary, and
   comes by decision, with a rule for that.
 
