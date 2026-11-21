@@ -102,6 +102,40 @@ fn Answer(comptime N: type) type {
     return if (N.kept.len == 0) bool else ?Struct(N);
 }
 
+/// Whether `N` can match nothing and still say no: a `from` that fails
+/// for the text it was given, in a part that may be empty.
+fn refuses(comptime N: type) bool {
+    return @hasDecl(N, "refuses") and N.refuses;
+}
+
+const pattern_refuses = refuses;
+
+/// Whether `N` matches wherever it is put. That it can match without
+/// taking a byte is not enough: what it matched may still be refused.
+fn alwaysMatches(comptime N: type) bool {
+    return N.nullable and !refuses(N);
+}
+
+/// Whether a `T` has a pointer in it, and so may point into the text it
+/// was made from.
+fn holdsPointer(comptime T: type) bool {
+    @setEvalBranchQuota(di.quota);
+    return switch (@typeInfo(T)) {
+        .pointer => true,
+        .optional => |optional_info| holdsPointer(optional_info.child),
+        .array => |array| holdsPointer(array.child),
+        .vector => |vector| holdsPointer(vector.child),
+        .error_union => |fallible| holdsPointer(fallible.payload),
+        .@"struct" => |fields| for (fields.field_types) |Field| {
+            if (holdsPointer(Field)) break true;
+        } else false,
+        .@"union" => |fields| for (fields.field_types) |Field| {
+            if (holdsPointer(Field)) break true;
+        } else false,
+        else => false,
+    };
+}
+
 fn isText(comptime T: type) bool {
     const info = switch (@typeInfo(T)) {
         .pointer => |pointer| pointer,
@@ -137,9 +171,16 @@ fn Asked(comptime N: type, comptime Args: []const type) type {
     );
     // What a handler is given of a value is a copy, gone when it returns.
     if (!isText(Args[0])) for (N.kept) |kept| {
-        if (kept.borrows) @compileError(
+        if (!kept.borrows) continue;
+        const what = "` is a value that takes its text along; keep ";
+        // A value with a pointer in it.
+        if (kept.Type != []const u8) @compileError(
+            "pattern: what `extract(." ++ kept.name ++ ", ...)` keeps has a pointer or a text in it, which would point into the item, and a `" ++ @typeName(Args[0]) ++
+                what ++ "copies, as in `as(Line(32), ...)`",
+        );
+        @compileError(
             "pattern: `extract(." ++ kept.name ++ ", ...)` keeps text that points into the item, and a `" ++ @typeName(Args[0]) ++
-                "` is a value that takes its text along; keep a copy, as in `extract(." ++ kept.name ++ ", as(Line(32), ...))`",
+                what ++ "a copy, as in `extract(." ++ kept.name ++ ", as(Line(32), ...))`",
         );
     };
     return Answer(N);
@@ -314,6 +355,10 @@ pub fn seq(comptime parts: anytype) type {
             break :blk all;
         };
         pub const ends_before: ?Bytes = Ns[Ns.len - 1].ends_before;
+        pub const refuses = blk: {
+            for (Ns) |N| if (pattern_refuses(N)) break :blk true;
+            break :blk false;
+        };
         pub const width: ?usize = blk: {
             var sum: usize = 0;
             // Saturating, here and in `repeat`: a width or a bound that
@@ -342,7 +387,7 @@ pub fn oneOf(comptime choices: anytype) type {
     comptime {
         @setEvalBranchQuota(di.quota);
         for (Ns, 1..) |Early, place| {
-            if (Early.nullable and place != Ns.len) @compileError(std.fmt.comptimePrint(
+            if (alwaysMatches(Early) and place != Ns.len) @compileError(std.fmt.comptimePrint(
                 "oneOf: choice {d} can match without taking a byte, so it always matches and the choices after it are never reached; put it last, or wrap the others in `optional(oneOf(.{{ ... }}))`",
                 .{place},
             ));
@@ -364,7 +409,16 @@ pub fn oneOf(comptime choices: anytype) type {
     };
     if (bytes) |all| return Pattern(Set(all));
     return Pattern(struct {
-        pub const nullable = Ns[Ns.len - 1].nullable;
+        /// Any choice may be the one that matches nothing, since one that
+        /// can refuse need not be last; it is certain where one is.
+        pub const nullable = blk: {
+            for (Ns) |N| if (N.nullable) break :blk true;
+            break :blk false;
+        };
+        pub const refuses = blk: {
+            for (Ns) |N| if (alwaysMatches(N)) break :blk false;
+            break :blk true;
+        };
         pub const first: Bytes = blk: {
             var all: Bytes = 0;
             for (Ns) |N| all |= N.first;
@@ -439,7 +493,8 @@ pub fn repeat(comptime p: anytype, comptime count: Count) type {
 /// `p`, or nothing where `p` does not match.
 pub fn optional(comptime p: anytype) type {
     const N = nodeOf("optional", p);
-    if (N.nullable) @compileError("optional: its pattern can already match without taking a byte");
+    // One that can match nothing and can still refuse is worth making optional.
+    if (alwaysMatches(N)) @compileError("optional: its pattern can already match without taking a byte");
     return Pattern(struct {
         pub const nullable = true;
         pub const first: Bytes = N.first;
@@ -519,6 +574,12 @@ fn Made(comptime T: type) ?type {
 /// is made so, as a copy of up to 32 bytes; a type of your own with a
 /// `from` is too. A text `from` fails for does not match, as a number that
 /// does not fit an `int` does not.
+///
+/// The text `from` is given lives as long as the item, and for a `Line`
+/// that is no longer than the handler. A `T` with a pointer anywhere in it
+/// is therefore taken to point into that text, whatever its `from` does: it
+/// is extracted from a `[]const u8` and refused from a `Line`. A `T` that
+/// is to be a value has none.
 pub fn as(comptime T: type, comptime p: anytype) type {
     const N = nodeOf("as", p);
     const R = Made(T) orelse @compileError(
@@ -527,6 +588,9 @@ pub fn as(comptime T: type, comptime p: anytype) type {
     if (N.kept.len != 0) @compileError("as: `extract(." ++ N.kept[0].name ++ ", ...)` is inside it, where only the `" ++ @typeName(T) ++ "` is kept; extract it from a part of its own");
     return Pattern(struct {
         pub const Value = T;
+        /// A `T` with a pointer in it may point into the text it was made of.
+        pub const borrows = holdsPointer(T);
+        pub const refuses = R != T or pattern_refuses(N);
         pub const nullable = N.nullable;
         pub const first: Bytes = N.first;
         pub const ends_before: ?Bytes = N.ends_before;
@@ -554,6 +618,7 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
     const typed = @hasDecl(N, "Value");
     return Pattern(struct {
         pub const nullable = N.nullable;
+        pub const refuses = pattern_refuses(N);
         pub const first: Bytes = N.first;
         pub const ends_before: ?Bytes = N.ends_before;
         pub const width: ?usize = N.width;
@@ -561,7 +626,8 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
             .name = @tagName(name),
             .Type = if (typed) N.Value else []const u8,
             .maybe = false,
-            .borrows = !typed,
+            // A value borrows where it has a pointer in it.
+            .borrows = if (typed) @hasDecl(N, "borrows") and N.borrows else true,
         }};
 
         pub fn match(input: []const u8, at: usize, out: anytype) ?usize {

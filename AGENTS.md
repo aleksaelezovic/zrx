@@ -319,7 +319,19 @@ to this file; edit `AGENTS.md`, not copies.
   makes, which `Line(n)` already had and the apps already called by hand
   (`Service.from(column)`); a text `from` fails for does not match, the
   rule of `int`. It is one contract for a copy of bounded length and for
-  the words of a format as an enum, not two nodes. Offsets into the line
+  the words of a format as an enum, not two nodes. Whether what `as` keeps is
+  a value is read off `T`, not off how the pattern is written: a `T` with
+  a pointer anywhere in it is taken to point into the text `from` was
+  given (`holdsPointer`), so it is extracted from a `[]const u8` and
+  refused from a `Line`. Review showed a `from` that kept its slice being
+  extracted from a `Line` as if it were a copy. That a part can match
+  without taking a byte (`nullable`) is not that it always matches: an
+  `as` over a part that may be empty can still refuse what was matched
+  (`refuses`), and `oneOf` and `optional` object to a part only where it
+  always matches. Review found a fallback refused behind
+  `as(Line(0), optional("x"))`, and that part refused by `optional`.
+  `repeat` still asks only whether a part can match nothing, since that
+  is what would never stop. Offsets into the line
   and a borrowed text that lives as long as the push were considered:
   the first makes every handler put a span back to its line, the second
   dangles behind a `queue` and needs the operators to hand a predicate a

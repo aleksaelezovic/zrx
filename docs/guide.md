@@ -1099,6 +1099,10 @@ program(fileLines(path, 128), report)
 - `T` is any struct, enum or union with
   `pub fn from(text: []const u8) !T` (or one that returns a `T` and cannot
   fail). Use it for the words of a format, as `Level` above.
+- The text `from` is given lives only as long as the item. A `T` with a
+  pointer anywhere in it is taken to point into that text, whatever its
+  `from` does: it can be extracted from a `[]const u8`, and from a `Line`
+  it does not compile. A `T` that is to be a value has no pointer in it.
 - `as` is not only for lines. It makes a value of text from any item, such
   as a name from a request's path that has to outlive the request's head.
 - A case of a `route` is given the values with the line they were taken

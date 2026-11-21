@@ -61,6 +61,8 @@ pub const cases = .{
     .{ "pattern_item", "pattern: tests one item that is text, a `[]const u8` or a `Line`, got `u32`; put the handler that yields the text before it, as in `compose(.{ http.Request.path, pattern })`" },
     .{ "pattern_line_borrows", "pattern: `extract(.name, ...)` keeps text that points into the item, and a `io.Line(16)` is a value that takes its text along; keep a copy, as in `extract(.name, as(Line(32), ...))`" },
     .{ "pattern_as_type", "as: expected a type made from text by `pub fn from(text: []const u8) !T`, such as `zrx.Line(32)`, got `u32`" },
+    .{ "pattern_as_pointer", "pattern: what `extract(.name, ...)` keeps has a pointer or a text in it, which would point into the item, and a `io.Line(16)` is a value that takes its text along; keep copies, as in `as(Line(32), ...)`" },
+    .{ "pattern_one_of_certain", "oneOf: choice 1 can match without taking a byte, so it always matches and the choices after it are never reached; put it last, or wrap the others in `optional(oneOf(.{ ... }))`" },
     .{ "pattern_as_extract", "as: `extract(.a, ...)` is inside it, where only the `io.Line(8)` is kept; extract it from a part of its own" },
     .{ "route_concurrent_rejoin", "route: case 0 rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route" },
     .{ "batch_within_size", "batchWithin: size must be at least 1; pass a positive comptime size" },

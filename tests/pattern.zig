@@ -352,6 +352,61 @@ test "a value is a copy: it stays when the text it was taken from is gone" {
     try std.testing.expectEqualStrings("first", found.name.text());
 }
 
+test "a part that can match nothing and can still refuse may be made optional" {
+    // On `x` the part matches the byte and refuses it; the optional then takes nothing.
+    const maybe = optional(as(zrx.Line(0), optional("x")));
+    try expectAll(maybe, true, &.{""});
+    try expectAll(maybe, false, &.{"x"});
+    try expectAll(seq(.{ maybe, "x" }), true, &.{"x"});
+    try expectAll(seq(.{ maybe, "x" }), false, &.{ "", "xx" });
+    // What it kept before it refused is taken back.
+    const kept = seq(.{ optional(extract(.none, as(zrx.Line(0), optional("x")))), extract(.rest, repeat(byte, .{})) });
+    try std.testing.expectEqual(null, ask(kept, "x").?.none);
+    try std.testing.expectEqualStrings("x", ask(kept, "x").?.rest);
+}
+
+/// A value whose `from` keeps the text it was given, and one that holds such a value.
+const Borrowed = struct {
+    text: []const u8,
+
+    pub fn from(text: []const u8) Borrowed {
+        return .{ .text = text };
+    }
+};
+const Wrapped = struct {
+    inside: ?[1]Borrowed,
+
+    pub fn from(text: []const u8) Wrapped {
+        return .{ .inside = .{.from(text)} };
+    }
+};
+
+test "a value with a pointer in it is taken out of a text that stays, where it points" {
+    const text: []const u8 = "abc!";
+    const found = ask(seq(.{ extract(.name, as(Borrowed, letters)), "!" }), text).?;
+    try std.testing.expectEqual(text.ptr, found.name.text.ptr);
+    try std.testing.expectEqualStrings("abc", found.name.text);
+    const deep = ask(seq(.{ extract(.name, as(Wrapped, letters)), "!" }), text).?;
+    try std.testing.expectEqual(text.ptr, deep.name.inside.?[0].text.ptr);
+}
+
+test "a choice that can match nothing and can still refuse does not hide the next" {
+    // `as` refuses the byte its part matched: nothing fits a line of none.
+    const refusing = as(zrx.Line(0), optional("x"));
+    try expectAll(refusing, true, &.{""});
+    try expectAll(refusing, false, &.{"x"});
+    try expectAll(oneOf(.{ refusing, "x" }), true, &.{ "", "x" });
+    // The same through the parts that pass it on.
+    try expectAll(oneOf(.{ seq(.{ refusing, optional("-") }), "x" }), true, &.{ "", "-", "x" });
+    const kept = oneOf(.{ extract(.none, refusing), extract(.one, "x") });
+    try std.testing.expectEqualStrings("x", ask(kept, "x").?.one.?);
+    try std.testing.expectEqual(null, ask(kept, "x").?.none);
+    // And it may stand in a choice that is not last, of a choice. Where it
+    // does match nothing it is taken for good: `y` is left over.
+    try expectAll(oneOf(.{ oneOf(.{ refusing, "y" }), "x" }), true, &.{ "", "x" });
+    try expectAll(oneOf(.{ oneOf(.{ refusing, "y" }), "x" }), false, &.{"y"});
+}
+
 // --- an item that holds its text ------------------------------------------------------
 
 const reading = seq(.{ extract(.sensor, as(Name, letters)), ",", extract(.ts_ms, int(u64)), ",", extract(.temp_mc, int(i32)), optional("\r") });
