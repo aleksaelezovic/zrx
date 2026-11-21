@@ -42,6 +42,17 @@ pub const cases = .{
     .{ "http_path_answer", "http.path: predicate must return `bool`, or an optional when it finds a value, got `usize`" },
     .{ "http_fail_outside", "http.fail: answers a request, so it belongs in the pipe given to `http.serve(...)`; no `http.Response` is provided here" },
     .{ "http_fail_item", "http.fail: answers a failure, got `ext.http.Request`; end the error path of a recover with it: `recover(anyerror, .{http.fail()})`" },
+    .{ "bytes_digest_type", "bytes.digest: expected a hasher as it starts, such as `Sha256.init(.{})`, got a type; a hasher is started by its own `init`, with the options or the seed that takes" },
+    .{ "bytes_digest_not_hasher", "bytes.digest: `hash.Adler32` is not a hasher that is fed and then finished: it needs `update(*H, []const u8)` and a `final` that returns the digest or fills an array with it, as the hashers of `std.crypto.hash` and `std.hash` have" },
+    // The reducer of a digest declares its piece, so this is the message of `fold`.
+    .{ "bytes_digest_item", "takes `[]const u8` but receives `io.Line(16)` here" },
+    .{ "bytes_hex_item", "bytes.hex: encodes one item that is bytes, a `[n]u8`, a `[]const u8` or a `Line`, got `u32`; a number is written in hexadecimal by its format, as in `print(Role, \"{x:0>8}\")`" },
+    .{ "bytes_base64_item", "bytes.base64: encodes one item that is bytes, a `[n]u8`, a `[]const u8` or a `Line`, got `u32`" },
+    .{ "bytes_hex_uncalled", "map: `fn (comptime fmt.Case) type` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`" },
+    // `hex` declares its case as `std.fmt.Case`, so this is Zig's own message, at the call.
+    .{ "bytes_hex_case", "enum 'fmt.Case' has no member named 'mixed'" },
+    .{ "bytes_from_hex_length", "bytes.fromHex: 4 bytes are 8 hexadecimal digits, and the item is a `[6]u8`, which can never be that; pass the number of bytes its text stands for" },
+    .{ "bytes_from_base64_item", "bytes.fromBase64: decodes one item that is text, a `[]const u8`, a `Line` or a `[n]u8`, got `u32`" },
     .{ "pattern_not_pattern", "seq: expected a pattern or a string, got `comptime_int`" },
     .{ "pattern_not_tuple", "seq: expected a tuple of patterns `.{ a, b }`, got `*const [2:0]u8`" },
     .{ "pattern_empty_string", "seq: an empty string describes nothing; leave it out" },

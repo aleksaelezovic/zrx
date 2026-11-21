@@ -1329,6 +1329,163 @@ const long = repeat(shout, .{ .min = 1, .max = 1 });
 Either way, bound the length of a text that comes from outside before a
 pattern is put to it.
 
+## Bytes
+
+`zrx.ext.bytes` is what a stream of byte pieces is turned into: a digest,
+and the text of bytes. It is an extension: handlers written against the
+public contract, on top of `std.crypto.hash`, `std.hash`, `std.fmt` and
+`std.base64`, compiled only when a program uses them. It is not named after
+cryptography: a CRC is none, and there are no ciphers, signatures or keys
+here, and nothing that compares in constant time.
+
+```zig
+const bytes = zrx.ext.bytes;
+
+const Sha256 = bytes.digest(std.crypto.hash.sha2.Sha256.init(.{}));
+
+fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+    return fileBytes(path, read_bytes);
+}
+
+/// The pieces of a file -> one digest -> its 64 hexadecimal digits
+const checksum = pipe(.{
+    fold(Sha256{}, Sha256.update),
+    map(Sha256.final),
+    map(bytes.hex(.lower)),
+});
+
+/// path -> its bytes -> their checksum -> a row
+const hashed = pipe(.{
+    each(bytesOf, checksum),
+    map(described), // is given a zrx.Tagged([]const u8, [64]u8)
+});
+```
+
+| | |
+|---|---|
+| `digest(start)` | A type: the state of a `fold` over pieces, for the hasher `start`. `State{}` is the seed, `State.update` the reducer, and `State.final` the handler that finishes a state into its digest. |
+| `hex(.lower)`, `hex(.upper)` | Handler: bytes as hexadecimal digits. |
+| `base64(codecs)` | Handler: bytes as Base64, in an alphabet of `std.base64` such as `std.base64.url_safe_no_pad`. |
+| `fromHex(n)` | Handler: the `n` bytes that `2 * n` hexadecimal digits stand for, or a `HexError`. |
+| `fromBase64(codecs, n)` | Handler: the `n` bytes a Base64 text stands for, or a `Base64Error`. |
+
+### Digests
+
+`digest` is given the hasher as its own `init` starts it, because hashers
+are started in different ways: `Sha256.init(.{})` takes options,
+`std.hash.XxHash64.init(seed)` a seed, `std.hash.Crc32.init()` nothing. What
+it returns is a struct with one field, `hasher`, that begins as `start`.
+
+- **A hasher is told by its shape**, not by a list of names: it has
+  `update(*H, []const u8)`, and a `final` that returns the digest or fills
+  an array with it (a slice is given `digest_length` bytes). That is `Md5`,
+  `Sha1`, `sha2`, `sha3`, `blake2`, `Blake3` and `AsconHash256` of
+  `std.crypto.hash`, and the CRCs, `Fnv1a`, `Wyhash` and the three `XxHash`
+  of `std.hash`; a hasher of your own with that shape is taken too.
+- **Not a hasher here**: `std.hash.Adler32`, which has no `final`;
+  `Murmur` and `CityHash`, which hash one text and are not fed in pieces;
+  `AsconXof128`, which has no length of its own for its output.
+- **The digest is what the hasher's own `final` returns or fills**: an
+  array of bytes for those of `std.crypto.hash`, an integer for those of
+  `std.hash`. An
+  integer is written in hexadecimal by its format, not by `hex`:
+
+  ```zig
+  const Crc32 = bytes.digest(std.hash.Crc32.init());
+
+  const crc32 = pipe(.{
+      fold(Crc32{}, Crc32.update),
+      map(Crc32.final),
+      print(zrx.Stdout, "{x:0>8}\n"),
+  });
+  ```
+- **A stream without pieces has a digest too**: `fold` emits its seed, and
+  the digest is that of no bytes. Inside `each`, every item has a state of
+  its own, as with any `fold` there.
+- **The state is a value.** A struct of your own can hold one and update it
+  with the reducer, to keep something else along with it:
+
+  ```zig
+  /// The running digest of one file, and how many bytes it had.
+  const Hash = struct {
+      sha: Sha256 = .{},
+      bytes: u64 = 0,
+
+      fn update(hash: Hash, piece: []const u8) Hash {
+          return .{ .sha = Sha256.update(hash.sha, piece), .bytes = hash.bytes + piece.len };
+      }
+  };
+  ```
+- **A reducer is given its state as a value and returns one.** For a hasher
+  whose state is a number, such as a CRC, nothing is left of that: the
+  fixture `same_checksum` is the instructions of the loop by hand. For one
+  that holds bytes it has yet to hash, the state is copied out and back for
+  every piece: `same_digest` shows two copies of the 112 bytes of a SHA-256
+  for each piece, and has them in the loop by hand as well so that it
+  compares the rest. That is paid per piece, not per byte, so read large
+  pieces, and look at the size of the state: measured on aarch64, a
+  `Blake3` state is 1920 bytes and a `KT128` state 82560.
+
+### The text of bytes
+
+`hex` and `base64` are `map` handlers. What they return depends on whether
+the length of the item is known when the program is compiled:
+
+- **An array becomes an array**: a `[32]u8` becomes a `[64]u8` with `hex`,
+  and with `base64` an array as long as the alphabet makes it. It is a value:
+  it crosses a `queue`, and as a field of a row `std.json` writes it as a
+  string.
+- **A `[]const u8` or a [line](#lines-and-values) becomes a value that holds
+  the item** and is written with `{f}`, as what `json.encode` returns is.
+  Nothing is allocated. A line is held as a copy, so the value crosses a
+  `queue`; a `[]const u8` is still that slice, and lives as long as it did.
+
+```zig
+const names = pipe(.{
+    map(bytes.base64(std.base64.url_safe_no_pad)),
+    write(Names, "{f}\n"),
+});
+```
+
+`std` formats bytes by itself where they are the item that is printed: a
+`[n]u8` or a `[]const u8` is written in hexadecimal by `{x}` or `{X}` and in
+standard Base64 by `{b64}`, so a digest that is only printed needs no
+`hex`: `print(Role, "{x}\n")`. The handlers are for the text as a value, for
+a line, and for another alphabet.
+
+### Decoding
+
+`fromHex(n)` and `fromBase64(codecs, n)` return a `[n]u8`: the number of
+bytes is written, so the result is a value. The item is text: a
+`[]const u8`, a line, or an array.
+
+| Error | When |
+|---|---|
+| `error.InvalidLength` | The text is not as long as `n` bytes make it. Its length is looked at before its characters are. |
+| `error.InvalidCharacter` | It holds a byte that is no hexadecimal digit (of either case), or not of the alphabet. |
+| `error.InvalidPadding` | Base64 only: the text has a length no text of its alphabet has, is not padded as the alphabet has it, or its last character leaves bits over. |
+
+`bytes.HexError` and `bytes.Base64Error` name those sets, for an error
+path:
+
+```zig
+const expected = pipe(.{
+    recover(bytes.HexError, rejections),
+    map(bytes.fromHex(32)),
+    forEach(compare),
+});
+```
+
+An array item whose length can never be `n` bytes does not compile.
+
+Not there: decoding a text into as many bytes as it happens to stand for.
+That result has no length known when the program is compiled, so it would
+be a slice into a buffer somebody has to own. Encoding the pieces of a
+stream as one Base64 text is not there either: three bytes make four
+characters, and a group may begin in one piece and end in the next.
+(Hexadecimal has no such groups: `write(Role, "{x}")` over the pieces of a
+file is the hexadecimal text of the file.)
+
 ## HTTP
 
 `zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a

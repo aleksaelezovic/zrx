@@ -1156,3 +1156,122 @@ pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) b
 export fn lean_attempt_failing(ptr: [*]const u32, len: usize, out: *u64) bool {
     return attemptedCapped(exported_with_zrx, ptr[0..len], out);
 }
+
+// --- digests and the text of bytes (zrx.ext.bytes) ------------------------------------------------
+
+const digest = zrx.ext.bytes.digest;
+const hex = zrx.ext.bytes.hex;
+const base64 = zrx.ext.bytes.base64;
+
+const Sha256 = std.crypto.hash.sha2.Sha256;
+const Sha256Of = digest(Sha256.init(.{}));
+const Crc32Of = digest(std.hash.Crc32.init());
+
+const Digest = struct { out: *[Sha256.digest_length]u8 };
+const Checksum = struct { out: *u32 };
+
+fn storeDigest(result: Digest, value: [Sha256.digest_length]u8) void {
+    result.out.* = value;
+}
+fn storeChecksum(result: Checksum, value: u32) void {
+    result.out.* = value;
+}
+
+/// The CRC-32 of the texts, one after the other: a digest as a `fold`, then
+/// finished. The state of this hasher is a number, and stays in a register.
+pub fn checksummed(comptime with_zrx: bool, texts: []const Text, out: *u32) void {
+    if (with_zrx) {
+        const crc32 = pipe(.{ map(bytes), fold(Crc32Of{}, Crc32Of.update), map(Crc32Of.final), forEach(storeChecksum) });
+        run(program(fromSlice(texts), crc32), .{Checksum{ .out = out }});
+    } else {
+        var hasher = std.hash.Crc32.init();
+        for (texts) |text| hasher.update(bytes(text));
+        out.* = hasher.final();
+    }
+}
+
+export fn same_checksum(ptr: [*]const Text, len: usize, out: *u32) void {
+    checksummed(exported_with_zrx, ptr[0..len], out);
+}
+
+/// Their SHA-256: a hasher that holds a block of bytes it has yet to hash.
+pub fn digested(comptime with_zrx: bool, texts: []const Text, out: *[Sha256.digest_length]u8) void {
+    if (with_zrx) {
+        const sha256 = pipe(.{ map(bytes), fold(Sha256Of{}, Sha256Of.update), map(Sha256Of.final), forEach(storeDigest) });
+        run(program(fromSlice(texts), sha256), .{Digest{ .out = out }});
+    } else {
+        var hasher = Sha256.init(.{});
+        for (texts) |text| {
+            var next = hasher;
+            next.update(bytes(text));
+            hasher = next;
+        }
+        out.* = hasher.finalResult();
+    }
+}
+
+/// The loop by hand copies the hasher before it feeds it and back after,
+/// which nobody would write. A reducer is given its state as a value and
+/// returns one, and for a state that holds its bytes the optimizer does
+/// not take the two copies out: two `memcpy` of the 112 bytes of the
+/// hasher for each piece. They are in both loops so that what is compared
+/// is everything else. Without them the loop by hand has 103 instructions
+/// on aarch64 where this has 107, and no copy.
+export fn same_digest(ptr: [*]const Text, len: usize, out: *[Sha256.digest_length]u8) void {
+    digested(exported_with_zrx, ptr[0..len], out);
+}
+
+/// Four bytes as a caller outside Zig hands them over.
+pub const Word = extern struct { bytes: [4]u8 };
+
+fn wordBytes(word: Word) [4]u8 {
+    return word.bytes;
+}
+fn addText(sum: u64, text: [8]u8) u64 {
+    var next = sum;
+    for (text) |c| next = next *% 31 +% c;
+    return next;
+}
+
+/// The hexadecimal digits of every word, folded one by one: `hex` of an array.
+pub fn hexed(comptime with_zrx: bool, words: []const Word, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(wordBytes), map(hex(.lower)), fold(@as(u64, 0), addText), forEach(store) });
+        run(program(fromSlice(words), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (words) |word| {
+            const text = std.fmt.bytesToHex(word.bytes, .lower);
+            for (text) |c| sum = sum *% 31 +% c;
+        }
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`: the loop by hand has its eight digits put into one
+/// number and taken apart again, where the pipeline hands each on as it is
+/// made; the pipeline comes out shorter.
+export fn lean_hex(ptr: [*]const Word, len: usize, out: *u64) void {
+    hexed(exported_with_zrx, ptr[0..len], out);
+}
+
+/// The same in Base64, whose text for four bytes is as long.
+pub fn base64ed(comptime with_zrx: bool, words: []const Word, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(wordBytes), map(base64(std.base64.standard)), fold(@as(u64, 0), addText), forEach(store) });
+        run(program(fromSlice(words), total), .{Result{ .out = out }});
+    } else {
+        const codecs = std.base64.standard;
+        var sum: u64 = 0;
+        for (words) |word| {
+            var text: [8]u8 = undefined;
+            _ = codecs.Encoder.encode(&text, &word.bytes);
+            for (text) |c| sum = sum *% 31 +% c;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_base64(ptr: [*]const Word, len: usize, out: *u64) void {
+    base64ed(exported_with_zrx, ptr[0..len], out);
+}
