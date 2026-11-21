@@ -55,6 +55,7 @@ pub const branch = flow.branch;
 pub const route = flow.route;
 pub const when = flow.when;
 pub const otherwise = flow.otherwise;
+pub const Found = flow.Found;
 pub const concurrent = @import("ops/concurrent.zig").concurrent;
 
 // Sub-pipes within one item
@@ -109,6 +110,7 @@ pub const FileBytes = io.FileBytes;
 pub const ext = struct {
     pub const json = @import("ext/json.zig");
     pub const http = @import("ext/http.zig");
+    pub const pattern = @import("ext/pattern.zig");
 };
 
 // For writing operators, sources and handlers of your own.

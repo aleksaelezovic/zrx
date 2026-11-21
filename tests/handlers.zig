@@ -80,6 +80,66 @@ test "a fallible predicate makes the combination fallible" {
     try std.testing.expectError(error.Seven, result);
 }
 
+// --- predicates that find a value ---------------------------------------------
+
+/// The half of an even number: an optional, as the condition of `if (x) |found|`.
+fn half(value: u32) ?u32 {
+    return if (value % 2 == 0) value / 2 else null;
+}
+fn countedHalf(calls: *Calls, value: u32) ?u32 {
+    calls.count += 1;
+    return half(value);
+}
+fn found(halved: anytype) u32 {
+    return halved.found;
+}
+
+test "all answers what its last predicate finds, once those before it hold" {
+    try std.testing.expect(zrx.di.Result("test", all(.{ ge(4), half }), &.{u32}) == ?u32);
+    try std.testing.expect(zrx.di.Result("test", all(.{ checked, half }), &.{u32}) == error{Seven}!?u32);
+    try std.testing.expect(zrx.di.Result("test", all(.{ ge(4), isEven }), &.{u32}) == bool);
+
+    var seen: Numbers = .{};
+    const halves = pipe(.{zrx.route(.{zrx.when(all(.{ ge(4), lt(9), half }), .{ map(found), forEach(record) })})});
+    try support.run(program(range(u32, 0, 12), halves), .{&seen});
+    try seen.expect(&.{ 2, 3, 4 });
+}
+
+test "all does not ask its last predicate once an earlier one does not hold" {
+    var seen: Numbers = .{};
+    var calls: Calls = .{};
+    const halves = pipe(.{zrx.route(.{zrx.when(all(.{ ge(6), countedHalf }), .{ map(found), forEach(record) })})});
+    try support.run(program(range(u32, 0, 10), halves), .{ &seen, &calls });
+    try seen.expect(&.{ 3, 4 });
+    try std.testing.expectEqual(@as(usize, 4), calls.count);
+}
+
+test "a predicate of all that fails before the last one fails the run" {
+    var seen: Numbers = .{};
+    const halves = pipe(.{zrx.route(.{zrx.when(all(.{ checked, half }), .{ map(found), forEach(record) })})});
+    try std.testing.expectError(error.Seven, support.run(program(range(u32, 4, 10), halves), .{&seen}));
+    try seen.expect(&.{ 2, 3 });
+}
+
+test "require gives what its predicate found, or fails with the named error" {
+    try std.testing.expect(zrx.di.Result("test", require(half, error.Odd), &.{u32}) == error{Odd}!u32);
+    try std.testing.expect(zrx.di.Result("test", require(all(.{ checked, half }), error.Odd), &.{u32}) == error{ Odd, Seven }!u32);
+
+    var seen: Numbers = .{};
+    var rejected: Rejected = .{};
+    const halves = pipe(.{ zrx.recover(error{Odd}, .{forEach(countOdd)}), map(require(half, error.Odd)), forEach(record) });
+    try support.run(program(range(u32, 0, 7), halves), .{ &seen, &rejected });
+    try seen.expect(&.{ 0, 1, 2, 3 });
+    try std.testing.expectEqual(@as(u32, 3), rejected.odd);
+}
+
+test "require takes what all found" {
+    var seen: Numbers = .{};
+    const result = support.run(program(range(u32, 4, 10), pipe(.{ map(require(all(.{ le(6), half }), error.Rejected)), forEach(record) })), .{&seen});
+    try std.testing.expectError(error.Rejected, result);
+    try seen.expect(&.{2});
+}
+
 const Order = struct { id: u32, price: u32 };
 const Tax = struct { percent: u32 };
 fn addTax(tax: Tax, price: u32) u32 {

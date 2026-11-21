@@ -52,7 +52,7 @@ fn Filter(comptime predicate: anytype) type {
         pub const name = "filter";
 
         pub fn Out(comptime Env: type, comptime In: type) type {
-            expectReturn(name, "predicate", di.Bound(name, predicate, Env, &.{In}).Return, bool);
+            expectHolds(name, di.Bound(name, predicate, Env, &.{In}).Return, route_instead);
             return In;
         }
 
@@ -240,7 +240,7 @@ fn TakeWhile(comptime predicate: anytype) type {
         pub const name = "takeWhile";
 
         pub fn Out(comptime Env: type, comptime In: type) type {
-            expectReturn(name, "predicate", di.Bound(name, predicate, Env, &.{In}).Return, bool);
+            expectHolds(name, di.Bound(name, predicate, Env, &.{In}).Return, route_instead);
             return In;
         }
 
@@ -408,6 +408,30 @@ fn BatchBuffer(comptime size: usize) type {
         }
     };
 }
+
+/// What a predicate finds, read in one place. A predicate answers `bool`,
+/// or an optional when it finds a value in the item, as the condition of an
+/// `if` does: this is `T` for `?T` (or `E!?T`) and null for `bool`. Anything
+/// else is not a predicate.
+pub fn Finds(comptime who: []const u8, comptime R: type) ?type {
+    return switch (@typeInfo(di.Payload(R))) {
+        .bool => null,
+        .optional => |found| found.child,
+        else => @compileError(who ++ ": predicate must return `bool`, or an optional when it finds a value, got `" ++ @typeName(R) ++ "`"),
+    };
+}
+
+/// Requires a predicate that answers `bool`, where there is nowhere for a
+/// value to go. One that finds a value is told so, with `instead`.
+pub fn expectHolds(comptime who: []const u8, comptime R: type, comptime instead: []const u8) void {
+    if (@typeInfo(di.Payload(R)) == .optional) @compileError(
+        who ++ ": predicate finds a value (`" ++ @typeName(R) ++ "`), which " ++ who ++ " cannot pass on; " ++ instead,
+    );
+    expectReturn(who, "predicate", R, bool);
+}
+
+/// What to write where an operator only keeps or drops an item.
+const route_instead = "write `route(.{ when(predicate, .{ ... }) })` to go on with what it found, or return `bool`";
 
 /// Requires `R` to be `Want` or `E!Want`.
 pub fn expectReturn(comptime who: []const u8, comptime what: []const u8, comptime R: type, comptime Want: type) void {

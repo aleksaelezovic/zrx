@@ -1,0 +1,532 @@
+//! Patterns of text: what a whole text looks like, written as a value, and
+//! what to take out of it.
+//!
+//!     const item_path = seq(.{ "/items/", extract(.id, int(u32)) });
+//!
+//!     filter(service_name)                              // extracts nothing: a `bool`
+//!     map(require(record, error.InvalidRecord))         // `Extracted(record)`, or the error
+//!     when(compose(.{ http.Request.path, item_path }), .{ ... })
+//!
+//! A pattern is a handler, as `gt(80)` is: a predicate on one `[]const u8`
+//! item, which holds when the pattern describes the whole text. One that
+//! extracts nothing answers `bool`. One with an `extract` in it answers
+//! `?Extracted(pattern)`, a predicate that finds a value: `when`, `require`
+//! and the last place of `all` take it.
+//!
+//! Matching goes from left to right and what has matched is not given
+//! back. `repeat` takes as much as it can and gives nothing back; `oneOf`
+//! takes its first choice that matches, for good. That is the scanner one
+//! writes by hand, and it is not a regular expression: what such a scanner
+//! cannot match, a pattern cannot either. Where a pattern can be seen never
+//! to match for that reason, it does not compile.
+//!
+//! What did not match has still been read. The next choice of a `oneOf`,
+//! and what follows an `optional`, begin where the part that failed began,
+//! and inside a `repeat` that is once for every round: a choice that reads
+//! far before it fails makes a long text cost the square of its length.
+//! Nothing here factors what two choices share; the guide says how to write
+//! it once.
+//!
+//! Nothing here is known to the core: a pattern is a composite handler.
+const std = @import("std");
+const di = @import("../di.zig");
+
+/// A set of bytes, one bit for each.
+const Bytes = u256;
+
+fn only(byte_value: u8) Bytes {
+    return @as(Bytes, 1) << byte_value;
+}
+
+/// What an `extract` keeps: under which name, as which type, and whether
+/// the part it is in may be absent from a text the pattern describes.
+const Kept = struct { name: []const u8, Type: type, maybe: bool };
+
+// A pattern is a `Pattern(Node)`. A node is a type that says how to match:
+//
+//     match(text, at, out) ?usize   the position after it, or null
+//     nullable                      whether it can match without taking a byte
+//     first: Bytes                  the bytes it can begin with, when it takes any
+//     ends_before: ?Bytes           bytes that cannot follow it, because it took them all
+//     width: ?usize                 how many bytes it takes, when that is always the same
+//     kept: []const Kept            what it extracts
+//
+// `out` is a pointer to the struct being extracted into, or `{}` when
+// nothing is. A node may also declare `literal` (the text it is), `members`
+// (the set it is one byte of), or `Value` with `read` (what it keeps
+// instead of text).
+
+/// Marks what this file made. A private type and not a name: a caller's
+/// own handler may declare anything.
+const Mark = struct {};
+
+fn Pattern(comptime N: type) type {
+    return struct {
+        pub const zrx_pattern: Mark = .{};
+        pub const zrx_handler = {};
+        const Node = N;
+
+        pub fn requires(comptime _: usize) []const type {
+            return &.{};
+        }
+
+        /// Whether the whole of the item is what the pattern describes; with
+        /// an `extract` in the pattern, what it extracted.
+        pub fn call(_: anytype, args: anytype) Asked(N, di.types(@TypeOf(args))) {
+            const text: []const u8 = args[0];
+            if (comptime N.kept.len != 0) {
+                var out: Struct(N) = undefined;
+                inline for (N.kept) |kept| {
+                    if (kept.maybe) @field(out, kept.name) = null;
+                }
+                const end = N.match(text, 0, &out) orelse return null;
+                return if (end == text.len) out else null;
+            }
+            // A pattern of one width describes only a text of that length.
+            if (comptime N.width) |width| {
+                if (text.len != width) return false;
+            }
+            const end = N.match(text, 0, {}) orelse return false;
+            return end == text.len;
+        }
+    };
+}
+
+fn Answer(comptime N: type) type {
+    return if (N.kept.len == 0) bool else ?Struct(N);
+}
+
+fn isText(comptime T: type) bool {
+    const info = switch (@typeInfo(T)) {
+        .pointer => |pointer| pointer,
+        else => return false,
+    };
+    return switch (info.size) {
+        .slice => info.child == u8,
+        .one => switch (@typeInfo(info.child)) {
+            .array => |array| array.child == u8,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+/// `Answer(N)`, where what the pattern is asked about is one text. Part of
+/// the type of `call`, so that it is checked where the pattern is used.
+fn Asked(comptime N: type, comptime Args: []const type) type {
+    if (Args.len != 1 or !isText(Args[0])) @compileError(
+        "pattern: tests one `[]const u8` item, got " ++ di.listTypes(Args) ++
+            "; put the handler that yields the text before it, as in `compose(.{ http.Request.path, pattern })`",
+    );
+    return Answer(N);
+}
+
+fn isPattern(comptime p: anytype) bool {
+    if (@TypeOf(p) != type or @typeInfo(p) != .@"struct") return false;
+    return @hasDecl(p, "zrx_pattern") and @TypeOf(p.zrx_pattern) == Mark;
+}
+
+/// The node of a pattern; a string is the pattern of its text.
+fn nodeOf(comptime who: []const u8, comptime p: anytype) type {
+    if (isPattern(p)) return p.Node;
+    const Given = @TypeOf(p);
+    if (isText(Given)) return Literal(who, p);
+    @compileError(who ++ ": expected a pattern or a string, got `" ++ (if (Given == type) @typeName(p) else @typeName(Given)) ++ "`");
+}
+
+fn nodesOf(comptime who: []const u8, comptime parts: anytype) []const type {
+    @setEvalBranchQuota(di.quota);
+    if (!di.isTuple(@TypeOf(parts))) @compileError(who ++ ": expected a tuple of patterns `.{ a, b }`, got `" ++ @typeName(@TypeOf(parts)) ++ "`");
+    if (parts.len == 0) @compileError(who ++ ": needs at least one pattern");
+    var out: []const type = &.{};
+    for (parts) |part| out = out ++ &[_]type{nodeOf(who, part)};
+    return out;
+}
+
+fn maybe(comptime kept: []const Kept) []const Kept {
+    var out: []const Kept = &.{};
+    for (kept) |one| out = out ++ &[_]Kept{.{ .name = one.name, .Type = one.Type, .maybe = true }};
+    return out;
+}
+
+/// Takes back what a part that did not match in the end had extracted.
+fn forget(comptime kept: []const Kept, out: anytype) void {
+    if (@TypeOf(out) == void) return;
+    inline for (kept) |one| @field(out, one.name) = null;
+}
+
+// ---------------------------------------------------------------------------
+// Text and bytes
+// ---------------------------------------------------------------------------
+
+fn Literal(comptime who: []const u8, comptime text: []const u8) type {
+    if (text.len == 0) @compileError(who ++ ": an empty string describes nothing; leave it out");
+    return struct {
+        pub const literal = text;
+        pub const nullable = false;
+        pub const first: Bytes = only(text[0]);
+        pub const ends_before: ?Bytes = null;
+        pub const width: ?usize = text.len;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            return if (std.mem.startsWith(u8, input[at..], text)) at + text.len else null;
+        }
+    };
+}
+
+fn Set(comptime bytes: Bytes) type {
+    return struct {
+        pub const members = bytes;
+        pub const nullable = false;
+        pub const first: Bytes = bytes;
+        pub const ends_before: ?Bytes = null;
+        pub const width: ?usize = 1;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            if (at == input.len) return null;
+            return if (has(input[at])) at + 1 else null;
+        }
+
+        /// As comparisons with the runs of the set, which is what one writes
+        /// by hand; a table would be a load for every byte.
+        pub fn has(byte_value: u8) bool {
+            inline for (comptime runs(bytes)) |run| {
+                if (byte_value -% run[0] <= run[1] - run[0]) return true;
+            }
+            return false;
+        }
+    };
+}
+
+/// The runs of consecutive bytes in `bytes`, each as its first and last.
+fn runs(comptime bytes: Bytes) []const [2]u8 {
+    @setEvalBranchQuota(di.quota);
+    var out: []const [2]u8 = &.{};
+    var at: usize = 0;
+    while (at < 256) {
+        if (bytes & only(@intCast(at)) == 0) {
+            at += 1;
+            continue;
+        }
+        const from = at;
+        while (at < 256 and bytes & only(@intCast(at)) != 0) at += 1;
+        out = out ++ &[_][2]u8{.{ @intCast(from), @intCast(at - 1) }};
+    }
+    return out;
+}
+
+/// A byte as one would write it in a message.
+fn shown(comptime byte_value: u8) []const u8 {
+    return if (std.ascii.isPrint(byte_value)) std.fmt.comptimePrint("'{c}'", .{byte_value}) else std.fmt.comptimePrint("{d}", .{byte_value});
+}
+
+/// One byte, any of those in `bytes`: `set("-_")`.
+pub fn set(comptime bytes: []const u8) type {
+    if (bytes.len == 0) @compileError("set: needs at least one byte, as in `set(\"-_\")`");
+    var all: Bytes = 0;
+    for (bytes) |byte_value| all |= only(byte_value);
+    return Pattern(Set(all));
+}
+
+/// One byte, from `from` to `to`, both included: `between('a', 'f')`.
+pub fn between(comptime from: u8, comptime to: u8) type {
+    if (from > to) @compileError("between: " ++ shown(from) ++ " comes after " ++ shown(to) ++ "; write the lower byte first");
+    var all: Bytes = 0;
+    for (from..@as(usize, to) + 1) |byte_value| all |= only(@intCast(byte_value));
+    return Pattern(Set(all));
+}
+
+/// One byte that is none of those `p` is one of: `except(set("/?"))`.
+pub fn except(comptime p: anytype) type {
+    const N = nodeOf("except", p);
+    if (!@hasDecl(N, "members")) @compileError("except: takes a pattern of one byte, such as `set(\"/?\")` or `digit`");
+    if (~N.members == 0) @compileError("except: nothing is left when every byte is excepted");
+    return Pattern(Set(~N.members));
+}
+
+/// Any one byte.
+pub const byte = Pattern(Set(~@as(Bytes, 0)));
+/// `0` to `9`.
+pub const digit = between('0', '9');
+/// `a` to `z`.
+pub const lower = between('a', 'z');
+/// `A` to `Z`.
+pub const upper = between('A', 'Z');
+/// A letter of either case.
+pub const alpha = oneOf(.{ lower, upper });
+/// A letter or a digit.
+pub const alnum = oneOf(.{ alpha, digit });
+
+// ---------------------------------------------------------------------------
+// Sequence, choice, repetition
+// ---------------------------------------------------------------------------
+
+/// Each of `parts`, one after the other. A string among them is its text.
+pub fn seq(comptime parts: anytype) type {
+    const Ns = nodesOf("seq", parts);
+    comptime {
+        @setEvalBranchQuota(di.quota);
+        for (Ns[0 .. Ns.len - 1], Ns[1..], 2..) |Before, After, place| {
+            const taken = Before.ends_before orelse continue;
+            if (!After.nullable and After.first & ~taken == 0) @compileError(std.fmt.comptimePrint(
+                "seq: part {d} can never match: the part before it takes every byte it could begin with and gives none back; end that part before such a byte, as `repeat(except(set(\"/\")), .{{}})` ends before a `/`",
+                .{place},
+            ));
+        }
+    }
+    return Pattern(struct {
+        pub const nullable = blk: {
+            for (Ns) |N| if (!N.nullable) break :blk false;
+            break :blk true;
+        };
+        pub const first: Bytes = blk: {
+            var all: Bytes = 0;
+            for (Ns) |N| {
+                all |= N.first;
+                if (!N.nullable) break;
+            }
+            break :blk all;
+        };
+        pub const ends_before: ?Bytes = Ns[Ns.len - 1].ends_before;
+        pub const width: ?usize = blk: {
+            var sum: usize = 0;
+            // Saturating, here and in `repeat`: a width or a bound that
+            // does not fit a `usize` is more than any text has.
+            for (Ns) |N| sum +|= N.width orelse break :blk null;
+            break :blk sum;
+        };
+        pub const kept: []const Kept = blk: {
+            var all: []const Kept = &.{};
+            for (Ns) |N| all = all ++ N.kept;
+            break :blk all;
+        };
+
+        pub fn match(input: []const u8, at: usize, out: anytype) ?usize {
+            var end = at;
+            inline for (Ns) |N| end = N.match(input, end, out) orelse return null;
+            return end;
+        }
+    });
+}
+
+/// The first of `choices` that matches. It is taken for good: a later
+/// choice is not tried when what follows the `oneOf` then does not match.
+pub fn oneOf(comptime choices: anytype) type {
+    const Ns = nodesOf("oneOf", choices);
+    comptime {
+        @setEvalBranchQuota(di.quota);
+        for (Ns, 1..) |Early, place| {
+            if (Early.nullable and place != Ns.len) @compileError(std.fmt.comptimePrint(
+                "oneOf: choice {d} can match without taking a byte, so it always matches and the choices after it are never reached; put it last, or wrap the others in `optional(oneOf(.{{ ... }}))`",
+                .{place},
+            ));
+            const early = if (@hasDecl(Early, "literal")) Early.literal else continue;
+            for (Ns[place..], place + 1..) |Late, later| {
+                const late = if (@hasDecl(Late, "literal")) Late.literal else continue;
+                if (std.mem.startsWith(u8, late, early)) @compileError(std.fmt.comptimePrint(
+                    "oneOf: choice {d}, \"{s}\", is never reached: choice {d}, \"{s}\", matches first and is taken for good; write the longer one first",
+                    .{ later, late, place, early },
+                ));
+            }
+        }
+    }
+    // Choices that are each one byte are one set.
+    const bytes: ?Bytes = blk: {
+        var all: Bytes = 0;
+        for (Ns) |N| all |= if (@hasDecl(N, "members")) N.members else break :blk null;
+        break :blk all;
+    };
+    if (bytes) |all| return Pattern(Set(all));
+    return Pattern(struct {
+        pub const nullable = Ns[Ns.len - 1].nullable;
+        pub const first: Bytes = blk: {
+            var all: Bytes = 0;
+            for (Ns) |N| all |= N.first;
+            break :blk all;
+        };
+        pub const ends_before: ?Bytes = null;
+        pub const width: ?usize = null;
+        pub const kept: []const Kept = blk: {
+            var all: []const Kept = &.{};
+            for (Ns) |N| all = all ++ maybe(N.kept);
+            break :blk all;
+        };
+
+        pub fn match(input: []const u8, at: usize, out: anytype) ?usize {
+            inline for (Ns) |N| {
+                if (N.match(input, at, out)) |end| return end;
+                forget(N.kept, out);
+            }
+            return null;
+        }
+    });
+}
+
+/// How often `repeat` matches its pattern: at least `min` times, and no
+/// more than `max` when there is one. Both count rounds, not bytes: a round
+/// is as long as the pattern makes it.
+pub const Count = struct { min: usize = 0, max: ?usize = null };
+
+/// `p` again and again: as often as it matches, up to `count.max`, and at
+/// least `count.min` times. It gives nothing back: `repeat(digit, .{})`
+/// followed by a digit never matches.
+pub fn repeat(comptime p: anytype, comptime count: Count) type {
+    const N = nodeOf("repeat", p);
+    if (N.nullable) @compileError("repeat: its pattern can match without taking a byte, so it would never stop; repeat a pattern that takes at least one byte");
+    if (N.kept.len != 0) @compileError("repeat: `extract(." ++ N.kept[0].name ++ ", ...)` is inside it and would keep only the last round; put the `extract` around the `repeat`");
+    if (count.max) |max| {
+        if (max == 0 or max < count.min) @compileError(std.fmt.comptimePrint(
+            "repeat: `.max = {d}` leaves no room for `.min = {d}`; `max` is at least 1 and at least `min`",
+            .{ max, count.min },
+        ));
+    }
+    return Pattern(struct {
+        pub const nullable = count.min == 0;
+        pub const first: Bytes = N.first;
+        /// Without a maximum, it stops only at a byte its pattern is not.
+        pub const ends_before: ?Bytes = if (count.max == null and @hasDecl(N, "members")) N.members else null;
+        pub const width: ?usize = if (count.max == count.min) (if (N.width) |each| each *| count.min else null) else null;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            var end = at;
+            if (comptime N.width) |each| {
+                // Rounds are counted by how far it got, as by hand.
+                if (comptime count.max) |max| {
+                    while (end - at < max *| each) end = N.match(input, end, {}) orelse break;
+                } else {
+                    while (true) end = N.match(input, end, {}) orelse break;
+                }
+                return if (end - at >= count.min *| each) end else null;
+            }
+            var rounds: usize = 0;
+            if (comptime count.max) |max| {
+                while (rounds < max) : (rounds += 1) end = N.match(input, end, {}) orelse break;
+            } else {
+                while (true) : (rounds += 1) end = N.match(input, end, {}) orelse break;
+            }
+            return if (rounds >= count.min) end else null;
+        }
+    });
+}
+
+/// `p`, or nothing where `p` does not match.
+pub fn optional(comptime p: anytype) type {
+    const N = nodeOf("optional", p);
+    if (N.nullable) @compileError("optional: its pattern can already match without taking a byte");
+    return Pattern(struct {
+        pub const nullable = true;
+        pub const first: Bytes = N.first;
+        pub const ends_before: ?Bytes = null;
+        pub const width: ?usize = null;
+        pub const kept: []const Kept = maybe(N.kept);
+
+        pub fn match(input: []const u8, at: usize, out: anytype) ?usize {
+            if (N.match(input, at, out)) |end| return end;
+            forget(N.kept, out);
+            return at;
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// What a pattern keeps
+// ---------------------------------------------------------------------------
+
+/// A decimal number that fits `T`, with a `-` before it when `T` is signed.
+/// A number that does not fit does not match. Extracted, it is kept as a
+/// `T` and not as text.
+pub fn int(comptime T: type) type {
+    if (@typeInfo(T) != .int or std.math.maxInt(T) < 10) @compileError("int: expected an integer type that holds at least 10, such as `u32`, got `" ++ @typeName(T) ++ "`");
+    const signed = @typeInfo(T).int.signedness == .signed;
+    const digits = digit.Node.members;
+    return Pattern(struct {
+        pub const Value = T;
+        pub const nullable = false;
+        pub const first: Bytes = digits | if (signed) only('-') else 0;
+        /// It takes every digit there is.
+        pub const ends_before: ?Bytes = digits;
+        pub const width: ?usize = null;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            var unused: T = undefined;
+            return read(input, at, &unused);
+        }
+
+        /// `match`, with the number left in `value`: one pass over the digits.
+        pub fn read(input: []const u8, at: usize, value: *T) ?usize {
+            var end = at;
+            const negative = signed and end < input.len and input[end] == '-';
+            if (negative) end += 1;
+            const from = end;
+            var number: T = 0;
+            while (end < input.len and input[end] -% '0' < 10) : (end += 1) {
+                const next = std.math.cast(T, input[end] - '0') orelse return null;
+                number = std.math.mul(T, number, 10) catch return null;
+                number = (if (negative) std.math.sub(T, number, next) else std.math.add(T, number, next)) catch return null;
+            }
+            if (end == from) return null;
+            value.* = number;
+            return end;
+        }
+    });
+}
+
+/// `p`, with what it matched kept as the field `name` of what the pattern
+/// extracts: the matched text, or the number of an `int`. The text points
+/// into the item.
+pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
+    const N = nodeOf("extract", p);
+    const typed = @hasDecl(N, "Value");
+    return Pattern(struct {
+        pub const nullable = N.nullable;
+        pub const first: Bytes = N.first;
+        pub const ends_before: ?Bytes = N.ends_before;
+        pub const width: ?usize = N.width;
+        pub const kept: []const Kept = N.kept ++ &[_]Kept{.{
+            .name = @tagName(name),
+            .Type = if (typed) N.Value else []const u8,
+            .maybe = false,
+        }};
+
+        pub fn match(input: []const u8, at: usize, out: anytype) ?usize {
+            if (@TypeOf(out) == void) return N.match(input, at, out);
+            if (typed) {
+                var value: N.Value = undefined;
+                const end = N.read(input, at, &value) orelse return null;
+                @field(out, @tagName(name)) = value;
+                return end;
+            }
+            const end = N.match(input, at, out) orelse return null;
+            @field(out, @tagName(name)) = input[at..end];
+            return end;
+        }
+    });
+}
+
+/// What `p` extracts, as a struct: a field for each `extract` in it, of the
+/// type of what that keeps (`[]const u8`, or the `T` of an `int(T)`), and
+/// optional where the `extract` is inside `optional` or `oneOf`. A handler
+/// that names its item writes `Extracted(p)`; `anytype` takes it too.
+pub fn Extracted(comptime p: anytype) type {
+    const N = nodeOf("Extracted", p);
+    if (N.kept.len == 0) @compileError("Extracted: the pattern extracts nothing; wrap the parts to keep in `extract(.name, ...)`");
+    return Struct(N);
+}
+
+fn Struct(comptime N: type) type {
+    @setEvalBranchQuota(di.quota);
+    var names: [N.kept.len][]const u8 = undefined;
+    var types: [N.kept.len]type = undefined;
+    for (N.kept, 0..) |kept, i| {
+        for (N.kept[0..i]) |earlier| {
+            if (std.mem.eql(u8, earlier.name, kept.name)) @compileError("extract: `." ++ kept.name ++ "` is extracted twice in one pattern; give each `extract` a name of its own");
+        }
+        names[i] = kept.name;
+        types[i] = if (kept.maybe) ?kept.Type else kept.Type;
+    }
+    return @Struct(.auto, null, &names, &types, &@splat(.{}));
+}

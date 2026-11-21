@@ -144,6 +144,65 @@ export fn same_route(ptr: [*]const u32, len: usize, out: *u64) void {
     routed(exported_with_zrx, ptr[0..len], out);
 }
 
+// --- route by what a predicate finds --------------------------------------------
+
+/// The half of an even value: a predicate that finds what the case goes on with.
+fn half(value: u32) ?u32 {
+    return if (value % 2 == 0) value / 2 else null;
+}
+fn halfAndValue(even: zrx.Found(u32, u32)) u32 {
+    return even.found +% even.item;
+}
+
+pub fn routedFound(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            route(.{ when(half, .{map(halfAndValue)}), otherwise(.{map(increment)}) }),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            sum +%= if (half(value)) |found| found +% value else value +% 1;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_route_found(ptr: [*]const u32, len: usize, out: *u64) void {
+    routedFound(exported_with_zrx, ptr[0..len], out);
+}
+
+/// The same, where `all` asks a predicate first and answers what its last one found.
+pub fn routedGuarded(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            route(.{ when(zrx.all(.{ isLarge, half }), .{map(halfAndValue)}), otherwise(.{map(increment)}) }),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            if (value >= 6) {
+                if (half(value)) |found| {
+                    sum +%= found +% value;
+                    continue;
+                }
+            }
+            sum +%= value +% 1;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_route_guarded(ptr: [*]const u32, len: usize, out: *u64) void {
+    routedGuarded(exported_with_zrx, ptr[0..len], out);
+}
+
 // --- branch into two folds --------------------------------------------------------
 
 pub fn branched(comptime with_zrx: bool, items: []const u32, first: *u64, second: *u64) void {
@@ -729,6 +788,172 @@ pub fn required(comptime with_zrx: bool, items: []const u32, rejected: *u32, out
 
 export fn same_require(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
     required(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+/// Halves summed, the values that have none counted: `require` over a
+/// predicate that finds a value.
+pub fn requiredFound(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countRejected)}), map(zrx.require(half, error.TooSmall)), tap(accumulate), drain() });
+        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        for (items) |value| {
+            if (half(value)) |found| {
+                out.* +%= found;
+            } else {
+                rejected.* +%= 1;
+            }
+        }
+    }
+}
+
+export fn same_require_found(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
+    requiredFound(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+// --- patterns of text (zrx.ext.pattern) -----------------------------------------------------------
+
+const pattern = zrx.ext.pattern;
+
+/// A text as a caller outside Zig hands one over.
+pub const Text = extern struct { ptr: [*]const u8, len: usize };
+
+fn bytes(text: Text) []const u8 {
+    return text.ptr[0..text.len];
+}
+fn countText(count: u64, _: Text) u64 {
+    return count +% 1;
+}
+
+const service_name = pattern.repeat(pattern.oneOf(.{ pattern.alnum, pattern.set("-_") }), .{ .min = 1 });
+
+fn isServiceName(text: []const u8) bool {
+    for (text) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
+    return text.len != 0;
+}
+
+/// How many of the texts are service names: a pattern as a `filter`.
+pub fn namesCounted(comptime with_zrx: bool, texts: []const Text, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ filter(zrx.compose(.{ bytes, service_name })), fold(@as(u64, 0), countText), forEach(store) });
+        run(program(fromSlice(texts), total), .{Result{ .out = out }});
+    } else {
+        var count: u64 = 0;
+        for (texts) |text| {
+            if (isServiceName(bytes(text))) count +%= 1;
+        }
+        out.* = count;
+    }
+}
+
+/// `lean`, not `same`: a pattern carries its position through its parts and
+/// asks at the end whether that is the end of the text, where the loop
+/// leaves at the first byte that is wrong. What is done for a byte is the same.
+export fn lean_pattern_filter(ptr: [*]const Text, len: usize, out: *u64) void {
+    namesCounted(exported_with_zrx, ptr[0..len], out);
+}
+
+const item_path = pattern.seq(.{ "/items/", pattern.extract(.id, pattern.int(u32)) });
+
+fn itemId(text: []const u8) ?u32 {
+    const prefix = "/items/";
+    if (!std.mem.startsWith(u8, text, prefix)) return null;
+    var id: u32 = 0;
+    for (text[prefix.len..]) |c| {
+        if (!std.ascii.isDigit(c)) return null;
+        id = std.math.mul(u32, id, 10) catch return null;
+        id = std.math.add(u32, id, c - '0') catch return null;
+    }
+    return if (text.len == prefix.len) null else id;
+}
+fn addId(sum: u64, item: anytype) u64 {
+    return sum +% item.found.id;
+}
+
+/// The ids of the texts that are item paths summed, the other texts
+/// counted: a pattern that extracts, as the predicate of a case.
+pub fn pathsRouted(comptime with_zrx: bool, texts: []const Text, ids: *u64, others: *u64) void {
+    if (with_zrx) {
+        const sorted = pipe(.{route(.{
+            when(zrx.compose(.{ bytes, item_path }), .{ fold(@as(u64, 0), addId), forEach(store) }),
+            otherwise(.{ fold(@as(u64, 0), countText), forEach(storeSecond) }),
+        })});
+        run(program(fromSlice(texts), sorted), .{ Result{ .out = ids }, Second{ .out = others } });
+    } else {
+        var sum: u64 = 0;
+        var rest: u64 = 0;
+        for (texts) |text| {
+            if (itemId(bytes(text))) |id| sum +%= id else rest +%= 1;
+        }
+        ids.* = sum;
+        others.* = rest;
+    }
+}
+
+/// `lean`, not `same`, for the reason given at `lean_pattern_filter`: the
+/// prefix is not cut off, the position goes on from behind it.
+export fn lean_pattern_route(ptr: [*]const Text, len: usize, ids: *u64, others: *u64) void {
+    pathsRouted(exported_with_zrx, ptr[0..len], ids, others);
+}
+
+const reading = pattern.seq(.{ pattern.extract(.ts_ms, pattern.int(u64)), ",", pattern.extract(.temp_mc, pattern.int(i32)) });
+const InvalidReading = zrx.Failed(error{TooSmall}, Text);
+
+fn readingOf(text: []const u8) ?struct { ts_ms: u64, temp_mc: i32 } {
+    var at: usize = 0;
+    var ts_ms: u64 = 0;
+    while (at < text.len and std.ascii.isDigit(text[at])) : (at += 1) {
+        ts_ms = std.math.mul(u64, ts_ms, 10) catch return null;
+        ts_ms = std.math.add(u64, ts_ms, text[at] - '0') catch return null;
+    }
+    if (at == 0 or at == text.len or text[at] != ',') return null;
+    at += 1;
+    const negative = at < text.len and text[at] == '-';
+    if (negative) at += 1;
+    const from = at;
+    var temp_mc: i32 = 0;
+    while (at < text.len and std.ascii.isDigit(text[at])) : (at += 1) {
+        const next: i32 = text[at] - '0';
+        temp_mc = std.math.mul(i32, temp_mc, 10) catch return null;
+        temp_mc = (if (negative) std.math.sub(i32, temp_mc, next) else std.math.add(i32, temp_mc, next)) catch return null;
+    }
+    if (at == from or at != text.len) return null;
+    return .{ .ts_ms = ts_ms, .temp_mc = temp_mc };
+}
+fn countInvalid(rejected: Rejected, _: InvalidReading) void {
+    rejected.count.* +%= 1;
+}
+fn addTemperature(result: Result, found: anytype) void {
+    result.out.* +%= @as(u32, @bitCast(found.temp_mc));
+}
+
+/// The temperatures of the readings summed, the texts that are no reading
+/// counted: `require` over a pattern that extracts two numbers.
+pub fn readingsRequired(comptime with_zrx: bool, texts: []const Text, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            recover(error{TooSmall}, .{forEach(countInvalid)}),
+            map(zrx.require(zrx.compose(.{ bytes, reading }), error.TooSmall)),
+            tap(addTemperature),
+            drain(),
+        });
+        run(program(fromSlice(texts), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        for (texts) |text| {
+            if (readingOf(bytes(text))) |found| {
+                out.* +%= @as(u32, @bitCast(found.temp_mc));
+            } else {
+                rejected.* +%= 1;
+            }
+        }
+    }
+}
+
+/// `lean`, not `same`: as many instructions as the scanner above, in another
+/// order, as the pattern asks "is this the end" once where the scanner asks
+/// it with the last number.
+export fn lean_pattern_require(ptr: [*]const Text, len: usize, rejected: *u32, out: *u64) void {
+    readingsRequired(exported_with_zrx, ptr[0..len], rejected, out);
 }
 
 // --- each ---------------------------------------------------------------------------------------

@@ -905,6 +905,78 @@ test "case predicates use program dependencies" {
     try right.expect(&.{ 0, 1, 2 });
 }
 
+// A predicate that finds a value answers an optional, as the condition of
+// `if (x) |found|` does: here, the half of an even number.
+fn half(value: u32) ?u32 {
+    return if (value % 2 == 0) value / 2 else null;
+}
+const Halved = zrx.Found(u32, u32);
+fn halfOf(halved: Halved) u32 {
+    return halved.found;
+}
+fn both(halved: Halved) u32 {
+    return halved.item * 10 + halved.found;
+}
+
+test "a case whose predicate finds a value is given it together with the item" {
+    var left: Numbers = .{};
+    var seen: Numbers = .{};
+    const work = pipe(.{route(.{
+        when(half, .{ map(both), forEach(toLeft) }),
+        otherwise(.{forEach(record)}),
+    })});
+    try support.run(program(range(u32, 0, 7), work), .{ &seen, Left{ .seen = &left } });
+    try left.expect(&.{ 0, 21, 42, 63 });
+    try seen.expect(&.{ 1, 3, 5 });
+}
+
+test "an item in which nothing is found is the next case's, or dropped" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{route(.{
+        when(isSmall, .{forEach(toRight)}),
+        when(half, .{ map(halfOf), forEach(toLeft) }),
+    })});
+    try support.run(program(range(u32, 0, 9), work), .{ Left{ .seen = &left }, Right{ .seen = &right } });
+    try right.expect(&.{ 0, 1, 2 });
+    try left.expect(&.{ 2, 3, 4 });
+}
+
+test "a case that is given what was found rejoins like any other" {
+    var seen: Numbers = .{};
+    const work = pipe(.{
+        route(.{
+            when(half, .{map(halfOf)}),
+            otherwise(.{map(plusHundred)}),
+        }),
+        forEach(record),
+    });
+    try support.run(program(range(u32, 0, 5), work), .{&seen});
+    try seen.expect(&.{ 0, 101, 1, 103, 2 });
+}
+
+fn overBy(threshold: Threshold, value: u32) error{TooFar}!?u32 {
+    if (value > threshold.value + 3) return error.TooFar;
+    return if (value > threshold.value) value - threshold.value else null;
+}
+fn excess(over: anytype) u32 {
+    return over.found;
+}
+
+test "a predicate that finds a value uses dependencies and may fail" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{route(.{
+        when(overBy, .{ map(excess), forEach(toLeft) }),
+        otherwise(.{forEach(toRight)}),
+    })});
+    try support.run(program(range(u32, 0, 6), work), .{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{ 1, 2, 3 });
+    try right.expect(&.{ 0, 1, 2 });
+    const failed = support.run(program(range(u32, 0, 9), work), .{ Threshold{ .value = 2 }, Left{ .seen = &left }, Right{ .seen = &right } });
+    try std.testing.expectError(error.TooFar, failed);
+}
+
 test "terminal cases can be queued" {
     var left: Numbers = .{};
     var right: Numbers = .{};
@@ -915,6 +987,18 @@ test "terminal cases can be queued" {
     try support.run(program(range(u32, 0, 6), work), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
     try left.expect(&.{ 0, 2, 4 });
     try right.expect(&.{ 2, 6, 10 });
+}
+
+test "a queued case is handed what was found as it hands on any item" {
+    var left: Numbers = .{};
+    var right: Numbers = .{};
+    const work = pipe(.{route(.{
+        when(half, .{ queue(2), map(both), forEach(toLeft) }),
+        otherwise(.{ queue(2), forEach(toRight) }),
+    })});
+    try support.run(program(range(u32, 0, 6), work), .{ io, Left{ .seen = &left }, Right{ .seen = &right } });
+    try left.expect(&.{ 0, 21, 42 });
+    try right.expect(&.{ 1, 3, 5 });
 }
 
 // --- segments ---------------------------------------------------------------

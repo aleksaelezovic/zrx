@@ -247,7 +247,7 @@ Flow:
 | `batchWithin(n, duration)` | Emits `Batch(T, n)` when full or after the first item's maximum age. Needs `std.Io`. |
 | `debounce(duration)` | Emits the latest pending item after a quiet period. Needs `std.Io`. |
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
-| `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
+| `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. A case whose predicate finds a value is given it with the item. |
 
 Within one item:
 
@@ -282,6 +282,34 @@ fold(0, add),
 ```
 
 An item no case takes is dropped. Each case has its own stage state.
+
+A predicate answers `bool`, or an optional when it *finds* something in the
+item. An optional is read as the condition of `if (x) |found|` is: null is
+no, and a value is yes, with what was found. The pipe of such a case is
+given a `Found(T, Item)`: `.found` is the value and `.item` the item it was
+found in.
+
+```zig
+/// What an order saves when it has a discount, or nothing.
+fn discount(order: Order) ?u32 { ... }
+
+fn reduced(discounted: zrx.Found(u32, Order)) u32 {
+    return discounted.item.cents - discounted.found;
+}
+
+route(.{
+    when(discount, .{map(reduced)}),
+    otherwise(.{map(field(.cents))}),
+}),
+fold(0, add),
+```
+
+An optional has this meaning where a predicate is asked for a case, and in
+`require` and at the end of `all` (see
+[Handler combinators](#handler-combinators)). Elsewhere it is a value like
+any other: `map` with a handler that returns `?T` emits optionals, and
+nothing is dropped. `filter`, `takeWhile`, `not` and `any` have nowhere to
+send what was found and reject such a predicate.
 
 ### each
 
@@ -352,10 +380,10 @@ they are built from.
 
 | Combinator | Meaning |
 |---|---|
-| `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
+| `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. `all` answers what its last predicate answers: when that one finds a value, so does `all`. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
 | `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
-| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. |
+| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. With a predicate that finds a value: what it found, or `err`. |
 | `reduce(seed, f)` | Folds the elements of an array, slice or batch item with `f(deps..., state, element)`; `seed` for an empty one. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
@@ -364,6 +392,17 @@ they are built from.
 ```zig
 const isHot = compose(.{ field(.celsius), gt(80) });
 const wanted = all(.{ isHot, not(isMuted) });
+```
+
+A predicate that finds a value (see [route](#route)) goes last in `all`, with
+the predicates that must be true first before it, and `require` turns
+"nothing found" into an error:
+
+```zig
+/// The discount of an order that is paid: for `when`.
+const paidDiscount = all(.{ isPaid, discount });
+/// The discount, or a failure for an error path to take: for `map`.
+const discountOf = require(discount, error.NoDiscount);
 ```
 
 `reduce` is to one item what `fold` is to the stream. After `batch` or
@@ -930,6 +969,136 @@ reports, which for `std.Io.Reader` is `error.ReadFailed`.
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
 
+## Text patterns
+
+`zrx.ext.pattern` says what a text looks like, as a value built from parts,
+and what to take out of it. It is an extension: handlers written against the
+public contract, compiled only when a program uses them.
+
+```zig
+const pattern = zrx.ext.pattern;
+const seq = pattern.seq;
+const oneOf = pattern.oneOf;
+const repeat = pattern.repeat;
+const optional = pattern.optional;
+const extract = pattern.extract;
+const int = pattern.int;
+
+/// A line of the log: four columns between tabs.
+const record = seq(.{
+    extract(.ts_ms, int(u64)),
+    "\t",
+    extract(.level, oneOf(.{ "info", "warn", "error" })),
+    "\t",
+    extract(.service, repeat(oneOf(.{ pattern.alnum, pattern.set("-_") }), .{ .min = 1 })),
+    "\t",
+    extract(.latency_ms, int(u32)),
+    optional("\r"),
+});
+
+fn slowest(worst: u32, entry: pattern.Extracted(record)) u32 {
+    return @max(worst, entry.latency_ms);
+}
+
+const report = pipe(.{
+    recover(error{InvalidRecord}, rejections),
+    map(require(record, error.InvalidRecord)),
+    fold(@as(u32, 0), slowest),
+    print(zrx.Stdout, "{d}\n"),
+});
+```
+
+A pattern is a handler, as `gt(80)` is: a predicate on one `[]const u8`
+item. It holds when the pattern describes the *whole* text, not a part of
+it. What it answers depends on whether it extracts:
+
+- A pattern without `extract` answers `bool`: `filter(service_name)`.
+- A pattern with `extract` finds a value (see [route](#route)). It answers
+  `?Extracted(pattern)`, a struct with a field for each `extract`. `require`
+  turns that into the struct or an error, as above. A case of a `route` is
+  given it with the text: `when(record, .{ ... })`. It goes last in `all`,
+  and after the handler that yields the text in `compose`.
+
+| | |
+|---|---|
+| `"text"` | A string among the parts of a pattern is that text. |
+| `set("-_")`, `between('a', 'f')`, `except(set)` | One byte: any of those named, any from the first to the last, any that the set is not. |
+| `byte`, `digit`, `lower`, `upper`, `alpha`, `alnum` | One byte: any, or of that ASCII class. |
+| `seq(.{ a, b })` | Each part, one after the other. |
+| `oneOf(.{ a, b })` | The first choice that matches. |
+| `repeat(p, .{ .min = 1, .max = 3 })` | `p` as often as it matches, between `min` (0 unless given) and `max` (no limit unless given) times. |
+| `optional(p)` | `p`, or nothing where it does not match. |
+| `int(T)` | A decimal number that fits the integer type `T`, with a `-` before it when `T` is signed. |
+| `extract(.name, p)` | `p`, with what it matched kept under `name`. |
+| `Extracted(pattern)` | The type of what a pattern extracts. A handler that names its item writes it; `anytype` takes it too. |
+
+The struct is read off the pattern. A field is the matched text
+(`[]const u8`), or a `T` where the part is an `int(T)`. It is optional where
+its `extract` is inside `optional` or `oneOf`, and null when that part is not
+in the text. The text of a field points into the item: use it while the item
+lives.
+
+A number that does not fit its type does not match. So a pattern never
+holds for a text whose numbers it could not hand out.
+
+### How a pattern matches
+
+From left to right, and what has matched is not given back:
+
+- `repeat` takes as much as it can and gives nothing back.
+- `oneOf` takes its first choice that matches, for good.
+
+That is the scanner one writes by hand. It is *not* a regular expression,
+which goes back and tries again:
+`seq(.{ repeat(lower, .{ .max = 3 }), "x" })` does not hold for `abx`,
+because the `repeat` took the `x`. End a `repeat` before the byte that
+follows it: `repeat(except(set("/")), .{})`.
+
+Where a pattern can be seen never to match for that reason, it does not
+compile: a part that begins only with bytes the `repeat` before it has
+taken, a choice behind another that is its beginning (`"info"` before
+`"information"`), a choice behind one that can match nothing.
+
+Patterns work on bytes. A string holds whatever bytes it holds, UTF-8
+included; the sets and classes are single bytes.
+
+### What a pattern costs
+
+What follows a part that matches begins where that part ended. A part that
+does not match has been read for nothing: the next choice of a `oneOf`, and
+what follows an `optional`, begin where it began. Mostly that is a byte or a word. It adds up where such
+a part reads far before it fails and stands inside a `repeat`, which reads
+it again in every round:
+
+```zig
+const shout = seq(.{ repeat(lower, .{ .min = 1 }), "!" });
+const slow = repeat(oneOf(.{ shout, lower }), .{});
+```
+
+On a text of letters, `shout` reads to the end, finds no `!`, and `lower`
+takes one letter; the next round does the same from one letter further.
+That is the square of the length: twice the text takes four times as long.
+Nothing rewrites a pattern for you, so write what the choices share once:
+
+```zig
+const fast = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});
+```
+
+It describes the same texts in linear time: twice the text takes twice as
+long. Where the shared part cannot be written once, bound how far the choice reads before it fails.
+`.max` does that only where what is repeated has a length of its own, a
+byte or a string: it counts rounds, not bytes.
+
+```zig
+// Fails after at most 17 bytes: 16 letters, and the one that is no `!`.
+const short = seq(.{ repeat(lower, .{ .min = 1, .max = 16 }), "!" });
+// One round, which still reads to the end of the letters.
+const long = repeat(shout, .{ .min = 1, .max = 1 });
+```
+
+Either way, bound the length of a text that comes from outside before a
+pattern is put to it.
+
 ## HTTP
 
 `zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a
@@ -977,6 +1146,7 @@ to `serve` carries the requests of one connection.
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
 | `http.status(code)` | Terminal, in `sub`. Answers the final status `code` with an empty body; a 204 or 304 carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
+| `http.path(predicate)` | The path before `?`, put to a predicate of text such as a [text pattern](#text-patterns). See [Paths with parameters](#paths-with-parameters). |
 | `http.fail()` | Terminal, in an error path in `sub`: answers a failed request with the status of its error. |
 | `http.Disconnected` | The errors a connection that broke fails with. `recover(http.Disconnected, .{drain()})` before `serve` drops such a connection. |
 
@@ -1015,6 +1185,57 @@ fn sum(request: http.Request) !i64 {
   first; call `body` at most once. Nothing else overwrites it while the
   push runs: an item that points into the head, such as the path, is still
   that when it is answered, and after.
+
+### Paths with parameters
+
+`http.path` takes a string, or a predicate of text that the path is put to.
+With a [text pattern](#text-patterns) that extracts, the case is given what
+the pattern found together with the request, as a `Found` (see
+[route](#route)): `.found` is what was extracted and `.item` the request.
+
+```zig
+const pattern = zrx.ext.pattern;
+
+/// `/items/42`
+const item_path = pattern.seq(.{ "/items/", pattern.extract(.id, pattern.int(u32)) });
+
+fn stored(item: anytype) !Receipt {
+    var buffer: [4096]u8 = undefined;
+    return store(item.found.id, try item.item.body(&buffer));
+}
+
+route(.{
+    when(all(.{ http.method(.GET), http.path(item_path) }), .{
+        map(compose(.{ field(.found), field(.id) })),
+        map(lookup),
+        http.json(),
+    }),
+    when(all(.{ http.method(.PUT), http.path(item_path) }), .{
+        map(stored),
+        http.json(),
+    }),
+    otherwise(.{http.status(.not_found)}),
+})
+```
+
+- The predicate that finds goes last in `all`: the method is tested first,
+  and the path is taken apart only for a request the case could take.
+- A path that the pattern does not describe is the next case's. That
+  includes a number that does not fit its type: `/items/4294967296` is not
+  an item here, and is answered 404 like any path nobody takes.
+- Text extracted from a path points into the head, as the path does. Read
+  it before the body: reading the body overwrites the head (see
+  [Requests](#requests)). A number is a value and stays.
+- Nothing is percent-decoded before the path is put to the predicate.
+- A string is a literal, a `[]const u8`, or a list of bytes
+  `&.{ '/', 'x' }`. `http.path` took only a string before and gave its
+  argument that type. It no longer does, so an expression that takes its
+  type from where it stands has to name it: `http.path(@ptrCast(&chars))`
+  is now `http.path(@as([]const u8, @ptrCast(&chars)))`.
+- A path is as long as the request head allows, 8 KiB for a socket, and
+  whoever sends the request chooses it. [What a pattern
+  costs](#what-a-pattern-costs) says which patterns read such a text more
+  than once.
 
 ### Answers
 
@@ -1306,9 +1527,10 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty are
-`same`; `take`, `batch`, the handler combinators, `attempt` and a `recover`
-whose path has stages of its own are `lean`, each with the reason next to it.
+Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
+`same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
+whose path has stages of its own and the text patterns are `lean`, each with
+the reason next to it.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it
@@ -1335,12 +1557,16 @@ A resource acquired for one item (opened before the item's sub-pipe and
 released after it) is not here. `each` covers the case where the item
 becomes a stream.
 
+Text patterns test a `[]const u8`. A `Line` is a value that holds its
+bytes, so a pattern cannot be put to one yet: text extracted from it would
+point into a copy. Finding every place a pattern matches within a text is
+not there either; a pattern describes the whole of it.
+
 HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
 connections, no event loop), response headers of your own, streamed bodies,
 chunked request bodies (answered 411 until `std` decodes them with checks;
-see [Answers](#answers)), path parameters, configurable buffer sizes, TLS
-and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
+see [Answers](#answers)), configurable buffer sizes, TLS and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
 
 Present in the previous implementation and not ported: signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of

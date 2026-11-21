@@ -33,6 +33,16 @@ test "routed" {
     }
 }
 
+test "routedFound, routedGuarded" {
+    for (inputs) |items| inline for (.{ cases.routedFound, cases.routedGuarded }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, items, &with);
+        case(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
 test "branched" {
     for (inputs) |items| {
         var with: [2]u64 = .{ 99, 98 };
@@ -234,13 +244,47 @@ test "fellBack" {
     }
 }
 
-test "required" {
-    for (inputs) |items| {
+test "required, requiredFound" {
+    for (inputs) |items| inline for (.{ cases.required, cases.requiredFound }) |case| {
         var with: struct { u32, u64 } = .{ 0, 0 };
         var without: struct { u32, u64 } = .{ 0, 0 };
-        cases.required(true, items, &with[0], &with[1]);
-        cases.required(false, items, &without[0], &without[1]);
+        case(true, items, &with[0], &with[1]);
+        case(false, items, &without[0], &without[1]);
         try std.testing.expectEqual(without, with);
+    };
+}
+
+fn textsOf(comptime strings: []const []const u8) [strings.len]cases.Text {
+    var texts: [strings.len]cases.Text = undefined;
+    for (&texts, strings) |*text, string| text.* = .{ .ptr = string.ptr, .len = string.len };
+    return texts;
+}
+
+test "namesCounted, pathsRouted, readingsRequired" {
+    const texts = comptime textsOf(&.{
+        "api-gw",                          "",              "billing v2",        "auth_1",            "/items/42", "/items/",
+        "/items/4x",                       "/items/007",    "/items/4294967295", "/items/4294967296", "17,-4",     "17,4",
+        "18446744073709551615,2147483647", "1,-2147483648", "1,2147483648",      "1,",                ",1",        "1,2,3",
+        "+1,2",                            "1,+2",          "1_0,2",
+    });
+    for ([_][]const cases.Text{ &.{}, texts[0..4], &texts }) |some| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.namesCounted(true, some, &with);
+        cases.namesCounted(false, some, &without);
+        try std.testing.expectEqual(without, with);
+
+        var routed: [2]u64 = .{ 99, 98 };
+        var by_hand: [2]u64 = .{ 97, 96 };
+        cases.pathsRouted(true, some, &routed[0], &routed[1]);
+        cases.pathsRouted(false, some, &by_hand[0], &by_hand[1]);
+        try std.testing.expectEqual(by_hand, routed);
+
+        var required: struct { u32, u64 } = .{ 0, 0 };
+        var parsed: struct { u32, u64 } = .{ 0, 0 };
+        cases.readingsRequired(true, some, &required[0], &required[1]);
+        cases.readingsRequired(false, some, &parsed[0], &parsed[1]);
+        try std.testing.expectEqual(parsed, required);
     }
 }
 

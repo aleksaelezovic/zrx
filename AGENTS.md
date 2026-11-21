@@ -71,6 +71,25 @@ to this file; edit `AGENTS.md`, not copies.
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
   forward their children's requirements. No closures, no runtime function pointers.
+- **An optional is the answer of a predicate, nowhere else.** Zig says
+  "maybe" three ways. `bool` and `E!T` mean something everywhere; `?T` means
+  something only where a predicate is asked, and there it means what the
+  condition of `if (x) |found|` means: null is no, a value is yes with what
+  was found. Three places take one. `when` gives its case `Found(T, Item)`,
+  the value with the item, as an error path is given `Failed(E, Item)`: the
+  operator is the one that holds the item, so it is the one that pairs.
+  `require` returns what was found, or the error. `all` answers what its
+  last predicate answers, so a finding predicate goes last and the ones
+  before it are tested first; it does not pair, or a predicate would mean
+  one thing alone and another inside `all`. `Finds` in
+  `src/ops/transform.zig` is the one place that reads a predicate's answer.
+  Everywhere else an optional is a value: `map` does not drop a null.
+  `filter`, `takeWhile`, `not` and `any` reject a finding predicate with a
+  compile error that says where the value could go; each has an obvious
+  meaning (`any` of two is `orelse`) and returns when something needs it.
+  An earlier draft handed the case its value as a dependency, a pointer the
+  route wrote to for every item: it could not be `anytype`, forbade a task
+  boundary in the case, and measured 110 instructions where the loop has 71.
 - **Errors are Zig errors; one that is taken becomes an item.** A handler
   error fails the run after teardown. `recover(E, path)` guards the
   operators after it per item: a failure with an error in `E` leaves the
@@ -259,6 +278,45 @@ to this file; edit `AGENTS.md`, not copies.
   always called with its options, and there is no sink that hides
   `write(Role, "{f}\n")`. No general serialization layer for one format.
   Decoding is not there.
+- **A text pattern is a handler, and it does not go back.**
+  `src/ext/pattern.zig`, exported as `zrx.ext.pattern` and analyzed only
+  when referenced, is written against the handler contract alone. A
+  pattern is a composite handler as `gt(80)` is, a predicate on one
+  `[]const u8` item: there is no `match(p)` that makes a handler of it.
+  One that extracts answers `?Extracted(p)`, a predicate that finds a
+  value, and everything else follows from what `when`, `require` and `all`
+  do with one; the extension has no operator. What is written is a
+  `Pattern(Node)`: the nodes that match are private types, and a pattern is
+  told by a private `Mark`, not by a name. Matching goes left to right and
+  what matched is not given back (`repeat` gives nothing back, `oneOf`
+  takes its first choice for good). That is on purpose and is not to be
+  softened: it is the scanner one writes by hand, which is what the
+  `lean_pattern_*` fixtures compare with, and it has no text that takes
+  exponentially long, which matters where the text is a request's path.
+  It is also why this is not called a regular expression. Do not say that
+  nothing is read twice, or that the cost is that of the hand-written
+  scanner on any text: the first draft said both, and a review measured
+  the square of the length. A part that fails has been read, and the next
+  choice of a `oneOf`, or what follows an `optional`, reads it again, once
+  per round inside a `repeat`. The guide says so and shows what to write.
+  It is not a compile error, because it cannot be seen: two choices that
+  share a beginning and take the same bytes are linear. Writing the
+  shared part once is what a planning pass would do. What that rule makes unmatchable is a
+  compile error where it can be seen (a part behind a `repeat` that took
+  its first bytes, a choice behind its own beginning, a choice behind one
+  that matches nothing): say nothing where it cannot be seen, rather than
+  guess. Types are in the pattern (`int(T)`), so the struct is inferred and
+  a number that does not fit does not match: a draft that converted after
+  matching had a route take a path whose number then failed to parse.
+  `std` has no matcher, so this is the one extension that is not a layer
+  over `std`: keep it to bytes, with no Unicode classes. Not there, and
+  back only by decision: a format string read backwards (`"/items/{id}"`
+  would be a string language of our own), going back, finding the places a
+  pattern matches inside a text, and items that are not `[]const u8` (a
+  `Line` is a value; text extracted from it would point into a copy). The
+  fixtures are `lean`: a pattern carries a position through its parts. A
+  pass that plans a pattern before matching may close that later, inside
+  the extension, without changing what a user writes.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -317,7 +375,16 @@ to this file; edit `AGENTS.md`, not copies.
   return when `std` decodes them with checks, or by explicit decision
   with a decoder of zrx's own. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
-  guide's "Not here yet" lists what was left out on purpose. What it does is
+  guide's "Not here yet" lists what was left out on purpose. Path parameters
+  are not a feature of HTTP: `http.path` takes a string, or any predicate of
+  text, and answers what that answers, so a pattern that extracts makes the
+  case's item a `Found` of the values and the request. HTTP imports nothing
+  of the pattern extension and has no router of its own; do not give it
+  one. Taking either made the parameter `anytype`, which gives its
+  argument no type: a list of bytes is told by its shape and still taken,
+  an expression that needs a result type (`@ptrCast`) has to name it, and
+  the guide says so. A second function for predicates would have kept the
+  typed parameter and been a second spelling. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a
   behavior goes into that section together with its test. Performance is
   stated only in the benchmark app's README, with the measurement behind it.

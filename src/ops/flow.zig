@@ -4,6 +4,7 @@ const Io = std.Io;
 const di = @import("../di.zig");
 const core = @import("../pipe.zig");
 const completion = @import("../completion.zig");
+const transform = @import("transform.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -229,7 +230,18 @@ fn Branch(comptime Ps: type) type {
 // route
 // ---------------------------------------------------------------------------
 
-/// A `route` case: items for which `predicate(deps..., item)` is true go to `sub`.
+/// What a predicate found in an item, as an item: the value, and the item it
+/// was found in. The pipe of a `when` whose predicate answers an optional is
+/// given this. It is to a predicate what `Failed` is to an error path.
+pub fn Found(comptime T: type, comptime Item: type) type {
+    return struct { found: T, item: Item };
+}
+
+/// A `route` case: items for which `predicate(deps..., item)` holds go to
+/// `sub`. A predicate that answers `bool` holds when it is true, and `sub` is
+/// given the item. One that answers an optional holds when it finds a value,
+/// as `if (predicate) |found|` does, and `sub` is given `Found(T, Item)`:
+/// what was found, with the item.
 pub fn when(comptime predicate: anytype, sub: anytype) Case(predicate, core.NormalizedPipe("when", @TypeOf(sub))) {
     return .{ .pipe = core.normalizePipe("when", sub) };
 }
@@ -286,16 +298,14 @@ fn Route(comptime Cs: type) type {
 
         pub fn Out(comptime Env: type, comptime In: type) type {
             @setEvalBranchQuota(di.quota);
-            const First = cases[0].Sub.Out(Env, In);
+            const First = cases[0].Sub.Out(Env, Taken(cases[0], Env, In));
             for (cases, 0..) |C, i| {
-                if (!C.is_otherwise)
-                    expectBool(di.Bound("when", C.predicate, Env, &.{In}).Return);
-                const T = C.Sub.Out(Env, In);
+                const T = C.Sub.Out(Env, Taken(C, Env, In));
                 if (T != First) @compileError(std.fmt.comptimePrint(
                     "route: every case must end the same way (all terminate, or all emit one item type); case 0 {s} but case {d} {s}",
                     .{ ending(First), i, ending(T) },
                 ));
-                if (T != End and C.Sub.Stage(Env, In).has_boundary) @compileError(std.fmt.comptimePrint(
+                if (T != End and C.Sub.Stage(Env, Taken(C, Env, In)).has_boundary) @compileError(std.fmt.comptimePrint(
                     "route: case {d} rejoins the pipe, so it cannot contain a task boundary; put the boundary after the route",
                     .{i},
                 ));
@@ -303,8 +313,12 @@ fn Route(comptime Cs: type) type {
             return First;
         }
 
-        fn expectBool(comptime R: type) void {
-            if (di.Payload(R) != bool) @compileError("when: predicate must return `bool` or `E!bool`, got `" ++ @typeName(R) ++ "`");
+        /// What the pipe of case `C` is given: the item, or, when its
+        /// predicate finds a value, that value with the item.
+        fn Taken(comptime C: type, comptime Env: type, comptime In: type) type {
+            if (C.is_otherwise) return In;
+            const T = transform.Finds("when", di.Bound("when", C.predicate, Env, &.{In}).Return) orelse return In;
+            return Found(T, In);
         }
 
         fn ending(comptime T: type) []const u8 {
@@ -316,7 +330,7 @@ fn Route(comptime Cs: type) type {
             const rejoins = Out(Env, In) != End;
             const chains = blk: {
                 var list: [n]type = undefined;
-                for (cases, 0..) |C, i| list[i] = C.Sub.Stage(Env, In);
+                for (cases, 0..) |C, i| list[i] = C.Sub.Stage(Env, Taken(C, Env, In));
                 break :blk list;
             };
             const tests = blk: {
@@ -407,12 +421,21 @@ fn Route(comptime Cs: type) type {
                     // block the run over it.
                     if (self.done) return .done;
                     inline for (0..n) |i| {
-                        const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
-                        if (taken) {
-                            if (self.live[i]) {
-                                if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.caseDone(i);
+                        if (comptime Taken(cases[i], Env, In) != In) {
+                            if (try lift(self.tests[i].call(.{item}))) |found| {
+                                if (self.live[i]) {
+                                    if (try self.chains[i].push(.{ .found = found, .item = item }, self.tail(down, false)) == .done) self.caseDone(i);
+                                }
+                                return self.verdict();
                             }
-                            return self.verdict();
+                        } else {
+                            const taken = if (cases[i].is_otherwise) true else try lift(self.tests[i].call(.{item}));
+                            if (taken) {
+                                if (self.live[i]) {
+                                    if (try self.chains[i].push(item, self.tail(down, false)) == .done) self.caseDone(i);
+                                }
+                                return self.verdict();
+                            }
                         }
                     }
                     return .more;
