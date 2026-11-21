@@ -1118,6 +1118,30 @@ A copy costs what it copies. A handler is given its item as a value, and a
 the line for each handler it is given to, with a pattern as with a function
 of your own.
 
+### A rule that contains itself
+
+A pattern is a value, and it has to exist before it can be a part of
+another. So no pattern contains itself, and there is no matcher that calls
+itself as deep as a text asks. A rule that nests is written as a function
+that builds a pattern from a shallower one, to a depth that is written:
+
+```zig
+/// `(a(b(c)))`: letters, and groups of them in parentheses.
+fn group(comptime depth: usize) type {
+    const inside = if (depth == 0) lower else oneOf(.{ lower, group(depth - 1) });
+    return seq(.{ "(", repeat(inside, .{}), ")" });
+}
+
+const nested = group(7);
+```
+
+A text nested deeper does not match. Each level is code of its own, so the
+depth costs size, not speed. An `extract` cannot stand inside such a
+function: it would be the same field once for every level. Extract the
+whole nested part, and put a pattern to that text again to go one level in.
+The [N-Quads check](../examples/apps/nquads-check/README.md) nests the
+triple terms of RDF 1.2 this way.
+
 ### How a pattern matches
 
 From left to right, and what has matched is not given back:

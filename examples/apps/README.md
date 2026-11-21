@@ -11,6 +11,7 @@ library's root build.
 | [File integrity manifest](file-integrity-manifest/README.md) | SHA-256 of each file, four at a time, with a row for every file that could not be hashed (`concurrent`, `each`, `attempt`) |
 | [Multi-file log analyzer](multi-file-log-analyzer/README.md) | Two logs read together, failures to an alerts file and counters per log (`mergeTagged`) |
 | [Offline telemetry](offline-telemetry/README.md) | Two sensor feeds as two programs, alerts as they are seen and timed windows archived (`system`, `route`, `batchWithin`) |
+| [N-Quads check](nquads-check/README.md) | The grammar of N-Quads as text patterns: statements written the one way, the other lines reported by number (`zrx.ext.pattern`, `route`, `scan`) |
 | [HTTP benchmark](http-bench/README.md) | A zrx HTTP server and the same server on `std` alone, measured against each other (`zrx.ext.http`) |
 
 ## Project boundary

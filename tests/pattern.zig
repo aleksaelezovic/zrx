@@ -185,6 +185,25 @@ test "what two choices share can be written once, and describes the same texts" 
     try expectAll(once, false, &.{ "!", "a!!", "aB" });
 }
 
+/// Letters, and groups of them in parentheses, `depth` groups deep.
+fn group(comptime depth: usize) type {
+    const inside = if (depth == 0) lower else oneOf(.{ lower, group(depth - 1) });
+    return seq(.{ "(", repeat(inside, .{}), ")" });
+}
+
+test "a rule that contains itself is a function that builds it to a depth" {
+    try expectAll(group(0), true, &.{ "()", "(abc)" });
+    try expectAll(group(0), false, &.{ "(a(b))", "(", "a" });
+    try expectAll(group(2), true, &.{ "()", "(a(b)c)", "(a(b(c))(d)e)", "((()))" });
+    try expectAll(group(2), false, &.{ "(a(b(c(d))))", "(a(b)", "(a))", "(((())))" });
+    // What is nested is extracted whole, and taken apart by a pattern again.
+    const outer = seq(.{ "(", extract(.head, repeat(lower, .{})), extract(.rest, optional(group(1))), ")" });
+    const found = ask(outer, "(ab(c(d)))").?;
+    try std.testing.expectEqualStrings("ab", found.head);
+    try std.testing.expectEqualStrings("(c(d))", found.rest);
+    try std.testing.expectEqualStrings("(d)", ask(outer, found.rest).?.rest);
+}
+
 // --- numbers -----------------------------------------------------------------------
 
 test "int matches a decimal number that fits its type" {
