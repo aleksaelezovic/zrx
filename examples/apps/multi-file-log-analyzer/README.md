@@ -41,9 +41,25 @@ const logs = mergeTagged(events.Side, .{
     .right = lines(Right, max_line),
 });
 
+/// A line of a log: four columns between tabs. (In `events.zig`.)
+const record = seq(.{
+    extract(.ts_ms, int(u64)),
+    "\t",
+    extract(.level, as(Level, repeat(pattern.lower, .{ .min = 1 }))),
+    "\t",
+    extract(.service, as(Service, service_name)),
+    "\t",
+    extract(.latency_ms, int(u32)),
+    optional("\r"),
+});
+
+pub const parsed = pipe(.{route(.{
+    when(compose(.{ field(.item), record }), .{map(toEvent)}),
+    otherwise(.{map(refuse)}),
+})});
+
 pub const analyzer = program(logs, .{
-    map(events.parse),
-    map(require(hasServiceName, error.InvalidLogRecord)),
+    events.parsed,
     branch(.{
         alerts,
         totals,
@@ -66,11 +82,17 @@ analyzer.run(.{
 ```
 
 - `mergeTagged` runs each log as a task and marks every line with the log it
-  came from. `events.parse` turns a `Tagged(Side, Line)` into an `Event`: a
-  level and an `Entry` that carries the source along.
-- The two predicates are combinators: `isFailure` is
-  `compose(.{ field(.level), eq(.failure) })`, and `hasServiceName` reaches
-  the name through `field(.entry)` and `field(.service)`.
+  came from.
+- A line is taken apart by a [text pattern](../../../docs/guide.md#text-patterns).
+  `record` says what a line looks like and what is kept of it: two numbers,
+  the level as a `Level` (its `from` knows the words of the format, and
+  that `error` is `.failure`) and the service as a `Line(32)`. A service
+  name with another byte in it, or longer than 32 bytes, is no record.
+- The pattern is the predicate of a case, so the case is given what was
+  extracted *with* the line, and the line knows its log. `toEvent` puts the
+  two together as an `Event`: a level and an `Entry` that carries the
+  source along.
+- `isFailure` is a combinator: `compose(.{ field(.level), eq(.failure) })`.
 - An entry owns its service name (`zrx.Line(32)`), so it can cross the
   `queue` by value. The queue puts the alerts file on a task of its own.
 - The alerts file keeps the order of each log. How the two logs interleave
@@ -136,10 +158,12 @@ looks at how the two logs interleave.
 
 ## What this app needed from zrx
 
-Nothing is worked around. One thing every line-based app writes for itself:
+Nothing is worked around. Taking a line apart was the one handler here that
+was not a few lines; it is a text pattern now. One thing is left:
 
-- **Columns of a line.** `events.parse` is the one handler that is not a few
-  lines, because splitting a line and converting its columns cannot be two
-  handlers of a `compose`: the columns are slices into a line that lives
-  only inside the handler it was passed to. The record processor's
-  `parseFields` is the same shape.
+- **A line that is no record.** `require` hands on what a pattern found and
+  lets go of the item. Here the item is needed too, for the log it came
+  from, so the pattern is the predicate of a case, and the lines it does
+  not describe go to `refuse`, a handler whose one line is
+  `return error.InvalidLogRecord`. Nothing in zrx says "fail with this"
+  without a handler.

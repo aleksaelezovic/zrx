@@ -1,6 +1,26 @@
 //! What a log record is, and what is counted of it.
 const std = @import("std");
 const zrx = @import("zrx");
+const pattern = zrx.ext.pattern;
+
+const pipe = zrx.pipe;
+const program = zrx.program;
+const fromValue = zrx.fromValue;
+const route = zrx.route;
+const when = zrx.when;
+const otherwise = zrx.otherwise;
+const map = zrx.map;
+const forEach = zrx.forEach;
+const rescue = zrx.rescue;
+const compose = zrx.compose;
+const field = zrx.field;
+const seq = pattern.seq;
+const oneOf = pattern.oneOf;
+const repeat = pattern.repeat;
+const optional = pattern.optional;
+const extract = pattern.extract;
+const int = pattern.int;
+const as = pattern.as;
 
 /// The longest record, not counting its newline.
 pub const max_line = 128;
@@ -10,14 +30,22 @@ const Service = zrx.Line(32);
 /// Which log a record came from.
 pub const Side = enum { left, right };
 
-pub const Level = enum { info, warn, failure };
+pub const Level = enum {
+    info,
+    warn,
+    failure,
 
-/// The words of the log format.
-const levels: std.StaticStringMap(Level) = .initComptime(.{
-    .{ "info", .info },
-    .{ "warn", .warn },
-    .{ "error", .failure },
-});
+    /// The words of the log format.
+    const words: std.StaticStringMap(Level) = .initComptime(.{
+        .{ "info", .info },
+        .{ "warn", .warn },
+        .{ "error", .failure },
+    });
+
+    pub fn from(word: []const u8) error{UnknownLevel}!Level {
+        return words.get(word) orelse error.UnknownLevel;
+    }
+};
 
 /// What a record says besides its level; a failure is archived as this.
 pub const Entry = struct {
@@ -34,34 +62,46 @@ pub const Event = struct {
 
 pub const ParseError = error{InvalidLogRecord};
 
-/// The four tab-separated columns of a record.
-fn columns(text: []const u8) ParseError![4][]const u8 {
-    var found: [4][]const u8 = undefined;
-    var rest = std.mem.splitScalar(u8, text, '\t');
-    for (&found) |*column| column.* = rest.next() orelse return error.InvalidLogRecord;
-    return if (rest.next() == null) found else error.InvalidLogRecord;
-}
+/// ASCII letters, digits, underscores or dashes, at least one.
+const service_name = repeat(oneOf(.{ pattern.alnum, pattern.set("-_") }), .{ .min = 1 });
 
-/// A line of a log, with the log it came from, as an event.
-pub fn parse(line: zrx.Tagged(Side, Line)) ParseError!Event {
-    const record = std.mem.trimEnd(u8, line.item.text(), "\r");
-    const ts, const level, const service, const latency = try columns(record);
+/// A line of a log: four columns between tabs.
+const record = seq(.{
+    extract(.ts_ms, int(u64)),
+    "\t",
+    extract(.level, as(Level, repeat(pattern.lower, .{ .min = 1 }))),
+    "\t",
+    extract(.service, as(Service, service_name)),
+    "\t",
+    extract(.latency_ms, int(u32)),
+    optional("\r"),
+});
+
+/// A record, with the line it was read from and the log that line came from.
+const Read = zrx.Found(pattern.Extracted(record), zrx.Tagged(Side, Line));
+
+fn toEvent(read: Read) Event {
     return .{
-        .level = levels.get(level) orelse return error.InvalidLogRecord,
+        .level = read.found.level,
         .entry = .{
-            .source = line.source,
-            .ts_ms = std.fmt.parseInt(u64, ts, 10) catch return error.InvalidLogRecord,
-            .service = Service.from(service) catch return error.InvalidLogRecord,
-            .latency_ms = std.fmt.parseInt(u32, latency, 10) catch return error.InvalidLogRecord,
+            .source = read.item.source,
+            .ts_ms = read.found.ts_ms,
+            .service = read.found.service,
+            .latency_ms = read.found.latency_ms,
         },
     };
 }
 
-/// A service name is ASCII letters, digits, underscores or dashes, at least one.
-pub fn isServiceName(service: Service) bool {
-    for (service.text()) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
-    return service.len != 0;
+/// A line that is no record ends the run.
+fn refuse(_: zrx.Tagged(Side, Line)) ParseError!Event {
+    return error.InvalidLogRecord;
 }
+
+/// A line of a log, with the log it came from, as an event.
+pub const parsed = pipe(.{route(.{
+    when(compose(.{ field(.item), record }), .{map(toEvent)}),
+    otherwise(.{map(refuse)}),
+})});
 
 pub const Counts = struct {
     records: u64 = 0,
@@ -92,17 +132,31 @@ pub const Summary = struct {
     }
 };
 
-fn tagged(side: Side, text: []const u8) !zrx.Tagged(Side, Line) {
-    return .{ .source = side, .item = try .from(text) };
+const Outcome = struct { event: ?Event = null, failure: ?anyerror = null };
+
+fn keep(outcome: *Outcome, parsed_event: Event) void {
+    outcome.event = parsed_event;
+}
+
+fn failed(outcome: *Outcome, err: anyerror) void {
+    outcome.failure = err;
+}
+
+/// What `parsed` makes of one line of the log `side`.
+fn parse(side: Side, text: []const u8) !Event {
+    var outcome: Outcome = .{};
+    const line: zrx.Tagged(Side, Line) = .{ .source = side, .item = try .from(text) };
+    program(fromValue(line), .{ parsed, forEach(keep) }).run(.{ &outcome, rescue(failed) });
+    return outcome.event orelse outcome.failure.?;
 }
 
 test "a record becomes an event of its log, and `error` is a failure" {
-    const event = try parse(try tagged(.right, "42\terror\tapi-1\t7\r"));
-    try std.testing.expectEqual(Level.failure, event.level);
-    try std.testing.expectEqual(Side.right, event.entry.source);
-    try std.testing.expectEqual(@as(u64, 42), event.entry.ts_ms);
-    try std.testing.expectEqualStrings("api-1", event.entry.service.text());
-    try std.testing.expectEqual(@as(u32, 7), event.entry.latency_ms);
+    const read = try parse(.right, "42\terror\tapi-1\t7\r");
+    try std.testing.expectEqual(Level.failure, read.level);
+    try std.testing.expectEqual(Side.right, read.entry.source);
+    try std.testing.expectEqual(@as(u64, 42), read.entry.ts_ms);
+    try std.testing.expectEqualStrings("api-1", read.entry.service.text());
+    try std.testing.expectEqual(@as(u32, 7), read.entry.latency_ms);
 }
 
 test "a record that breaks the format is rejected" {
@@ -114,17 +168,23 @@ test "a record that breaks the format is rejected" {
         "1\tfailure\tapi\t2",
         "1\tinfo\tthis-service-name-has-33-letters-\t2",
         "1\tinfo\tapi\t-2",
+        "1\tinfo\tbad name\t2",
+        "1\tinfo\t\t2",
+        "+1\tinfo\tapi\t2",
     }) |text| {
-        try std.testing.expectError(error.InvalidLogRecord, parse(try tagged(.left, text)));
+        try std.testing.expectError(error.InvalidLogRecord, parse(.left, text));
     }
 }
 
 test "a service name is letters, digits, underscores and dashes" {
     for ([_][]const u8{ "api", "db-2", "a_b", "this-service-name-has-32-letters" }) |name| {
-        try std.testing.expect(isServiceName(try .from(name)));
+        var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer line.deinit();
+        try line.writer.print("1\tinfo\t{s}\t2", .{name});
+        try std.testing.expectEqualStrings(name, (try parse(.left, line.written())).entry.service.text());
     }
-    for ([_][]const u8{ "", "bad service", "caf\xc3\xa9", "a.b" }) |name| {
-        try std.testing.expect(!isServiceName(try .from(name)));
+    for ([_][]const u8{ "1\tinfo\tbad service\t2", "1\tinfo\tcaf\xc3\xa9\t2", "1\tinfo\ta.b\t2" }) |text| {
+        try std.testing.expectError(error.InvalidLogRecord, parse(.left, text));
     }
 }
 
@@ -134,7 +194,7 @@ test "every event is counted for its own log" {
         .{ .left, "1\terror\tapi\t7" },
         .{ .right, "2\twarn\tdb\t3" },
         .{ .left, "3\tinfo\tapi\t5" },
-    }) |record| summary = summary.add(try parse(try tagged(record[0], record[1])));
+    }) |line| summary = summary.add(try parse(line[0], line[1]));
     try std.testing.expectEqual(Counts{ .records = 2, .errors = 1, .latency_ms = 12 }, summary.left);
     try std.testing.expectEqual(Counts{ .records = 1, .warnings = 1, .latency_ms = 3 }, summary.right);
 }

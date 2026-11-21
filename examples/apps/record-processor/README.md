@@ -135,6 +135,13 @@ What is still plain Zig here:
    to another source.
 2. **`print` ends a pipe.** Writing records and then aggregating is a
    `branch` with a `filter` per destination.
+3. **Taking a line apart.** `validation.parseFields` splits a line into its
+   columns by hand, where the other line-based apps use a
+   [text pattern](../../../docs/guide.md#text-patterns). A pattern answers
+   yes or no for a line. This app reports *which* rule a line broke first
+   (`MalformedFields`, `InvalidIdentifier`, `InvalidName`, `InvalidAmount`),
+   and a column that is too long is one of those reasons, not "no record".
+   So the columns stay a function and the rules stay the stages after it.
 
 What needed nothing: the record cap (`scan` numbers, a handler enforces),
 injected rules, testing the production pipe against in-memory I/O, and the

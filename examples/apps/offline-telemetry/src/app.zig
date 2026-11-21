@@ -7,6 +7,7 @@ const std = @import("std");
 const Io = std.Io;
 const zrx = @import("zrx");
 const json = zrx.ext.json;
+const pattern = zrx.ext.pattern;
 
 const pipe = zrx.pipe;
 const program = zrx.program;
@@ -36,6 +37,10 @@ const stderr = zrx.stderr;
 const rescue = zrx.rescue;
 const forEach = zrx.forEach;
 const fromValue = zrx.fromValue;
+const seq = pattern.seq;
+const extract = pattern.extract;
+const optional = pattern.optional;
+const int = pattern.int;
 
 pub const max_line = 64;
 pub const window_size = 8;
@@ -51,10 +56,16 @@ pub const Archive = struct { writer: *Io.Writer };
 /// Where a feed's alerts go.
 pub const Alerts = zrx.Stdout;
 
-pub const Reading = struct {
-    ts_ms: u64,
-    temp_mc: i32,
-};
+/// A line of a feed: when it was read, and thousandths of a degree Celsius.
+const reading_line = seq(.{
+    extract(.ts_ms, int(u64)),
+    ",",
+    extract(.temp_mc, int(i32)),
+    optional("\r"),
+});
+
+/// What a line holds, read off its pattern: `{ ts_ms: u64, temp_mc: i32 }`.
+pub const Reading = pattern.Extracted(reading_line);
 
 pub const Alert = struct {
     sensor: Sensor,
@@ -82,15 +93,6 @@ pub const Window = struct {
         };
     }
 };
-
-fn parse(line: Line) error{InvalidReading}!Reading {
-    const text = std.mem.trimEnd(u8, line.text(), "\r");
-    const ts_ms, const temp_mc = std.mem.cutScalar(u8, text, ',') orelse return error.InvalidReading;
-    return .{
-        .ts_ms = std.fmt.parseInt(u64, ts_ms, 10) catch return error.InvalidReading,
-        .temp_mc = std.fmt.parseInt(i32, temp_mc, 10) catch return error.InvalidReading,
-    };
-}
 
 /// -100 to 150 °C is what a sensor can report. It also keeps a window's sum within `i32`.
 const isPlausible = compose(.{
@@ -122,7 +124,7 @@ const windows = pipe(.{
 });
 
 pub const readings = pipe(.{
-    map(parse),
+    map(require(reading_line, error.InvalidReading)),
     map(require(isPlausible, error.InvalidReading)),
     route(.{
         when(needsAlert, alerts),

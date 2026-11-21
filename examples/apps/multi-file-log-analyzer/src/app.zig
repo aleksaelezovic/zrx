@@ -1,7 +1,7 @@
 //! Two service logs, read together.
 //!
 //!     left log  -.
-//!                 >- line -> event -> with a service name
+//!                 >- line -> event
 //!     right log -'     |- failures    -> queue -> JSON lines -> the alerts file
 //!                      '- every event -> counters per log -> JSON -> stdout
 const std = @import("std");
@@ -27,7 +27,6 @@ const branch = zrx.branch;
 const print = zrx.print;
 const write = zrx.write;
 const compose = zrx.compose;
-const require = zrx.require;
 const field = zrx.field;
 const eq = zrx.eq;
 const json = zrx.ext.json;
@@ -48,12 +47,6 @@ pub const Diagnostics = zrx.Stderr;
 const isFailure = compose(.{
     field(.level),
     eq(.failure),
-});
-
-const hasServiceName = compose(.{
-    field(.entry),
-    field(.service),
-    events.isServiceName,
 });
 
 const alerts = pipe(.{
@@ -77,8 +70,7 @@ const logs = mergeTagged(events.Side, .{
 
 /// Needs `std.Io`, `Left`, `Right`, `Alerts` and `Report`.
 pub const analyzer = program(logs, .{
-    map(events.parse),
-    map(require(hasServiceName, error.InvalidLogRecord)),
+    events.parsed,
     branch(.{
         alerts,
         totals,
