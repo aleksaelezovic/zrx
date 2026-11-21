@@ -300,8 +300,11 @@ to this file; edit `AGENTS.md`, not copies.
   choice of a `oneOf`, or what follows an `optional`, reads it again, once
   per round inside a `repeat`. The guide says so and shows what to write.
   It is not a compile error, because it cannot be seen: two choices that
-  share a beginning and take the same bytes are linear. Writing the
-  shared part once is what a planning pass would do. What that rule makes unmatchable is a
+  share a beginning and take the same bytes are linear. Nothing writes the
+  shared part once for the user: a pass could only merge parts that are
+  the same part, and the case that was measured (`lower` again and again,
+  then `!`, or else one `lower`) shares no part, only bytes. What that rule
+  makes unmatchable is a
   compile error where it can be seen (a part behind a `repeat` that took
   its first bytes, a choice behind its own beginning, a choice behind one
   that matches nothing): say nothing where it cannot be seen, rather than
@@ -339,9 +342,17 @@ to this file; edit `AGENTS.md`, not copies.
   back only by decision: a format string read backwards (`"/items/{id}"`
   would be a string language of our own), going back, and finding the
   places a pattern matches inside a text. The
-  fixtures are `lean`: a pattern carries a position through its parts. A
-  pass that plans a pattern before matching may close that later, inside
-  the extension, without changing what a user writes.
+  fixtures are `lean`: a pattern carries a position through its parts.
+  A plan for that was built and measured, and is not there: the last part
+  of a pattern was asked "is all that is left yours" (`finish`) and not
+  "where do you end", as the loop by hand that leaves at the first wrong
+  byte. `lean_pattern_route` went from 80 instructions to 70 (71 by
+  hand) and `lean_pattern_filter` from 40 to 38, while
+  `lean_pattern_require` went from 102 to 107 and `lean_pattern_line`
+  from 114 to 136, past what `lean` allows. The fixtures by hand are
+  written in both shapes, and each plan matches one of them: what is left
+  of the gap is the shape of a loop, not work a plan can take out. Do not
+  add a second way to match for it.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
