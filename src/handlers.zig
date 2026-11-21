@@ -34,14 +34,18 @@ pub fn not(comptime predicate: anytype) type {
             return di.requires("not", predicate, arity);
         }
 
-        pub fn call(env: anytype, args: anytype) Verdict("not", .{predicate}, di.types(@TypeOf(args))) {
+        pub fn call(env: anytype, args: anytype) Verdict("not", .{predicate}, false, di.types(@TypeOf(args))) {
             const result = di.invoke(predicate, env, args);
             return if (comptime Fallible(@TypeOf(result))) !(try result) else !result;
         }
     };
 }
 
-/// A predicate that is true when every one of `predicates` is; stops at the first false.
+/// A predicate that holds when every one of `predicates` does; stops at the
+/// first that does not. It answers what its last predicate answers: when
+/// that one finds a value (an optional), so does `all`, and the predicates
+/// before it are what must be true first:
+/// `all(.{ http.method(.GET), http.path(item) })`.
 pub fn all(comptime predicates: anytype) type {
     return Junction("all", predicates, false);
 }
@@ -62,27 +66,53 @@ fn Junction(comptime who: []const u8, comptime predicates: anytype, comptime dec
             return out;
         }
 
-        pub fn call(env: anytype, args: anytype) Verdict(who, predicates, di.types(@TypeOf(args))) {
-            inline for (predicates) |predicate| {
+        pub fn call(env: anytype, args: anytype) Verdict(who, predicates, !decisive, di.types(@TypeOf(args))) {
+            const finds = comptime Finding(who, predicates, !decisive, di.types(@TypeOf(args))) != null;
+            inline for (predicates, 0..) |predicate, i| {
                 const result = di.invoke(predicate, env, args);
+                // What the last predicate found is the answer, returned as it is.
+                if (comptime finds and i + 1 == predicates.len) return result;
                 const verdict = if (comptime Fallible(@TypeOf(result))) try result else result;
-                if (verdict == decisive) return decisive;
+                if (verdict == decisive) return if (finds) null else decisive;
             }
             return !decisive;
         }
     };
 }
 
-/// `bool`, or `E!bool` when any predicate can fail.
-fn Verdict(comptime who: []const u8, comptime predicates: anytype, comptime Args: []const type) type {
+/// What the last of `predicates` finds, where `last_may_find` (in `all`):
+/// null when every predicate answers `bool`.
+fn Finding(comptime who: []const u8, comptime predicates: anytype, comptime last_may_find: bool, comptime Args: []const type) ?type {
     @setEvalBranchQuota(di.quota);
+    var T: ?type = null;
+    for (predicates, 0..) |predicate, i| {
+        const R = di.Result(who, predicate, Args);
+        const found = switch (@typeInfo(di.Payload(R))) {
+            .bool => continue,
+            .optional => |found| found.child,
+            else => @compileError(who ++ ": every predicate must return `bool` or `E!bool`, got `" ++ @typeName(R) ++ "`"),
+        };
+        if (!last_may_find) sequence.expectHolds(who, R, "return `bool` here; `when`, `require` and the last predicate of `all` take a value");
+        if (i + 1 != predicates.len) @compileError(std.fmt.comptimePrint(
+            "all: only its last predicate can find a value, but predicate {d} of {d} returns `{s}`; put the predicates that return `bool` before it",
+            .{ i + 1, predicates.len, @typeName(R) },
+        ));
+        T = found;
+    }
+    return T;
+}
+
+/// `bool`, or `?T` when the last predicate of `all` finds a `T`; `E!` of
+/// that when any predicate can fail.
+fn Verdict(comptime who: []const u8, comptime predicates: anytype, comptime last_may_find: bool, comptime Args: []const type) type {
+    @setEvalBranchQuota(di.quota);
+    const Answer = if (Finding(who, predicates, last_may_find, Args)) |T| ?T else bool;
     var Set: ?type = null;
     for (predicates) |predicate| {
         const R = di.Result(who, predicate, Args);
-        if (di.Payload(R) != bool) @compileError(who ++ ": every predicate must return `bool` or `E!bool`, got `" ++ @typeName(R) ++ "`");
         if (Fallible(R)) Set = (Set orelse error{}) || @typeInfo(R).error_union.error_set;
     }
-    return if (Set) |E| E!bool else bool;
+    return if (Set) |E| E!Answer else Answer;
 }
 
 /// One handler made of several applied left to right: `compose(.{ f, g })`
@@ -213,6 +243,9 @@ pub fn orElse(comptime handler: anytype, comptime fallback: anytype) type {
 /// `map(require(isPlausible, error.InvalidReading))`. Where `filter` drops
 /// such an item without a word, this fails it, for `orElse` or `recover` to
 /// handle or for the run to end with. The reverse of `orElse`.
+///
+/// With a predicate that finds a value (an optional), the result is what it
+/// found, as `predicate(item) orelse return err` is.
 pub fn require(comptime predicate: anytype, comptime err: anytype) type {
     if (@typeInfo(@TypeOf(err)) != .error_set) @compileError(
         "require: the second argument must be an error such as `error.Invalid`, got `" ++ @typeName(@TypeOf(err)) ++ "`",
@@ -230,6 +263,7 @@ pub fn require(comptime predicate: anytype, comptime err: anytype) type {
         pub fn call(env: anytype, args: anytype) Required(@TypeOf(env), di.types(@TypeOf(args))) {
             const result = di.invoke(predicate, env, args);
             const holds = if (comptime Fallible(@TypeOf(result))) try result else result;
+            if (comptime @typeInfo(@TypeOf(holds)) == .optional) return holds orelse return err;
             // Two returns, not one that selects: selecting between the item
             // and a constant error leaves the result in a stack slot.
             if (!holds) return err;
@@ -240,15 +274,16 @@ pub fn require(comptime predicate: anytype, comptime err: anytype) type {
             expectOneItem("require", "checks", "map(require(predicate, error.Invalid))", arity);
         }
 
-        /// `error{Named}!Item`, with the predicate's own errors when it can fail.
+        /// `error{Named}!Item`, or `error{Named}!T` for a predicate that finds
+        /// a `T`, with the predicate's own errors when it can fail.
         fn Required(comptime Env: type, comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
             expectOne(Args.len);
             di.check("require", predicate, Env, Args);
             const R = di.Result("require", predicate, Args);
-            sequence.expectReturn("require", "predicate", R, bool);
+            const Kept = sequence.Finds("require", R) orelse Args[0];
             const Named = @TypeOf(err);
-            return (if (Fallible(R)) Named || @typeInfo(R).error_union.error_set else Named)!Args[0];
+            return (if (Fallible(R)) Named || @typeInfo(R).error_union.error_set else Named)!Kept;
         }
     };
 }

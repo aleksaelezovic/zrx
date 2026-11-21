@@ -55,6 +55,7 @@ pub const branch = flow.branch;
 pub const route = flow.route;
 pub const when = flow.when;
 pub const otherwise = flow.otherwise;
+pub const Found = flow.Found;
 pub const concurrent = @import("ops/concurrent.zig").concurrent;
 
 // Sub-pipes within one item

@@ -144,6 +144,65 @@ export fn same_route(ptr: [*]const u32, len: usize, out: *u64) void {
     routed(exported_with_zrx, ptr[0..len], out);
 }
 
+// --- route by what a predicate finds --------------------------------------------
+
+/// The half of an even value: a predicate that finds what the case goes on with.
+fn half(value: u32) ?u32 {
+    return if (value % 2 == 0) value / 2 else null;
+}
+fn halfAndValue(even: zrx.Found(u32, u32)) u32 {
+    return even.found +% even.item;
+}
+
+pub fn routedFound(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            route(.{ when(half, .{map(halfAndValue)}), otherwise(.{map(increment)}) }),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            sum +%= if (half(value)) |found| found +% value else value +% 1;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_route_found(ptr: [*]const u32, len: usize, out: *u64) void {
+    routedFound(exported_with_zrx, ptr[0..len], out);
+}
+
+/// The same, where `all` asks a predicate first and answers what its last one found.
+pub fn routedGuarded(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            route(.{ when(zrx.all(.{ isLarge, half }), .{map(halfAndValue)}), otherwise(.{map(increment)}) }),
+            fold(@as(u64, 0), add),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            if (value >= 6) {
+                if (half(value)) |found| {
+                    sum +%= found +% value;
+                    continue;
+                }
+            }
+            sum +%= value +% 1;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_route_guarded(ptr: [*]const u32, len: usize, out: *u64) void {
+    routedGuarded(exported_with_zrx, ptr[0..len], out);
+}
+
 // --- branch into two folds --------------------------------------------------------
 
 pub fn branched(comptime with_zrx: bool, items: []const u32, first: *u64, second: *u64) void {
@@ -729,6 +788,27 @@ pub fn required(comptime with_zrx: bool, items: []const u32, rejected: *u32, out
 
 export fn same_require(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
     required(exported_with_zrx, ptr[0..len], rejected, out);
+}
+
+/// Halves summed, the values that have none counted: `require` over a
+/// predicate that finds a value.
+pub fn requiredFound(comptime with_zrx: bool, items: []const u32, rejected: *u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ recover(error{TooSmall}, .{forEach(countRejected)}), map(zrx.require(half, error.TooSmall)), tap(accumulate), drain() });
+        run(program(fromSlice(items), total), .{ Rejected{ .count = rejected }, Result{ .out = out } });
+    } else {
+        for (items) |value| {
+            if (half(value)) |found| {
+                out.* +%= found;
+            } else {
+                rejected.* +%= 1;
+            }
+        }
+    }
+}
+
+export fn same_require_found(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64) void {
+    requiredFound(exported_with_zrx, ptr[0..len], rejected, out);
 }
 
 // --- each ---------------------------------------------------------------------------------------

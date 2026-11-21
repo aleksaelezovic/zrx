@@ -247,7 +247,7 @@ Flow:
 | `batchWithin(n, duration)` | Emits `Batch(T, n)` when full or after the first item's maximum age. Needs `std.Io`. |
 | `debounce(duration)` | Emits the latest pending item after a quiet period. Needs `std.Io`. |
 | `branch(.{ pipe, pipe })` | Terminal. Every item goes to every sub-pipe. |
-| `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. |
+| `route(.{ when(p, pipe), otherwise(pipe) })` | Each item goes to the first case that takes it. A case whose predicate finds a value is given it with the item. |
 
 Within one item:
 
@@ -282,6 +282,34 @@ fold(0, add),
 ```
 
 An item no case takes is dropped. Each case has its own stage state.
+
+A predicate answers `bool`, or an optional when it *finds* something in the
+item. An optional is read as the condition of `if (x) |found|` is: null is
+no, and a value is yes, with what was found. The pipe of such a case is
+given a `Found(T, Item)`: `.found` is the value and `.item` the item it was
+found in.
+
+```zig
+/// What an order saves when it has a discount, or nothing.
+fn discount(order: Order) ?u32 { ... }
+
+fn reduced(discounted: zrx.Found(u32, Order)) u32 {
+    return discounted.item.cents - discounted.found;
+}
+
+route(.{
+    when(discount, .{map(reduced)}),
+    otherwise(.{map(field(.cents))}),
+}),
+fold(0, add),
+```
+
+An optional has this meaning where a predicate is asked for a case, and in
+`require` and at the end of `all` (see
+[Handler combinators](#handler-combinators)). Elsewhere it is a value like
+any other: `map` with a handler that returns `?T` emits optionals, and
+nothing is dropped. `filter`, `takeWhile`, `not` and `any` have nowhere to
+send what was found and reject such a predicate.
 
 ### each
 
@@ -352,10 +380,10 @@ they are built from.
 
 | Combinator | Meaning |
 |---|---|
-| `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. |
+| `not(p)`, `all(.{ p, q })`, `any(.{ p, q })` | Predicate logic; `all` and `any` stop at the first decisive predicate. `all` answers what its last predicate answers: when that one finds a value, so does `all`. |
 | `compose(.{ f, g })` | `g(f(item))`, left to right. |
 | `orElse(f, fallback)` | `f(item)`, or `fallback(deps..., err, item)` when `f` fails. |
-| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. |
+| `require(p, err)` | The item when `p(item)` is true, the error `err` when it is not. With a predicate that finds a value: what it found, or `err`. |
 | `reduce(seed, f)` | Folds the elements of an array, slice or batch item with `f(deps..., state, element)`; `seed` for an empty one. |
 | `field(.name)` | The field `name` of a struct item. |
 | `constant(value)` | `value`, whatever the item. |
@@ -364,6 +392,17 @@ they are built from.
 ```zig
 const isHot = compose(.{ field(.celsius), gt(80) });
 const wanted = all(.{ isHot, not(isMuted) });
+```
+
+A predicate that finds a value (see [route](#route)) goes last in `all`, with
+the predicates that must be true first before it, and `require` turns
+"nothing found" into an error:
+
+```zig
+/// The discount of an order that is paid: for `when`.
+const paidDiscount = all(.{ isPaid, discount });
+/// The discount, or a failure for an error path to take: for `map`.
+const discountOf = require(discount, error.NoDiscount);
 ```
 
 `reduce` is to one item what `fold` is to the stream. After `batch` or
@@ -1306,7 +1345,7 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty are
+Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
 `same`; `take`, `batch`, the handler combinators, `attempt` and a `recover`
 whose path has stages of its own are `lean`, each with the reason next to it.
 

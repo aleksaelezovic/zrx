@@ -71,6 +71,25 @@ to this file; edit `AGENTS.md`, not copies.
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
   forward their children's requirements. No closures, no runtime function pointers.
+- **An optional is the answer of a predicate, nowhere else.** Zig says
+  "maybe" three ways. `bool` and `E!T` mean something everywhere; `?T` means
+  something only where a predicate is asked, and there it means what the
+  condition of `if (x) |found|` means: null is no, a value is yes with what
+  was found. Three places take one. `when` gives its case `Found(T, Item)`,
+  the value with the item, as an error path is given `Failed(E, Item)`: the
+  operator is the one that holds the item, so it is the one that pairs.
+  `require` returns what was found, or the error. `all` answers what its
+  last predicate answers, so a finding predicate goes last and the ones
+  before it are tested first; it does not pair, or a predicate would mean
+  one thing alone and another inside `all`. `Finds` in
+  `src/ops/transform.zig` is the one place that reads a predicate's answer.
+  Everywhere else an optional is a value: `map` does not drop a null.
+  `filter`, `takeWhile`, `not` and `any` reject a finding predicate with a
+  compile error that says where the value could go; each has an obvious
+  meaning (`any` of two is `orelse`) and returns when something needs it.
+  An earlier draft handed the case its value as a dependency, a pointer the
+  route wrote to for every item: it could not be `anytype`, forbade a task
+  boundary in the case, and measured 110 instructions where the loop has 71.
 - **Errors are Zig errors; one that is taken becomes an item.** A handler
   error fails the run after teardown. `recover(E, path)` guards the
   operators after it per item: a failure with an error in `E` leaves the

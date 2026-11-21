@@ -33,6 +33,16 @@ test "routed" {
     }
 }
 
+test "routedFound, routedGuarded" {
+    for (inputs) |items| inline for (.{ cases.routedFound, cases.routedGuarded }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, items, &with);
+        case(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    };
+}
+
 test "branched" {
     for (inputs) |items| {
         var with: [2]u64 = .{ 99, 98 };
@@ -234,14 +244,14 @@ test "fellBack" {
     }
 }
 
-test "required" {
-    for (inputs) |items| {
+test "required, requiredFound" {
+    for (inputs) |items| inline for (.{ cases.required, cases.requiredFound }) |case| {
         var with: struct { u32, u64 } = .{ 0, 0 };
         var without: struct { u32, u64 } = .{ 0, 0 };
-        cases.required(true, items, &with[0], &with[1]);
-        cases.required(false, items, &without[0], &without[1]);
+        case(true, items, &with[0], &with[1]);
+        case(false, items, &without[0], &without[1]);
         try std.testing.expectEqual(without, with);
-    }
+    };
 }
 
 test "nested" {
