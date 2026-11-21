@@ -126,6 +126,15 @@ pub const cases = .{
     // `encode` declares its options as `std.json.Stringify.Options`, so these two are Zig's own messages, at the call.
     .{ "json_encode_options", "expected type 'json.Stringify.Options', found 'comptime_int'" },
     .{ "json_encode_field", "no field named 'pretty' in struct 'json.Stringify.Options'" },
+    .{ "json_decode_uncalled", "map: `fn (comptime type, comptime ext.json.DecodeOptions) type` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`" },
+    .{ "json_decode_pointer", "json.decode: `resource: []const u8` in `json_decode_pointer.Entry` would point into the text or into the scratch memory, both gone when the handler returns, and what is decoded is a value; keep text as a copy, as in `zrx.Line(64)`, and several values as an array" },
+    .{ "json_decode_pointer_nested", "json.decode: `origin.hops: *const u32` in `json_decode_pointer_nested.Entry` would point into the text or into the scratch memory, both gone when the handler returns, and what is decoded is a value; keep text as a copy, as in `zrx.Line(64)`, and several values as an array" },
+    .{ "json_decode_text", "json.decode: `[]const u8` would point into the text or into the scratch memory, both gone when the handler returns, and what is decoded is a value; keep text as a copy, as in `zrx.Line(64)`, and several values as an array" },
+    .{ "json_decode_unreadable", "json.decode: `std.json` has no way to read `payload: json_decode_unreadable.Payload` in `json_decode_unreadable.Entry`; it reads a bool, a number, an enum, an optional, an array, a struct, a `union(enum)`, and a type that declares `jsonParse`" },
+    .{ "json_decode_item", "json.decode: decodes one item that is text, a `[]const u8` or a `Line`, got `u32`; put the handler that yields the text before it, as in `compose(.{ field(.body), json.decode(T, options) })`" },
+    // `decode` declares its options as a struct, so these two are Zig's own messages, at the call.
+    .{ "json_decode_scratch", "missing struct field: scratch" },
+    .{ "json_decode_options", "no field named 'ignore_unknown_fields' in struct 'ext.json.DecodeOptions'" },
     .{ "not_operator", "pipe: element 1 is not an operator (got `fn (u32) u32`); a pipe holds operators such as map(...), filter(...) or another pipe" },
     .{ "predicates_result", "all: every predicate must return `bool` or `E!bool`, got `u32`" },
     .{ "or_else_fallback_errors", "orElse: the fallback takes `error{Odd}` but the handler can fail with `error{Odd,TooBig}`" },

@@ -261,6 +261,14 @@ pub fn Line(comptime max_line_bytes: usize) type {
         pub fn jsonStringify(self: *const @This(), json: anytype) !void {
             try json.write(self.text());
         }
+
+        /// `std.json` reads a line like a byte slice, and what it read is
+        /// copied: a string, or an array of numbers. A text of more bytes
+        /// than a line holds is `error.ValueTooLong`, which is `std.json`'s.
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const bytes = try std.json.innerParse([]const u8, allocator, source, options);
+            return from(bytes) catch error.ValueTooLong;
+        }
     };
 }
 
