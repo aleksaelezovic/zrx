@@ -956,6 +956,79 @@ export fn lean_pattern_require(ptr: [*]const Text, len: usize, rejected: *u32, o
     readingsRequired(exported_with_zrx, ptr[0..len], rejected, out);
 }
 
+/// A row of a file, as a line source emits it, and the name of a sensor.
+pub const Row = zrx.Line(32);
+pub const Sensor = zrx.Line(8);
+const Latest = struct { sensor: *Sensor };
+
+const letters = pattern.repeat(pattern.lower, .{ .min = 1 });
+const named_reading = pattern.seq(.{ pattern.extract(.sensor, pattern.as(Sensor, letters)), ",", pattern.extract(.temp_mc, pattern.int(i32)) });
+
+fn namedReadingOf(row: *const Row) ?struct { sensor: Sensor, temp_mc: i32 } {
+    const text = row.text();
+    var at: usize = 0;
+    while (at < text.len and std.ascii.isLower(text[at])) at += 1;
+    if (at == 0) return null;
+    const sensor = Sensor.from(text[0..at]) catch return null;
+    if (at == text.len or text[at] != ',') return null;
+    at += 1;
+    const negative = at < text.len and text[at] == '-';
+    if (negative) at += 1;
+    const from = at;
+    var temp_mc: i32 = 0;
+    while (at < text.len and std.ascii.isDigit(text[at])) : (at += 1) {
+        const next: i32 = text[at] - '0';
+        temp_mc = std.math.mul(i32, temp_mc, 10) catch return null;
+        temp_mc = (if (negative) std.math.sub(i32, temp_mc, next) else std.math.add(i32, temp_mc, next)) catch return null;
+    }
+    if (at == from or at != text.len) return null;
+    return .{ .sensor = sensor, .temp_mc = temp_mc };
+}
+fn noteReading(result: Result, latest: Latest, seen: anytype) void {
+    result.out.* +%= @as(u32, @bitCast(seen.found.temp_mc));
+    latest.sensor.* = seen.found.sensor;
+}
+fn countRow(second: Second, _: Row) void {
+    second.out.* +%= 1;
+}
+
+/// The temperatures of the rows that are readings summed and the sensor of
+/// the last one kept, the other rows counted: a pattern put to a line, which
+/// keeps a name as a value.
+pub fn rowsRouted(comptime with_zrx: bool, rows: []const Row, sum: *u64, sensor: *Sensor, others: *u64) void {
+    if (with_zrx) {
+        const sorted = pipe(.{route(.{
+            when(named_reading, .{forEach(noteReading)}),
+            otherwise(.{forEach(countRow)}),
+        })});
+        run(program(fromSlice(rows), sorted), .{ Result{ .out = sum }, Latest{ .sensor = sensor }, Second{ .out = others } });
+    } else {
+        for (rows) |*each| {
+            // A handler is given its item as a value: see `lean_pattern_line`.
+            const row = each.*;
+            if (namedReadingOf(&row)) |found| {
+                sum.* +%= @as(u32, @bitCast(found.temp_mc));
+                sensor.* = found.sensor;
+            } else {
+                others.* +%= 1;
+            }
+        }
+    }
+}
+
+/// `lean`, not `same`, for the reason given at `lean_pattern_filter`.
+///
+/// The loop by hand copies each row before it reads it, which nobody would
+/// write. A handler is given its item as a value, and for an item that
+/// holds its bytes that is a copy the optimizer does not take out: one
+/// `memcpy` of the row for each, with a function of one's own as the
+/// predicate just as with a pattern. It is in both loops so that what is
+/// compared is the pattern. Without it the loop by hand has 107
+/// instructions and no copy.
+export fn lean_pattern_line(ptr: [*]const Row, len: usize, sum: *u64, sensor: *Sensor, others: *u64) void {
+    rowsRouted(exported_with_zrx, ptr[0..len], sum, sensor, others);
+}
+
 // --- each ---------------------------------------------------------------------------------------
 
 /// Some values and what their sum counts for.

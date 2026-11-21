@@ -7,11 +7,16 @@
 //!     map(require(record, error.InvalidRecord))         // `Extracted(record)`, or the error
 //!     when(compose(.{ http.Request.path, item_path }), .{ ... })
 //!
-//! A pattern is a handler, as `gt(80)` is: a predicate on one `[]const u8`
-//! item, which holds when the pattern describes the whole text. One that
+//! A pattern is a handler, as `gt(80)` is: a predicate on one item that is
+//! text, which holds when the pattern describes the whole of it. One that
 //! extracts nothing answers `bool`. One with an `extract` in it answers
 //! `?Extracted(pattern)`, a predicate that finds a value: `when`, `require`
 //! and the last place of `all` take it.
+//!
+//! The item is a `[]const u8`, or a value that holds its text and reads it
+//! with `text()`, as a `Line` does. Text extracted from a `[]const u8`
+//! points into it. A value moves, and its text with it, so what is taken
+//! out of one is a value too: a number (`int`), or a copy (`as`).
 //!
 //! Matching goes from left to right and what has matched is not given
 //! back. `repeat` takes as much as it can and gives nothing back; `oneOf`
@@ -40,7 +45,8 @@ fn only(byte_value: u8) Bytes {
 
 /// What an `extract` keeps: under which name, as which type, and whether
 /// the part it is in may be absent from a text the pattern describes.
-const Kept = struct { name: []const u8, Type: type, maybe: bool };
+/// `borrows`: it is text that points into the item.
+const Kept = struct { name: []const u8, Type: type, maybe: bool, borrows: bool };
 
 // A pattern is a `Pattern(Node)`. A node is a type that says how to match:
 //
@@ -73,7 +79,7 @@ fn Pattern(comptime N: type) type {
         /// Whether the whole of the item is what the pattern describes; with
         /// an `extract` in the pattern, what it extracted.
         pub fn call(_: anytype, args: anytype) Asked(N, di.types(@TypeOf(args))) {
-            const text: []const u8 = args[0];
+            const text: []const u8 = if (comptime isText(@TypeOf(args[0]))) args[0] else args[0].text();
             if (comptime N.kept.len != 0) {
                 var out: Struct(N) = undefined;
                 inline for (N.kept) |kept| {
@@ -111,13 +117,31 @@ fn isText(comptime T: type) bool {
     };
 }
 
+/// Whether a `T` holds a text of its own and reads it with `text()`, as a
+/// `Line` does. Told by name: it is what a caller's own type may declare.
+fn holdsText(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "text")) return false;
+    const reads = switch (@typeInfo(@TypeOf(T.text))) {
+        .@"fn" => |reads| reads,
+        else => return false,
+    };
+    return reads.param_types.len == 1 and reads.param_types[0] == *const T and reads.return_type == []const u8;
+}
+
 /// `Answer(N)`, where what the pattern is asked about is one text. Part of
 /// the type of `call`, so that it is checked where the pattern is used.
 fn Asked(comptime N: type, comptime Args: []const type) type {
-    if (Args.len != 1 or !isText(Args[0])) @compileError(
-        "pattern: tests one `[]const u8` item, got " ++ di.listTypes(Args) ++
+    if (Args.len != 1 or !(isText(Args[0]) or holdsText(Args[0]))) @compileError(
+        "pattern: tests one item that is text, a `[]const u8` or a `Line`, got " ++ di.listTypes(Args) ++
             "; put the handler that yields the text before it, as in `compose(.{ http.Request.path, pattern })`",
     );
+    // What a handler is given of a value is a copy, gone when it returns.
+    if (!isText(Args[0])) for (N.kept) |kept| {
+        if (kept.borrows) @compileError(
+            "pattern: `extract(." ++ kept.name ++ ", ...)` keeps text that points into the item, and a `" ++ @typeName(Args[0]) ++
+                "` is a value that takes its text along; keep a copy, as in `extract(." ++ kept.name ++ ", as(Line(32), ...))`",
+        );
+    };
     return Answer(N);
 }
 
@@ -145,7 +169,7 @@ fn nodesOf(comptime who: []const u8, comptime parts: anytype) []const type {
 
 fn maybe(comptime kept: []const Kept) []const Kept {
     var out: []const Kept = &.{};
-    for (kept) |one| out = out ++ &[_]Kept{.{ .name = one.name, .Type = one.Type, .maybe = true }};
+    for (kept) |one| out = out ++ &[_]Kept{.{ .name = one.name, .Type = one.Type, .maybe = true, .borrows = one.borrows }};
     return out;
 }
 
@@ -475,9 +499,56 @@ pub fn int(comptime T: type) type {
     });
 }
 
+/// What `T.from` returns for a text: a `T`, or an error where it makes none.
+fn Made(comptime T: type) ?type {
+    switch (@typeInfo(T)) {
+        .@"struct", .@"enum", .@"union" => {},
+        else => return null,
+    }
+    if (!@hasDecl(T, "from")) return null;
+    const makes = switch (@typeInfo(@TypeOf(T.from))) {
+        .@"fn" => |makes| makes,
+        else => return null,
+    };
+    if (makes.param_types.len != 1 or makes.param_types[0] != []const u8) return null;
+    const R = makes.return_type orelse return null;
+    return if (di.Payload(R) == T) R else null;
+}
+
+/// `p`, kept as a `T` and not as text: `T.from(text)` makes it. A `Line(32)`
+/// is made so, as a copy of up to 32 bytes; a type of your own with a
+/// `from` is too. A text `from` fails for does not match, as a number that
+/// does not fit an `int` does not.
+pub fn as(comptime T: type, comptime p: anytype) type {
+    const N = nodeOf("as", p);
+    const R = Made(T) orelse @compileError(
+        "as: expected a type made from text by `pub fn from(text: []const u8) !T`, such as `zrx.Line(32)`, got `" ++ @typeName(T) ++ "`",
+    );
+    if (N.kept.len != 0) @compileError("as: `extract(." ++ N.kept[0].name ++ ", ...)` is inside it, where only the `" ++ @typeName(T) ++ "` is kept; extract it from a part of its own");
+    return Pattern(struct {
+        pub const Value = T;
+        pub const nullable = N.nullable;
+        pub const first: Bytes = N.first;
+        pub const ends_before: ?Bytes = N.ends_before;
+        pub const width: ?usize = N.width;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            var unused: T = undefined;
+            return read(input, at, &unused);
+        }
+
+        pub fn read(input: []const u8, at: usize, value: *T) ?usize {
+            const end = N.match(input, at, {}) orelse return null;
+            value.* = if (comptime R == T) T.from(input[at..end]) else T.from(input[at..end]) catch return null;
+            return end;
+        }
+    });
+}
+
 /// `p`, with what it matched kept as the field `name` of what the pattern
-/// extracts: the matched text, or the number of an `int`. The text points
-/// into the item.
+/// extracts: the matched text, or the value of an `int` or an `as`. The
+/// text points into the item.
 pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
     const N = nodeOf("extract", p);
     const typed = @hasDecl(N, "Value");
@@ -490,6 +561,7 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
             .name = @tagName(name),
             .Type = if (typed) N.Value else []const u8,
             .maybe = false,
+            .borrows = !typed,
         }};
 
         pub fn match(input: []const u8, at: usize, out: anytype) ?usize {
@@ -508,7 +580,8 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
 }
 
 /// What `p` extracts, as a struct: a field for each `extract` in it, of the
-/// type of what that keeps (`[]const u8`, or the `T` of an `int(T)`), and
+/// type of what that keeps (`[]const u8`, or the `T` of an `int(T)` or an
+/// `as(T, ...)`), and
 /// optional where the `extract` is inside `optional` or `oneOf`. A handler
 /// that names its item writes `Extracted(p)`; `anytype` takes it too.
 pub fn Extracted(comptime p: anytype) type {

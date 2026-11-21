@@ -36,6 +36,7 @@ const lower = pattern.lower;
 const upper = pattern.upper;
 const alpha = pattern.alpha;
 const alnum = pattern.alnum;
+const as = pattern.as;
 const Extracted = pattern.Extracted;
 
 /// What `p` answers for `text`: a pattern is a handler without dependencies.
@@ -286,6 +287,186 @@ test "what an optional part extracted before it failed is taken back" {
     const without = ask(p, "ab7x").?;
     try std.testing.expectEqual(null, without.number);
     try std.testing.expectEqualStrings("7x", without.rest);
+}
+
+// --- what is kept as a value ---------------------------------------------------------
+
+const Name = zrx.Line(8);
+const Row = zrx.Line(48);
+
+/// The words of a format, as the values they stand for.
+const Level = enum {
+    info,
+    warn,
+    failure,
+
+    pub fn from(text: []const u8) error{UnknownLevel}!Level {
+        const words: std.StaticStringMap(Level) = .initComptime(.{ .{ "info", .info }, .{ "warn", .warn }, .{ "error", .failure } });
+        return words.get(text) orelse error.UnknownLevel;
+    }
+};
+
+/// A type whose `from` cannot fail.
+const Length = struct {
+    bytes: usize,
+
+    pub fn from(text: []const u8) Length {
+        return .{ .bytes = text.len };
+    }
+};
+
+const letters = repeat(lower, .{ .min = 1 });
+
+test "as keeps what a part matched as a value its type makes from the text" {
+    const entry = seq(.{ extract(.level, as(Level, letters)), " ", extract(.name, as(Name, letters)), " ", extract(.rest, as(Length, repeat(byte, .{}))) });
+    const Entry = Extracted(entry);
+    try std.testing.expectEqual(Level, @FieldType(Entry, "level"));
+    try std.testing.expectEqual(Name, @FieldType(Entry, "name"));
+    const found = ask(entry, "error api and more").?;
+    try std.testing.expectEqual(Level.failure, found.level);
+    try std.testing.expectEqualStrings("api", found.name.text());
+    try std.testing.expectEqual(8, found.rest.bytes);
+}
+
+test "a text its type does not make a value of does not match" {
+    const named = seq(.{ extract(.name, as(Name, letters)), "!" });
+    try std.testing.expectEqualStrings("abcdefgh", ask(named, "abcdefgh!").?.name.text());
+    try std.testing.expectEqual(null, ask(named, "abcdefghi!"));
+    // Without an extract it is still asked: the pattern describes a name that fits.
+    try expectAll(as(Name, letters), true, &.{ "a", "abcdefgh" });
+    try expectAll(as(Name, letters), false, &.{ "", "abcdefghi", "A" });
+    try expectAll(as(Level, letters), true, &.{ "info", "error" });
+    try expectAll(as(Level, letters), false, &.{ "failure", "debug" });
+    // A choice goes on to the next where the value is not made.
+    const either = oneOf(.{ extract(.level, as(Level, letters)), extract(.name, as(Name, letters)) });
+    try std.testing.expectEqual(Level.warn, ask(either, "warn").?.level.?);
+    try std.testing.expectEqual(null, ask(either, "other").?.level);
+    try std.testing.expectEqualStrings("other", ask(either, "other").?.name.?.text());
+}
+
+test "a value is a copy: it stays when the text it was taken from is gone" {
+    const named = extract(.name, as(Name, letters));
+    var text: [5]u8 = "first".*;
+    const found = ask(named, &text).?;
+    @memcpy(&text, "other");
+    try std.testing.expectEqualStrings("first", found.name.text());
+}
+
+// --- an item that holds its text ------------------------------------------------------
+
+const reading = seq(.{ extract(.sensor, as(Name, letters)), ",", extract(.ts_ms, int(u64)), ",", extract(.temp_mc, int(i32)), optional("\r") });
+const Reading = Extracted(reading);
+
+fn askRow(comptime p: type, text: []const u8) !@TypeOf(p.call({}, .{text})) {
+    return p.call({}, .{try Row.from(text)});
+}
+
+test "a pattern is put to the text of a line" {
+    try std.testing.expect(try askRow(letters, "abc"));
+    try std.testing.expect(!try askRow(letters, "abc1"));
+    try std.testing.expect(!try askRow(letters, ""));
+    const found = (try askRow(reading, "north,1700,-2500\r")).?;
+    try std.testing.expectEqualStrings("north", found.sensor.text());
+    try std.testing.expectEqual(1700, found.ts_ms);
+    try std.testing.expectEqual(-2500, found.temp_mc);
+    try std.testing.expectEqual(null, try askRow(reading, "north,1700"));
+    try std.testing.expectEqual(null, try askRow(reading, "northernmost,1700,1"));
+}
+
+const rows = [_][]const u8{ "north,1,-2500", "south,2,300", "not a reading", "north,3,700", "south,4" };
+
+fn toRow(text: []const u8) !Row {
+    return Row.from(text);
+}
+
+const Readings = support.Recorder(Reading);
+const Rows = support.Recorder(Row);
+
+fn isNorth(found: Reading) bool {
+    return std.mem.eql(u8, found.sensor.text(), "north");
+}
+
+fn expectReadings(seen: *const Readings, bad: *const Rows) !void {
+    try std.testing.expectEqual(2, seen.slice().len);
+    try std.testing.expectEqual(1, seen.slice()[0].ts_ms);
+    try std.testing.expectEqual(-2500, seen.slice()[0].temp_mc);
+    try std.testing.expectEqualStrings("north", seen.slice()[1].sensor.text());
+    try std.testing.expectEqual(700, seen.slice()[1].temp_mc);
+    try std.testing.expectEqual(2, bad.slice().len);
+    try std.testing.expectEqualStrings("not a reading", bad.slice()[0].text());
+    try std.testing.expectEqualStrings("south,4", bad.slice()[1].text());
+}
+
+test "lines are required to be what a pattern describes, and what it extracted goes on" {
+    var seen: Readings = .{};
+    var bad: Rows = .{};
+    try support.run(program(fromSlice(&rows), .{
+        map(toRow),
+        recover(error{InvalidReading}, .{ map(field(.item)), forEach(support.record(Row)) }),
+        map(require(reading, error.InvalidReading)),
+        filter(isNorth),
+        forEach(support.record(Reading)),
+    }), .{ &seen, &bad });
+    try expectReadings(&seen, &bad);
+}
+
+test "what a line's case is given are values: they cross a queue with the line" {
+    var seen: Readings = .{};
+    var bad: Rows = .{};
+    try support.run(program(fromSlice(&rows), .{
+        map(toRow),
+        route(.{
+            when(reading, .{
+                zrx.queue(1),
+                filter(compose(.{ field(.found), isNorth })),
+                map(field(.found)),
+                forEach(support.record(Reading)),
+            }),
+            otherwise(.{forEach(support.record(Row))}),
+        }),
+    }), .{ std.testing.io, &seen, &bad });
+    try expectReadings(&seen, &bad);
+}
+
+test "the line a case is given is the one its values were taken from" {
+    const Pairs = support.Recorder(zrx.Found(Reading, Row));
+    var seen: Pairs = .{};
+    try support.run(program(fromSlice(&rows), .{
+        map(toRow),
+        route(.{
+            when(reading, .{forEach(support.record(zrx.Found(Reading, Row)))}),
+            otherwise(.{zrx.drain()}),
+        }),
+    }), .{&seen});
+    try std.testing.expectEqual(3, seen.slice().len);
+    try std.testing.expectEqualStrings("south,2,300", seen.slice()[1].item.text());
+    try std.testing.expectEqualStrings("south", seen.slice()[1].found.sensor.text());
+}
+
+test "a line that came with something else is reached through its field" {
+    const Sided = zrx.Tagged(u8, Row);
+    const side = struct {
+        fn of(row: Row) Sided {
+            return .{ .source = 7, .item = row };
+        }
+        fn north(seen: zrx.Found(Reading, Sided)) bool {
+            return seen.item.source == 7 and isNorth(seen.found);
+        }
+    };
+    var seen: Readings = .{};
+    try support.run(program(fromSlice(&rows), .{
+        map(toRow),
+        map(side.of),
+        route(.{
+            when(compose(.{ field(.item), reading }), .{
+                filter(side.north),
+                map(field(.found)),
+                forEach(support.record(Reading)),
+            }),
+            otherwise(.{zrx.drain()}),
+        }),
+    }), .{&seen});
+    try std.testing.expectEqual(2, seen.slice().len);
 }
 
 // --- in a pipe ----------------------------------------------------------------------

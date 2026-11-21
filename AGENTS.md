@@ -309,11 +309,24 @@ to this file; edit `AGENTS.md`, not copies.
   a number that does not fit does not match: a draft that converted after
   matching had a route take a path whose number then failed to parse.
   `std` has no matcher, so this is the one extension that is not a layer
-  over `std`: keep it to bytes, with no Unicode classes. Not there, and
+  over `std`: keep it to bytes, with no Unicode classes. A pattern is
+  put to a `[]const u8`, or to a value that reads its text with `text()`,
+  as a `Line` does; told by that name, since it is what a caller's own
+  type may declare. What is taken out of a value is a value: a handler is
+  given a copy of its item, so a piece of its text would point into
+  something gone when the handler returns, and such an `extract` does not
+  compile. `as(T, p)` keeps what `p` matched as a `T` that `T.from(text)`
+  makes, which `Line(n)` already had and the apps already called by hand
+  (`Service.from(column)`); a text `from` fails for does not match, the
+  rule of `int`. It is one contract for a copy of bounded length and for
+  the words of a format as an enum, not two nodes. Offsets into the line
+  and a borrowed text that lives as long as the push were considered:
+  the first makes every handler put a span back to its line, the second
+  dangles behind a `queue` and needs the operators to hand a predicate a
+  pointer. Not there, and
   back only by decision: a format string read backwards (`"/items/{id}"`
-  would be a string language of our own), going back, finding the places a
-  pattern matches inside a text, and items that are not `[]const u8` (a
-  `Line` is a value; text extracted from it would point into a copy). The
+  would be a string language of our own), going back, and finding the
+  places a pattern matches inside a text. The
   fixtures are `lean`: a pattern carries a position through its parts. A
   pass that plans a pattern before matching may close that later, inside
   the extension, without changing what a user writes.
@@ -437,6 +450,15 @@ to this file; edit `AGENTS.md`, not copies.
   not "the same program": wiring is not compared, `behavior.zig` covers
   results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
+- A handler is given its item as a value (`di.invoke` builds a tuple), and
+  for an item that holds its bytes the optimizer does not take the copy
+  out: one `memcpy` of a `Line(n)` for each handler it is given to. That
+  was found when the first fixture with such an item failed as `lean`
+  with a function handler exactly as with a pattern, so it is the
+  contract's cost and not the pattern's. `lean_pattern_line` has the copy
+  on both sides and says so; the guide says so. Do not hide it by other
+  means, and do not change how a handler is called to remove it without a
+  decision: every composite handler takes its arguments as that tuple.
 
 ## Diagnostics
 
