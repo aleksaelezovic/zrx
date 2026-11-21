@@ -109,43 +109,100 @@ fn Tap(comptime handler: anytype) type {
 }
 
 /// Running accumulation: emits `state = reducer(deps..., state, item)` after every item.
-pub fn scan(seed: anytype, comptime reducer: anytype) Accumulate(.scan, State(reducer, @TypeOf(seed)), reducer) {
-    return .{ .seed = seed };
+pub fn scan(seed: anytype, comptime reducer: anytype) Accumulate(.scan, Stated(reducer, @TypeOf(seed)) orelse Untyped(seed), reducer) {
+    return .{ .seed = if (comptime Stated(reducer, @TypeOf(seed)) != null) seed else .{} };
 }
 
 /// Final accumulation: emits the last state once, when the stream ends
 /// (the seed itself if there were no items).
-pub fn fold(seed: anytype, comptime reducer: anytype) Accumulate(.fold, State(reducer, @TypeOf(seed)), reducer) {
-    return .{ .seed = seed };
+pub fn fold(seed: anytype, comptime reducer: anytype) Accumulate(.fold, Stated(reducer, @TypeOf(seed)) orelse Untyped(seed), reducer) {
+    return .{ .seed = if (comptime Stated(reducer, @TypeOf(seed)) != null) seed else .{} };
 }
 
-/// The accumulator type: the reducer's declared state parameter, else the seed's type.
-fn State(comptime reducer: anytype, comptime Seed: type) type {
+fn Stated(comptime reducer: anytype, comptime Seed: type) ?type {
     if (!di.isHandler(reducer)) @compileError("scan/fold: expected a reducer `fn (deps..., state, item) state`, got `" ++ @typeName(@TypeOf(reducer)) ++ "`");
-    return di.Param("scan/fold", reducer, 2, 0) orelse Seed;
+    return State("scan/fold", reducer, Seed);
 }
 
-fn Accumulate(comptime kind: enum { scan, fold }, comptime A: type, comptime reducer: anytype) type {
+/// The type a reducer accumulates in, where that can be told without the
+/// items: the state parameter the reducer declares, else the type of the
+/// seed. A number written without a type (`0`) has none to give, so with
+/// such a seed the reducer has to say: a composite one may declare
+/// `State(Item) type`, what it accumulates items of type `Item` in, and
+/// this is null until the items are known (`Inferred`). A seed that has a
+/// type is never overruled by that declaration: `@as(u64, 0)` is how a
+/// wider accumulator is chosen.
+pub fn State(comptime who: []const u8, comptime reducer: anytype, comptime Seed: type) ?type {
+    if (di.Param(who, reducer, 2, 0)) |Declared| return Declared;
+    switch (@typeInfo(Seed)) {
+        .comptime_int, .comptime_float => {},
+        else => return Seed,
+    }
+    // A handler that is no reducer says so itself before it is asked what
+    // it accumulates in: the hint below would send its user the wrong way.
+    _ = di.requires(who, reducer, 2);
+    if (@TypeOf(reducer) == type and @hasDecl(reducer, "State")) return null;
+    @compileError(who ++ ": the seed is a `" ++ @typeName(Seed) ++ "`, a number without a type, and the reducer does not say what it accumulates in; write `@as(T, seed)`");
+}
+
+/// What `reducer` accumulates items of type `Item` in, for a `seed` that
+/// `State` found no type for. The seed has to be a value of it.
+pub fn Inferred(comptime who: []const u8, comptime reducer: anytype, comptime seed: anytype, comptime Item: type) type {
+    const A = reducer.State(Item);
+    const fits = switch (@typeInfo(A)) {
+        .float => true,
+        .int => (@TypeOf(seed) == comptime_int or @trunc(seed) == seed) and seed >= std.math.minInt(A) and seed <= std.math.maxInt(A),
+        else => false,
+    };
+    if (!fits) @compileError(std.fmt.comptimePrint(
+        "{s}: the seed `{d}` is not a `{s}`, which is what the reducer accumulates `{s}` items in; give a seed of that type, or choose another with `@as(T, seed)`",
+        .{ who, seed, @typeName(A), @typeName(Item) },
+    ));
+    return A;
+}
+
+/// A seed without a type, kept in the type of its operator: there is no
+/// runtime type to store it in until the items are known. Told by a
+/// declaration of a private type, not by a name: a seed of a caller's own
+/// may declare anything.
+fn Untyped(comptime seed: anytype) type {
     return struct {
-        seed: A,
+        pub const zrx_untyped_seed: Mark = .{};
+        pub const value = seed;
+    };
+}
+
+const Mark = struct {};
+
+fn Accumulate(comptime kind: enum { scan, fold }, comptime Seed: type, comptime reducer: anytype) type {
+    return struct {
+        seed: Seed,
 
         const Op = @This();
         pub const zrx_operator = {};
         pub const name = @tagName(kind);
 
+        const untyped = @typeInfo(Seed) == .@"struct" and @hasDecl(Seed, "zrx_untyped_seed") and @TypeOf(Seed.zrx_untyped_seed) == Mark;
+
+        /// The accumulator: the type of the seed, or for a seed without
+        /// one, what the reducer says it accumulates the items in.
+        fn A(comptime In: type) type {
+            return if (untyped) Inferred(name, reducer, Seed.value, In) else Seed;
+        }
+
         pub fn Out(comptime Env: type, comptime In: type) type {
-            expectReturn(name, "reducer", di.Bound(name, reducer, Env, &.{ A, In }).Return, A);
-            return A;
+            expectReturn(name, "reducer", di.Bound(name, reducer, Env, &.{ A(In), In }).Return, A(In));
+            return A(In);
         }
 
         pub fn Stage(comptime Env: type, comptime In: type) type {
-            const Call = di.Bound(name, reducer, Env, &.{ A, In });
+            const Call = di.Bound(name, reducer, Env, &.{ A(In), In });
             return struct {
                 call: Call,
-                state: A,
+                state: A(In),
 
                 pub fn init(self: *@This(), op: *const Op, env: Env) void {
-                    self.* = .{ .call = .init(env), .state = op.seed };
+                    self.* = .{ .call = .init(env), .state = if (untyped) Seed.value else op.seed };
                 }
 
                 pub fn push(self: *@This(), item: In, down: anytype) !Flow {

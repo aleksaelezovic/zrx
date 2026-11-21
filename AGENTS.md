@@ -71,6 +71,19 @@ to this file; edit `AGENTS.md`, not copies.
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
   forward their children's requirements. No closures, no runtime function pointers.
+- **A seed that has a type is the state; a number without one asks the
+  reducer.** `scan`, `fold` and `reduce` take the type of the state from
+  the parameter a reducer function declares, else from the seed. A
+  `comptime_int` or `comptime_float` seed has none to give, and then a
+  composite reducer says it with `State(Item) type`: `fold(0, sum)`
+  accumulates in the item's type, `fold(0, count)` in a `usize`, and
+  `fold(@as(u64, 0), sum)` in a `u64` whatever is declared. `State` and
+  `Inferred` in `src/ops/transform.zig` are the one place that reads a
+  seed, for all three; `src/di.zig` knows nothing of it. A reducer that
+  declares nothing is a compile error that says to write `@as(T, seed)`.
+  The rule is decided; `State(Item)` is the shape proposed for it, and
+  [docs/spec-math.md](docs/spec-math.md#the-seed) has what else was
+  weighed.
 - **An optional is the answer of a predicate, nowhere else.** Zig says
   "maybe" three ways. `bool` and `E!T` mean something everywhere; `?T` means
   something only where a predicate is asked, and there it means what the

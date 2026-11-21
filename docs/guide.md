@@ -238,6 +238,15 @@ Per item:
 | `batch(n)` | | Inline `Batch(T, n)` values (the last may contain fewer items). |
 | `recover(E, path)` | | A failure of the operators after it, with an error in `E`, goes down `path` as a `Failed(E, T)`. |
 
+The state of `scan` and `fold` has the type its reducer declares for it.
+Where the reducer declares none (an `anytype` parameter, a composite
+handler), the state has the type of the seed: `fold(@as(u64, 0), total)`
+accumulates in a `u64`. A number written without a type, `0`, has none to
+give. A composite reducer can say what it accumulates the items in (see
+[Writing your own](#writing-your-own)), and `0` is then a value of that;
+with any other reducer it is a compile error that says to write
+`@as(T, seed)`. `reduce` reads its seed the same way.
+
 Flow:
 
 | Operator | Effect |
@@ -1708,7 +1717,11 @@ answers `.done`. See [`src/sources.zig`](../src/sources.zig).
 
 **A composite handler** is a struct type with `zrx_handler`,
 `requires(arity) []const type` and `call(env, args)`. See
-[`src/handlers.zig`](../src/handlers.zig).
+[`src/handlers.zig`](../src/handlers.zig). One that is a reducer may also
+declare `State(Item) type`, the type it accumulates items of type `Item`
+in. `scan`, `fold` and `reduce` ask for it when the seed is a number
+without a type, as in `fold(0, total)`; a seed that has a type is the
+state, and the declaration is not asked.
 
 **A binding** that acquires something for the run is a value whose type
 declares `zrx_resource`, the type it `Provides`, the dependency types it
