@@ -1050,8 +1050,8 @@ holds for a text whose numbers it could not hand out.
 
 Text extracted from a `[]const u8` points into it. That is right for a text
 that stays where it is, and wrong for a `Line`: a line is a value that holds
-its bytes, a handler is given a copy of it, and the copy is gone when the
-handler returns. So a pattern put to a line extracts values, and an
+its bytes, a handler is given it by value, and a piece of its text lives
+no longer than the call. So a pattern put to a line extracts values, and an
 `extract` that would keep a piece of its text does not compile.
 
 `as(T, p)` keeps what `p` matched as a `T`, made by `T.from(text)`.
@@ -1287,7 +1287,7 @@ follows it: `repeat(except(set("/")), .{})`.
 Where a pattern can be seen never to match for that reason, it does not
 compile: a part that begins only with bytes the `repeat` before it has
 taken, a choice behind another that is its beginning (`"info"` before
-`"information"`), a choice behind one that can match nothing.
+`"information"`), a choice behind one that always matches.
 
 Patterns work on bytes. A string holds whatever bytes it holds, UTF-8
 included; the sets and classes are single bytes.
