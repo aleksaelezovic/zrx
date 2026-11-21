@@ -169,7 +169,7 @@ test "a text that makes a backtracking matcher try every split is one pass here"
 
 test "what two choices share can be written once, and describes the same texts" {
     // The first reads the rest of the letters in every round before it
-    // settles for one: the square of the length. The second reads them once.
+    // settles for one: the square of the length. The second is linear.
     const shout = seq(.{ repeat(lower, .{ .min = 1 }), "!" });
     const twice = repeat(oneOf(.{ shout, lower }), .{});
     const once = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});

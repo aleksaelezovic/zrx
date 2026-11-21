@@ -1064,9 +1064,9 @@ included; the sets and classes are single bytes.
 
 ### What a pattern costs
 
-A part that matches is read once. A part that does not match has been read
-for nothing: the next choice of a `oneOf`, and what follows an `optional`,
-begin where it began. Mostly that is a byte or a word. It adds up where such
+What follows a part that matches begins where that part ended. A part that
+does not match has been read for nothing: the next choice of a `oneOf`, and
+what follows an `optional`, begin where it began. Mostly that is a byte or a word. It adds up where such
 a part reads far before it fails and stands inside a `repeat`, which reads
 it again in every round:
 
@@ -1084,13 +1084,13 @@ Nothing rewrites a pattern for you, so write what the choices share once:
 const fast = repeat(seq(.{ repeat(lower, .{ .min = 1 }), optional("!") }), .{});
 ```
 
-It describes the same texts and reads each byte once. Where the shared part
-cannot be written once, bound how far the choice reads before it fails.
+It describes the same texts in linear time: twice the text takes twice as
+long. Where the shared part cannot be written once, bound how far the choice reads before it fails.
 `.max` does that only where what is repeated has a length of its own, a
 byte or a string: it counts rounds, not bytes.
 
 ```zig
-// At most 16 bytes are read before the choice fails.
+// Fails after at most 17 bytes: 16 letters, and the one that is no `!`.
 const short = seq(.{ repeat(lower, .{ .min = 1, .max = 16 }), "!" });
 // One round, which still reads to the end of the letters.
 const long = repeat(shout, .{ .min = 1, .max = 1 });
