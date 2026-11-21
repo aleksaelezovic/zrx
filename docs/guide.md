@@ -1131,9 +1131,8 @@ code of these pipes over a slice of lines, compiled optimized for aarch64.
 Another pipe may differ. No test holds these counts. Two fixtures are
 related examples, each with a `Line(32)`: `lean_pattern_line` is a pipe of
 the second kind, with its copy on both sides of the comparison, and
-`same_line_reference` one of the last kind. What they hold is that the
-pipe has no more instructions, loads, stores and stack slots than the loop
-by hand it is compared with.
+`same_line_reference` one of the last kind. What a fixture holds is said
+under [How zero overhead is checked](#how-zero-overhead-is-checked).
 
 A pattern is put to text, not to a pointer. Where the items are references
 to lines, put the handler that yields the text before it:
