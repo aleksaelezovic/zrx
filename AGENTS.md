@@ -279,121 +279,34 @@ to this file; edit `AGENTS.md`, not copies.
   `write(Role, "{f}\n")`. No general serialization layer for one format.
   Decoding is not there.
 - **A text pattern is a handler, and it does not go back.**
-  `src/ext/pattern.zig`, exported as `zrx.ext.pattern` and analyzed only
-  when referenced, is written against the handler contract alone. A
-  pattern is a composite handler as `gt(80)` is, a predicate on one
-  `[]const u8` item: there is no `match(p)` that makes a handler of it.
-  One that extracts answers `?Extracted(p)`, a predicate that finds a
-  value, and everything else follows from what `when`, `require` and `all`
-  do with one; the extension has no operator. What is written is a
-  `Pattern(Node)`: the nodes that match are private types, and a pattern is
-  told by a private `Mark`, not by a name. Matching goes left to right and
-  what matched is not given back (`repeat` gives nothing back, `oneOf`
-  takes its first choice for good). That is on purpose and is not to be
-  softened: it is the scanner one writes by hand, which is what the
-  `lean_pattern_*` fixtures compare with, and it has no text that takes
-  exponentially long, which matters where the text is a request's path.
-  It is also why this is not called a regular expression. Do not say that
-  nothing is read twice, or that the cost is that of the hand-written
-  scanner on any text: the first draft said both, and a review measured
-  the square of the length. A part that fails has been read, and the next
-  choice of a `oneOf`, or what follows an `optional`, reads it again, once
-  per round inside a `repeat`. The guide says so and shows what to write.
-  It is not a compile error, because it cannot be seen: two choices that
-  share a beginning and take the same bytes are linear. Nothing writes the
-  shared part once for the user: a pass could only merge parts that are
-  the same part, and the case that was measured (`lower` again and again,
-  then `!`, or else one `lower`) shares no part, only bytes. What that rule
-  makes unmatchable is a
-  compile error where it can be seen (a part behind a `repeat` that took
-  its first bytes, a choice behind its own beginning, a choice behind one
-  that matches nothing): say nothing where it cannot be seen, rather than
-  guess. Types are in the pattern (`int(T)`), so the struct is inferred and
-  a number that does not fit does not match: a draft that converted after
-  matching had a route take a path whose number then failed to parse.
-  `std` has no matcher, so this is the one extension that is not a layer
-  over `std`: keep it to bytes, with no Unicode classes. A pattern is
-  put to a `[]const u8`, or to a value that reads its text with `text()`,
-  as a `Line` does; told by that name, since it is what a caller's own
-  type may declare. What is taken out of a value is a value: a handler is
-  given a copy of its item, so a piece of its text would point into
-  something gone when the handler returns, and such an `extract` does not
-  compile. `as(T, p)` keeps what `p` matched as a `T` that `T.from(text)`
-  makes, which `Line(n)` already had and the apps already called by hand
-  (`Service.from(column)`); a text `from` fails for does not match, the
-  rule of `int`. It is one contract for a copy of bounded length and for
-  the words of a format as an enum, not two nodes. Whether what `as` keeps is
-  a value is read off `T`, not off how the pattern is written: a `T` with
-  a pointer anywhere in it is taken to point into the text `from` was
-  given (`holdsPointer`), so it is extracted from a `[]const u8` and
-  refused from a `Line`. Review showed a `from` that kept its slice being
-  extracted from a `Line` as if it were a copy. Offsets into the line
-  and a borrowed text that lives as long as the push were considered:
-  the first makes every handler put a span back to its line, the second
-  dangles behind a `queue` and needs the operators to hand a predicate a
-  pointer. A rule that holds
-  itself is `recursive(rule, .{ .depth })`, where `rule` builds the pattern
-  from `self`. It is not recursion: the rule is built `depth` times at
-  compile time, each from the one further in, and the innermost `self` is
-  a node that never matches. So the matcher is straight code, the text
-  does not choose the depth of the stack (a prototype that called itself
-  matched 20,000 levels and overran the stack at 200,000), and every
-  compile-time check works on each level. A comptime function over the
-  depth could already write this, and the helper is there by the user's
-  decision all the same: the base case and the limit are the library's,
-  not each caller's, and it is what makes nested extraction possible.
-  What a level extracts is a struct of its own (`Recorded`), a typed node
-  as `int` is, so the names of one level clash with no other and the
-  whole has a size; that is why the depth is written. That a part can
-  match without taking a byte (`nullable`) is not that it always matches:
-  an `as` over a part that may be empty can still refuse what was matched
-  (`refuses`), and `oneOf` tells a choice the ones after it cannot be
-  reached only where it always matches. Review found a fallback refused
-  behind `as(Line(0), optional("x"))`. `optional` refuses only a part that
-  always matches, for the same reason: review found
-  `optional(as(Line(0), optional("x")))` refused. `repeat` still asks
-  only whether a part can match nothing, since that is what would never
-  stop. A level is told to
-  be dead by `never`, which `seq`, `oneOf`, `repeat`, `as` and `extract`
-  pass on: a rule that is dead at depth 1 has no way to end and does not
-  compile, and `seq` does not take a dead part for the mistake of a part
-  that can never match. Choices of a `oneOf` may be written with names,
-  `oneOf(.{ .inner = self, .word = as(Word, letters) })`, and extracted
-  they are a tagged union that says which one matched, each choice
-  holding what it keeps (its value, a struct of its extracts, or `void`).
-  Without names an extracted `oneOf` is the text that matched, as
-  before: names are what a union needs, and two unnamed choices of
-  different types have none to give. That is why the user's
-  `extract(.object, oneOf(.{ self, as(Term, plain) }))` is written with
-  names. A choice that is only text holds `void` and not that text: a
-  slice would make every literal choice a borrow on a `Line`. A named
-  choice with extracts inside is the one way to group the extracts of an
-  ordinary part into a struct; there is no node for that alone. A rule has
-  no fixture, because it is not `lean`: against the same rule written by
-  hand as a function built for each depth, a filter over a rule three
-  deep measured 80 instructions to 73, no call and no `alloca`, and two
-  more loads of a byte (a choice that fails on a byte and the next that
-  reads it again). Timed on 818 MB of nested text it took 0.45 s, the
-  hand-written rule 0.58 s and a hand-written depth counter 0.61 s, and
-  eight levels took what three did. Say those numbers and not "zero
-  overhead". The first measurement was 97 instructions: a string of one
-  byte went through `std.mem.startsWith`, which asks first whether the
-  two texts are the same memory, and it is now compared as a byte. Not there, and
-  back only by decision: a format string read backwards (`"/items/{id}"`
-  would be a string language of our own), going back, and finding the
-  places a pattern matches inside a text. The
-  fixtures are `lean`: a pattern carries a position through its parts.
-  A plan for that was built and measured, and is not there: the last part
-  of a pattern was asked "is all that is left yours" (`finish`) and not
-  "where do you end", as the loop by hand that leaves at the first wrong
-  byte. `lean_pattern_route` went from 80 instructions to 70 (71 by
-  hand) and `lean_pattern_filter` from 40 to 38, while
-  `lean_pattern_require` went from 102 to 107 and `lean_pattern_line`
-  from 114 to 136, past what `lean` allows. The fixtures by hand are
-  written in both shapes, and that plan matches one of them. This is what
-  that one experiment measured, not a finding about every plan: another
-  optimization is judged by the same fixtures, and is worth having if it
-  improves them all.
+  `src/ext/pattern.zig` (`zrx.ext.pattern`) is written against the handler
+  contract alone and has no operator.
+  [docs/spec-pattern.md](docs/spec-pattern.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - A pattern is a composite handler, a predicate on one item of text.
+    One that extracts answers `?Extracted(p)`. There is no `match(p)`.
+  - Matching goes left to right and gives nothing back. Do not soften
+    that, and do not call it a regular expression.
+  - Do not say that nothing is read twice, or that a pattern costs what
+    the hand-written scanner costs on any text. Give the measurements.
+  - A pattern that can be seen never to match is a compile error. Where
+    it cannot be seen, say nothing rather than guess.
+  - Bytes only, no Unicode classes.
+  - What is taken out of a value, such as a `Line`, is a value. Whether a
+    `T` is one is read off the type: a pointer anywhere in it borrows.
+  - That a part can match nothing (`nullable`) is not that it always
+    matches (`refuses`), nor that it never does (`never`). `oneOf` and
+    `optional` ask whether it always matches, `repeat` whether it can
+    match nothing.
+  - `recursive` builds its levels at compile time. Nothing calls itself
+    as deep as a text asks.
+  - A rule has no fixture and no claim of zero overhead. A second way to
+    match is worth having only if it improves every `lean_pattern_*`
+    fixture.
+  - Not there, and back only by decision: a format string read
+    backwards, going back, finding the places a pattern matches inside a
+    text, a node that only groups extracts.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -401,70 +314,35 @@ to this file; edit `AGENTS.md`, not copies.
   That makes it atomic per file and not per run: say so wherever it is
   described. The first wording promised that a failed run leaves no file,
   and a review showed two published files where it did.
-- **HTTP is an extension, not core.** `src/ext/http.zig` is written against
-  the public source, operator and handler contracts, is analyzed only when
-  `zrx.ext.http` is referenced, and the core knows nothing of it (it still
-  compiles freestanding). `serve` holds a synchronous sub-pipe as
-  `concurrent` does and constructs it per connection with that connection's
-  `Response` added to the environment; a boundary inside it is a compile
-  error. The listener owns an accepted `Connection` until a `serve` or a
-  `reject` takes it and closes what nobody took after the run's tasks have
-  returned; whoever took it closes it. A `pending` slot measures "accepted
-  and not taken", and the listener cannot tell a connection that waits in a
-  queue from one a stage dropped, so `reject` is the one way to let go of a
-  connection and a dropped one keeps its slot until the run is over. That
-  is the rule the guide states; do not make the table evict, or the source
-  guess, to hide a pipe that drops. A connection is handed over once, and the
-  listener checks that its slot still holds that connection (a generation
-  per slot): a copy that comes second fails with `error.ConnectionTaken`
-  and touches neither the slot nor the socket. Do not compare sockets for
-  this; the system reuses their handles. Responders write unflushed and `serve`
-  flushes before a read that may wait for the peer (a head or body that is
-  not whole in the buffer); do not flush per response. Every head is
-  written by `Exchange.begin`, which is where a status is judged: an
-  interim one (1xx) is answered 500, since it would leave the peer without
-  an answer, and 204 and 304 go out without a body or a length. A cancellation
-  `std` recorded on the connection comes out of `serve` whatever the
-  conversation returned. Answers completed before a handler failed are
-  flushed, unless it failed with a cancellation. A socket on which `std`
-  recorded a failure is not read from or written to again, whether or not
-  the failure came back as an error: a second failure would replace the
-  record, and a cancellation in it would be lost. `serve` looks after
-  every request and before an answer starts. An unread body is skipped
-  only once the pipe is through with the request, never before or while
-  it is answered: the read overwrites the head, which the item being
-  answered may point into. The independent review before the merge found
-  a `content-length` counted before the skip and content written after
-  it. That is why `begin` writes every head itself and `std`'s
-  `respondStreaming`, which skips first, is not used. A read that fails
-  in the skip is returned, for a socket and a transport alike. `serve` refuses a request whose `Host` is not in
-  order before any handler sees it, and one whose head a proxy in front
-  could read differently (`refusal`): `std` parses leniently, and a
-  disagreement on where a request ends is request smuggling. That check
-  holds only what `std` lets through; two rules that duplicated refusals
-  of its parser were removed when no test could tell them apart. No body
-  framed by a transfer coding is read: such a request is answered 411
-  before any handler sees it. Chunk sizes cannot be checked from outside
-  `std`, whose chunk reader takes sizes that are no hexadecimal number
-  and overflows on one near 2^64 (a remote stop of a safe build). Not
-  skipping such a body, and then closing the connection after one, each
-  left `request.body` reaching that decoder. Chunked request bodies
-  return when `std` decodes them with checks, or by explicit decision
-  with a decoder of zrx's own. Parsing stays `std.http.Server`'s. The first version is one
-  worker per open connection with no timeouts and no graceful shutdown; the
-  guide's "Not here yet" lists what was left out on purpose. Path parameters
-  are not a feature of HTTP: `http.path` takes a string, or any predicate of
-  text, and answers what that answers, so a pattern that extracts makes the
-  case's item a `Found` of the values and the request. HTTP imports nothing
-  of the pattern extension and has no router of its own; do not give it
-  one. Taking either made the parameter `anytype`, which gives its
-  argument no type: a list of bytes is told by its shape and still taken,
-  an expression that needs a result type (`@ptrCast`) has to name it, and
-  the guide says so. A second function for predicates would have kept the
-  typed parameter and been a second spelling. What it does is
-  described in the guide's HTTP section and pinned in `tests/http.zig`: a
-  behavior goes into that section together with its test. Performance is
-  stated only in the benchmark app's README, with the measurement behind it.
+- **HTTP is an extension, not core.** `src/ext/http.zig` (`zrx.ext.http`)
+  is written against the public source, operator and handler contracts,
+  and the core knows nothing of it (it still compiles freestanding).
+  [docs/spec-http.md](docs/spec-http.md) is its design record: the
+  reasons and what review found. Read it before changing the extension.
+  The rules it gives:
+  - What it does is described in the guide's HTTP section and pinned in
+    `tests/http.zig`: a behavior goes into that section together with its
+    test. Performance is stated only in the benchmark app's README, with
+    the measurement behind it.
+  - `serve` holds a synchronous sub-pipe per connection. A boundary
+    inside it is a compile error.
+  - `reject` is the one way to let go of a connection. Do not make the
+    table evict, or the source guess, to hide a pipe that drops one.
+  - A connection is handed over once, checked by a generation per slot.
+    Do not compare sockets: the system reuses their handles.
+  - Responders write unflushed and `serve` flushes before a read that may
+    wait for the peer. Do not flush per response.
+  - Every head is written by `Exchange.begin`. Do not use `std`'s
+    `respondStreaming`.
+  - An unread body is skipped only once the pipe is through with the
+    request: the read overwrites the head an item may point into.
+  - A socket on which `std` recorded a failure is not read from or
+    written to again.
+  - A request is refused before any handler sees it where a proxy could
+    read its head differently. No body framed by a transfer coding is
+    read: chunked request bodies return by decision.
+  - Parsing stays `std.http.Server`'s. HTTP imports nothing of the
+    pattern extension and has no router of its own; do not give it one.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
