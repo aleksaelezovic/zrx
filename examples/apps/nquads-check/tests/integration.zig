@@ -55,6 +55,43 @@ test "statements are written the one way, and the other lines reported by number
     try std.testing.expectEqual(app.Summary{ .statements = 4, .in_graphs = 2, .rejected = 2 }, log.summary);
 }
 
+/// An IRI of `len` bytes.
+inline fn iriOf(comptime len: usize) []const u8 {
+    return "<x:" ++ @as([len - 4]u8, @splat('a')) ++ ">";
+}
+
+/// A statement with nothing between its terms, and the same written the
+/// one way, which is three bytes longer.
+inline fn adjacent(comptime object_len: usize) []const u8 {
+    return iriOf(200) ++ iriOf(100) ++ iriOf(object_len) ++ ".";
+}
+inline fn apart(comptime object_len: usize) []const u8 {
+    return iriOf(200) ++ " " ++ iriOf(100) ++ " " ++ iriOf(object_len) ++ " .";
+}
+
+test "what is written can be read again: a statement longer than a line once tidied is not written" {
+    const max_line = app.nquads.max_line;
+    // 512 bytes as it stands, 515 written the one way.
+    try std.testing.expectEqual(max_line, adjacent(211).len);
+    // 509 bytes as it stands, 512 written the one way.
+    try std.testing.expectEqual(max_line, apart(208).len);
+
+    var buffers: [2][2048]u8 = undefined;
+    var log: Log = .init(&buffers[0], &buffers[1]);
+    try check(adjacent(211) ++ "\n" ++ adjacent(208) ++ "\n", &log);
+    try std.testing.expectEqualStrings(apart(208) ++ "\n", log.output.buffered());
+    try std.testing.expectEqualStrings("line 1: longer than 512 bytes once tidied\n", log.diagnostics.buffered());
+    try std.testing.expectEqual(app.Summary{ .statements = 1, .rejected = 1 }, log.summary);
+
+    // The output is all statements that fit, written the one way already.
+    var again_buffers: [2][2048]u8 = undefined;
+    var again: Log = .init(&again_buffers[0], &again_buffers[1]);
+    try check(log.output.buffered(), &again);
+    try std.testing.expectEqualStrings(log.output.buffered(), again.output.buffered());
+    try std.testing.expectEqualStrings("", again.diagnostics.buffered());
+    try std.testing.expectEqual(app.Summary{ .statements = 1 }, again.summary);
+}
+
 test "the summary that cannot be written fails by itself, after the statements were" {
     var none: [0]u8 = .{};
     var console: std.Io.Writer = .fixed(&none);

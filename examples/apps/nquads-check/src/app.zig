@@ -2,6 +2,7 @@
 //!
 //!     line -> numbered -.- nothing or a comment
 //!                       |- a statement      -> counted -> tidied -> the output file
+//!                       |    '- too long once tidied -> counted -> "line N: longer than 512 bytes once tidied"
 //!                       '- anything else    -> counted -> "line N: not a statement" on stderr
 const std = @import("std");
 const zrx = @import("zrx");
@@ -78,12 +79,31 @@ const isStatement = compose(.{
     nquads.statement,
 });
 
-const statements = pipe(.{
+const tidied = pipe(.{
     map(field(.found)),
     tap(Summary.statement),
     map(nquads.Tidy.of),
     write(Output, "{f}\n"),
 });
+
+const too_long = pipe(.{
+    map(field(.item)),
+    map(field(.number)),
+    tap(Summary.rejection),
+    print(Diagnostics, std.fmt.comptimePrint("line {{d}}: longer than {d} bytes once tidied\n", .{max_line})),
+});
+
+/// Written the one way, a statement fits a line: what is written can be read again.
+const fitsALine = compose(.{
+    field(.found),
+    nquads.Tidy.of,
+    nquads.Tidy.fits,
+});
+
+const statements = pipe(.{route(.{
+    when(fitsALine, tidied),
+    otherwise(too_long),
+})});
 
 const rejections = pipe(.{
     map(field(.number)),

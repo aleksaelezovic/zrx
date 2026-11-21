@@ -20,14 +20,18 @@ terms and nothing after the dot. Comments and empty lines are not copied.
 | | |
 |---|---|
 | Exit 0 | Every line was a statement, a comment or empty. |
-| Exit 1 | Some line was none of those; the others are still written. |
-| Exit 2, no output file | The input could not be read to its end, or the output could not be written: `fatal: <error>` on stderr. |
-| Exit 2, with the output file | The file was read and the output published, and then the summary could not be written to stdout: `fatal: WriteFailed`. |
+| Exit 1 | Some line was none of those, or too long once tidied; the others are still written. |
+| Exit 2, before publication | The input could not be read to its end, the output could not be written, or the output file exists already: `fatal: <error>` on stderr. Nothing is published, and a file that was there is left as it was. |
+| Exit 2, after publication | The output was published, and then the summary could not be written to stdout: `fatal: WriteFailed`. The output stays. |
 
 The output is published once the input has been read to its end, and is not
-written over a file that exists. The summary is printed after that, so a
-failure to print it leaves the output where it is. A line longer than 512
-bytes fails the run.
+written over a file that exists. The summary is printed after that. A line
+longer than 512 bytes fails the run.
+
+**What is written can be read again.** Writing a statement the one way can
+make it longer, since a space is put where there was none. A statement that
+would then be longer than 512 bytes is not written: it is reported as
+`line N: longer than 512 bytes once tidied`.
 
 ## Where it differs from the specification
 
@@ -82,12 +86,17 @@ copy (`as`). A term longer than that makes its line no statement.
 ## The pipe
 
 ```zig
-const statements = pipe(.{
+const tidied = pipe(.{
     map(field(.found)),
     tap(Summary.statement),
     map(nquads.Tidy.of),
     write(Output, "{f}\n"),
 });
+
+const statements = pipe(.{route(.{
+    when(fitsALine, tidied),
+    otherwise(too_long),
+})});
 
 const rejections = pipe(.{
     map(field(.number)),

@@ -113,6 +113,19 @@ pub const Tidy = struct {
         return .{ .quad = quad };
     }
 
+    /// How many bytes `format` writes.
+    pub fn length(tidy: *const Tidy) usize {
+        const quad = &tidy.quad;
+        const graph = if (quad.graph) |*graph| " ".len + graph.len else 0;
+        return quad.subject.len + " ".len + quad.predicate.len + " ".len + quad.object.len + graph + " .".len;
+    }
+
+    /// Whether it is a line this can read again. Writing a statement the
+    /// one way can make it longer: a space is put where there was none.
+    pub fn fits(tidy: Tidy) bool {
+        return tidy.length() <= max_line;
+    }
+
     pub fn format(tidy: Tidy, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{f} {f} {f} ", .{ tidy.quad.subject, tidy.quad.predicate, tidy.quad.object });
         if (tidy.quad.graph) |graph| try writer.print("{f} ", .{graph});
@@ -246,5 +259,17 @@ test "an IRI is absolute: it begins with a scheme" {
             std.debug.print("line: {s}\n", .{text});
             return err;
         };
+    }
+}
+
+test "the length of a tidy statement is what is written of it" {
+    for ([_][]const u8{
+        "<x:s> <x:p> <x:o> .",
+        "<x:s><x:p>\"o\"@en<x:g>.",
+        "_:a <x:p> <<(<x:a> <x:p> <<(_:b <x:q> \"c\")>>)>> _:g .",
+    }) |text| {
+        const tidy: Tidy = .of((try read(text)).quad.?);
+        var buffer: [max_line]u8 = undefined;
+        try std.testing.expectEqual((try std.fmt.bufPrint(&buffer, "{f}", .{tidy})).len, tidy.length());
     }
 }
