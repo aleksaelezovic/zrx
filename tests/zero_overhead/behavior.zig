@@ -94,6 +94,32 @@ test "rescued" {
     }
 }
 
+test "exited, refused" {
+    const too_large: []const u32 = &.{ 5, 4096, 7 };
+    for (inputs ++ .{too_large}) |items| {
+        var with: struct { u64, cases.Exit } = .{ 0, .{} };
+        var without: struct { u64, cases.Exit } = .{ 0, .{} };
+        cases.exited(true, items, &with[0], &with[1]);
+        cases.exited(false, items, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+    }
+    // Room for the line, room for a part of it, and none.
+    for ([_]usize{ 64, 9, 0 }) |room| {
+        var with_bytes: [64]u8 = undefined;
+        var without_bytes: [64]u8 = undefined;
+        var with_writer: std.Io.Writer = .fixed(with_bytes[0..room]);
+        var without_writer: std.Io.Writer = .fixed(without_bytes[0..room]);
+        var with: cases.Exit = .{};
+        var without: cases.Exit = .{};
+        cases.refused(true, error.InvalidArguments, &with, &with_writer);
+        cases.refused(false, error.InvalidArguments, &without, &without_writer);
+        try std.testing.expectEqual(without, with);
+        try std.testing.expectEqual(2, with.code);
+        try std.testing.expectEqualStrings(without_writer.buffered(), with_writer.buffered());
+        if (room == 64) try std.testing.expectEqualStrings("fatal: InvalidArguments\n", with_writer.buffered());
+    }
+}
+
 test "combined" {
     const orders = [_]cases.Order{
         .{ .id = 1, .price = 100 }, .{ .id = 2, .price = 500 }, .{ .id = 3, .price = 99 },

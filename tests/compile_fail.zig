@@ -166,6 +166,18 @@ pub const cases = .{
     .{ "system_leaves", "system: this run can still fail with `error.Canceled`, `error.ConcurrencyUnavailable`, and `run` returns nothing; take it in the pipe (`recover`, `attempt`, `orElse`) or bind a `rescue(handler)` whose handler takes it" },
     .{ "rescue_twice", "zrx: two `rescue` bindings are given together, but the failure of a run goes to one place; keep one. Given to `run`, a rescue replaces the one a program provides" },
     .{ "rescue_missing", "rescue: the handler asks for dependency `*rescue_missing.Log`, which is not provided; provided: (nothing). Pass it to `run(.{ ... })` as a value, or give it to the rescue with `rescue(handler).provide(.{ ... })`." },
+    .{ "cli_fail_uncalled", "rescue: `fn (comptime ext.cli.Failure) type` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`" },
+    .{ "cli_fail_status_zero", "cli.fail: status 0 says the program succeeded, but this is what a failed run leaves; pass a status from 1 to 255, as in `cli.fail(.{ .status = 2 })`" },
+    .{ "cli_fail_prefix_empty", "cli.fail: an empty prefix would begin the line with `: `; name what failed, as in `.prefix = \"fatal\"`, or write nothing with `.prefix = null`" },
+    .{ "cli_fail_item", "cli.fail: is given one error, the failure of a run, but receives `u32` here; bind it with `rescue(cli.fail(.{ ... }))`, or end a pipe whose item is an error with `forEach(cli.fail(.{ ... }))`" },
+    .{ "cli_fail_fallback", "cli.fail: is given one error, the failure of a run, but receives `error{TooBig}`, `u32` here; bind it with `rescue(cli.fail(.{ ... }))`, or end a pipe whose item is an error with `forEach(cli.fail(.{ ... }))`" },
+    // What `fail` asks for is checked by the rescue it is bound with.
+    .{ "cli_fail_exit_value", "rescue: the handler asks for dependency `*ext.cli.Exit`, which is not provided; provided: `ext.cli.Exit`. Pass it to `run(.{ ... })` as a value, or give it to the rescue with `rescue(handler).provide(.{ ... })`." },
+    .{ "cli_fail_without_stderr", "rescue: the handler asks for dependency `io.Stderr`, which is not provided; provided: `*ext.cli.Exit`. Pass it to `run(.{ ... })` as a value, or give it to the rescue with `rescue(handler).provide(.{ ... })`." },
+    .{ "cli_fail_stderr_of_run", "rescue: the handler asks for `io.Stderr`, which a resource of the run provides. A rescue is called when the run is over and what it acquired has been released; give the rescue one of its own: `rescue(handler).provide(.{ ... })`" },
+    // `fail` declares its options as `cli.Failure`, so these two are Zig's own messages, at the call.
+    .{ "cli_fail_status_range", "type 'u8' cannot represent integer value '256'" },
+    .{ "cli_fail_option", "no field named 'silent' in struct 'ext.cli.Failure'" },
     .{ "binding_missing", "zrx: `resources.Resource((function 'openSession'),null)` needs dependency `binding_missing.Connection`, which is not provided; provided: `binding_missing.Limit`. Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
     .{ "writer_without_io", "zrx: `io.Standard(.stdout,64)` needs dependency `Io`, which is not provided; provided: (nothing). Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
     .{ "binding_cycle", "zrx: these bindings need each other, so none of them can be acquired first: `resources.Resource((function 'openSession'),null)` needs `binding_cycle.Connection`, `resources.Resource((function 'connect'),null)` needs `binding_cycle.Session`. Pass one of these as a value, or build it from something else." },

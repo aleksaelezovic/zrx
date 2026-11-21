@@ -415,6 +415,69 @@ export fn same_rescue(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64, 
     rescued(exported_with_zrx, ptr[0..len], rejected, out, failed);
 }
 
+// --- the exit status of a program (zrx.ext.cli) -----------------------------------------
+
+const cli = zrx.ext.cli;
+pub const Exit = cli.Exit;
+
+fn admitted(value: u32) error{ Zero, TooLarge }!u32 {
+    if (value == 0) return error.Zero;
+    if (value > 1000) return error.TooLarge;
+    return value;
+}
+
+/// A run that fails leaves a status: through `cli.fail` as the rescue of
+/// the run, and by hand where the loop fails.
+pub fn exited(comptime with_zrx: bool, items: []const u32, out: *u64, exit: *Exit) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(admitted), tap(accumulate), drain() });
+        program(fromSlice(items), total).run(.{
+            Result{ .out = out },
+            exit,
+            zrx.rescue(cli.fail(.{ .status = 2, .prefix = null })),
+        });
+    } else {
+        for (items) |value| {
+            if (value >= 1 and value <= 1000) {
+                out.* +%= value;
+            } else {
+                exit.code = 2;
+                return;
+            }
+        }
+    }
+}
+
+export fn same_cli_fail_silent(ptr: [*]const u32, len: usize, out: *u64, exit: *Exit) void {
+    exited(exported_with_zrx, ptr[0..len], out, exit);
+}
+
+/// The line that names the error, for one the caller hands over: a program
+/// of one item, as an app says what failed before there was a run. The
+/// error is a parameter so that its number is in neither variant: errors
+/// are numbered per compilation, and the two variants are two. Formatting
+/// is a call into `std.Io.Writer` in both, as in `printed`.
+///
+/// As the rescue of `exited`, `cli.fail(.{ .status = 2, .prefix = "fatal" })`
+/// was compared once with the function one writes in its place: the same
+/// 145 instructions, but for those numbers.
+pub fn refused(comptime with_zrx: bool, err: anyerror, exit: *Exit, writer: *std.Io.Writer) void {
+    if (with_zrx) {
+        program(zrx.fromValue(err), .{forEach(cli.fail(.{ .status = 2, .prefix = "fatal" }))}).run(.{
+            exit,
+            zrx.Stderr{ .writer = writer },
+        });
+    } else {
+        exit.code = 2;
+        writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+        writer.flush() catch {};
+    }
+}
+
+export fn same_cli_fail(code: u16, exit: *Exit, writer: *std.Io.Writer) void {
+    refused(exported_with_zrx, @errorFromInt(code), exit, writer);
+}
+
 // --- handler combinators ----------------------------------------------------------------
 
 pub const Order = extern struct { id: u32, price: u32 };

@@ -1637,6 +1637,90 @@ program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
 The [HTTP benchmark app](../examples/apps/http-bench/README.md) compares this
 with a server written against `std` alone and records what was measured.
 
+## Command-line programs
+
+`zrx.ext.cli` is what a command-line program writes around its run: the
+status `main` returns, and the handler that makes one of the
+[failure of the run](#the-failure-of-a-run). It is an extension: a type and
+a handler written against the public contract, compiled only when a program
+uses them.
+
+```zig
+const cli = zrx.ext.cli;
+
+const fatal = cli.fail(.{ .status = 2, .prefix = "fatal" });
+
+const app = program(lines(Input, max_line), records).provide(.{
+    rescue(fatal).provide(.{stderr(256)}),
+    fileWriter(Accepted, path, 4096, .{ .mode = .create_new }),
+});
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: cli.Exit = .{};
+    app.run(.{ init.io, &exit, fileReader(Input, input_path, max_line + 1) });
+    return exit.code;
+}
+```
+
+`cli.Exit` is `struct { code: u8 = 0 }`. A run returns nothing, so the
+status is an effect: `main` gives `run` a `*cli.Exit`, and whoever has
+something to say about the outcome asks for it. A handler of your own does
+that like any other:
+
+```zig
+/// A file with a line that was rejected: status 1.
+fn judge(exit: *cli.Exit, summary: Summary) void {
+    if (summary.rejected != 0) exit.code = 1;
+}
+```
+
+`cli.fail(options)` is the handler for the rescue. Given the failure, it
+sets the status and writes one line that names the error to `zrx.Stderr`,
+`fatal: PathAlreadyExists` above, and flushes it. The options are always
+given, `.{}` for the defaults:
+
+| Option | Default | |
+|---|---|---|
+| `.status` | `1` | The status left in the `*cli.Exit`, from 1 to 255. |
+| `.prefix` | `"error"` | What the line begins with. `null` writes nothing, and the handler then asks for no `zrx.Stderr`. |
+
+The defaults are what Zig does with an error returned from `main`:
+`error: OutOfMemory` and status 1.
+
+- The status is set first and replaces what a stage left. The line is best
+  effort: a write or a flush that fails is dropped, and the status stands.
+- The stderr is one the rescue is given for itself, as above: the run's own
+  is released by the time a rescue is called, and asking for that one is a
+  compile error. A test gives `run` a `zrx.Stderr{ .writer = &writer }`,
+  which replaces it.
+- The line holds the name of the error and nothing else. A failure that
+  should say more (which file, which line) is an item's: take it in the
+  pipe with an error path, where the item is at hand.
+- A cancellation is given to it like any failure and is written as
+  `Canceled`. Nothing here calls `io.recancel()`, and nothing ends the
+  process: `main` returns the status.
+
+`cli.fail` is a handler of one error, so it also ends a pipe whose item is
+one. That is how a program says the same of what failed before there was a
+run, such as a wrong number of arguments:
+
+```zig
+fn refuse(io: std.Io, exit: *cli.Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+}
+```
+
+Nothing of arguments is in the extension, because they are a source as they
+are: `fromSlice(args[1..])` for the slice `init.minimal.args.toSlice(arena)`
+returns, or `fromIterator(&iterator)` for `init.minimal.args.iterate()`.
+Which program to run for them is decided once, before any run, and is a
+`switch` in `main`. Parsing options and printing a usage text are not here.
+
+Bound as a rescue, `cli.fail` compiles to the store a loop by hand makes
+where it fails, and its line to the `print` and `flush` one writes there
+(`same_cli_fail_silent` and `same_cli_fail` among the
+[fixtures](#how-zero-overhead-is-checked)).
+
 ## Lifetimes
 
 A run goes through these steps:
