@@ -1115,10 +1115,37 @@ program(fileLines(path, 128), report)
 - Any value that reads its text with `pub fn text(*const T) []const u8` is
   taken as a `Line` is.
 
-A copy costs what it copies. A handler is given its item as a value, and a
-`Line(n)` is `n` bytes: the fixture `lean_pattern_line` shows one copy of
-the line for each handler it is given to, with a pattern as with a function
-of your own.
+A copy costs what it copies. An item goes from stage to stage as a value,
+and whether the optimizer takes a copy out depends on the pipe. There is no
+rule to give, only what was measured: the copies of a `Line(120)` in the
+code of these pipes over a slice of lines, compiled optimized for aarch64.
+
+| Pipe | Copies |
+|---|---|
+| `filter`, `map`, `forEach`, the handlers reading only the length | none |
+| The same with one handler that scans the bytes, a function or a pattern | the line, once |
+| The same with three handlers that read the bytes | the line once, and once more for an item the first filter lets through |
+| `batch(128)`, `flatten()`, then a handler reading only the length | the line once, into the buffer, and the buffer once for each batch that is emitted |
+| Items that are references, `*const Line(120)`, with a handler that scans | none |
+
+Another pipe may differ. No test holds these counts. Two fixtures are
+related examples, each with a `Line(32)`: `lean_pattern_line` is a pipe of
+the second kind, with its copy on both sides of the comparison, and
+`same_line_reference` one of the last kind. What a fixture holds is said
+under [How zero overhead is checked](#how-zero-overhead-is-checked).
+
+A pattern is put to text, not to a pointer. Where the items are references
+to lines, put the handler that yields the text before it:
+
+```zig
+const Row = zrx.Line(120);
+
+// The items are `*const Row`.
+filter(compose(.{ Row.text, service_name }))
+```
+
+A reference is good only while what it names is there, which is why the
+line sources push values: a value can cross a `queue`.
 
 ### Choices with names
 
@@ -1721,8 +1748,9 @@ of every exported function:
   block names are erased. The order of a phi's inputs is ignored, and `x > c`
   matches the identical `x >= c + 1`; a comparison does not match its negation;
 - `lean_*` functions may differ in loop shape, but the zrx variant must contain
-  no calls, no stack slots, no more loads or stores than the hand-written one,
-  and at most a quarter more instructions;
+  no calls, no more stack slots, loads or stores than the hand-written one,
+  and at most a quarter more instructions. Stack slots the hand-written
+  loop has too are allowed, as in `lean_pattern_line`;
 - a function that exists in only one variant fails, which is how a stage that
   was not inlined shows up.
 
@@ -1730,16 +1758,18 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
+Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
 whose path has stages of its own and the text patterns are `lean`, each with
 the reason next to it.
 
-The fixtures carry small items. A handler is given its item as a value, and
-for an item that holds its bytes, such as a `Line(n)`, that is a copy the
-optimizer does not take out. `lean_pattern_line` has that copy in the loop
-by hand as well, so that it compares the pattern; the loop one would write,
-over pointers, does not copy.
+The fixtures carry small items. An item goes from stage to stage as a
+value, and for one that holds its bytes, such as a `Line(n)`, the
+optimizer does not take every copy out: [Lines and values](#lines-and-values)
+has what was measured, pipe by pipe. `lean_pattern_line` is one of those
+pipes, and has its copy in the loop by hand as well, so that it compares
+the pattern. `same_line_reference` is the pipe over references to lines,
+which has none, as the loop one would write over pointers has none.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it

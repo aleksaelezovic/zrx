@@ -39,7 +39,7 @@
 //! to and including a boundary, on the task that pushed into it; the boundary's
 //! task, once `work` has returned, finishes the stages after it up to the next
 //! one. No task finishes another's stages. A program runs every such task and
-//! the source under one `tasks.Scope`, then flushes and tears down by itself.
+//! the source under one `tasks.Scope` within its resource bindings.
 //!
 //! Nobody is left waiting on a boundary. `retire` is called by the boundary's
 //! own task when `work` is over, however it ended (the input ran out, `down`

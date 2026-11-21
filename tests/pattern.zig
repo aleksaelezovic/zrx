@@ -772,6 +772,39 @@ test "the line a case is given is the one its values were taken from" {
     try std.testing.expectEqualStrings("south", seen.slice()[1].found.sensor.text());
 }
 
+test "a pattern is put to the text of a line an item points to, through the handler that yields it" {
+    var held: [rows.len]Row = undefined;
+    for (&held, rows) |*row, text| row.* = try Row.from(text);
+    var pointers: [rows.len]*const Row = undefined;
+    for (&pointers, &held) |*pointer, *row| pointer.* = row;
+
+    // A pattern that extracts nothing, as a filter: the item stays the reference it was.
+    const Kept = support.Recorder(*const Row);
+    var kept: Kept = .{};
+    const named = seq(.{ letters, ",", repeat(byte, .{}) });
+    try support.run(program(fromSlice(&pointers), .{
+        filter(compose(.{ Row.text, named })),
+        forEach(support.record(*const Row)),
+    }), .{&kept});
+    try std.testing.expectEqual(4, kept.slice().len);
+    try std.testing.expectEqual(&held[0], kept.slice()[0]);
+    try std.testing.expectEqualStrings("south,4", kept.slice()[3].text());
+
+    // One that extracts, as the predicate of a case: values, with the reference.
+    const Pairs = support.Recorder(zrx.Found(Reading, *const Row));
+    var seen: Pairs = .{};
+    try support.run(program(fromSlice(&pointers), .{
+        route(.{
+            when(compose(.{ Row.text, reading }), .{forEach(support.record(zrx.Found(Reading, *const Row)))}),
+            otherwise(.{zrx.drain()}),
+        }),
+    }), .{&seen});
+    try std.testing.expectEqual(3, seen.slice().len);
+    try std.testing.expectEqual(&held[1], seen.slice()[1].item);
+    try std.testing.expectEqualStrings("south", seen.slice()[1].found.sensor.text());
+    try std.testing.expectEqual(300, seen.slice()[1].found.temp_mc);
+}
+
 test "a line that came with something else is reached through its field" {
     const Sided = zrx.Tagged(u8, Row);
     const side = struct {
