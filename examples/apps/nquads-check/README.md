@@ -163,8 +163,9 @@ fn tripleTerm(comptime self: type) type {
   statement. It is put to a second pattern, the same statement with
   sixteen levels, and a line that one describes is reported as
   `nested deeper than 4`. Deeper than sixteen it is `not a statement`.
-- **It has a size.** A `Quad` with four levels is 3216 bytes, and a handler
-  is given its item as a value, so that is what is copied for each. The
+- **It has a size.** A `Quad` with four levels is 3216 bytes. An item goes
+  from stage to stage as a value, so where a handler reads its bytes that
+  is what is copied. The
   ReleaseFast binary is 434 KiB, the second pattern included.
 
 ## What this app needed from zrx

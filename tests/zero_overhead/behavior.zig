@@ -313,6 +313,23 @@ test "rowsRouted" {
     try std.testing.expectEqual(10, others);
 }
 
+test "referencesScanned" {
+    var rows: [5]cases.Row = undefined;
+    for (&rows, [_][]const u8{ "north", "South", "", "east", "we st" }) |*row, text| row.* = try cases.Row.from(text);
+    var pointers: [rows.len]*const cases.Row = undefined;
+    for (&pointers, &rows) |*pointer, *row| pointer.* = row;
+    for ([_][]const *const cases.Row{ &.{}, pointers[0..2], &pointers }) |some| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.referencesScanned(true, some, &with);
+        cases.referencesScanned(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    }
+    var sum: u64 = 0;
+    cases.referencesScanned(true, &pointers, &sum);
+    try std.testing.expectEqual(9, sum);
+}
+
 test "nested" {
     const values = [_]u32{ 1, 6, 7, 2, 100, 5, 6, 1000 };
     const groups = [_]cases.Group{

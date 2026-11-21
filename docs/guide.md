@@ -1115,10 +1115,15 @@ program(fileLines(path, 128), report)
 - Any value that reads its text with `pub fn text(*const T) []const u8` is
   taken as a `Line` is.
 
-A copy costs what it copies. A handler is given its item as a value, and a
-`Line(n)` is `n` bytes: the fixture `lean_pattern_line` shows one copy of
-the line for each handler it is given to, with a pattern as with a function
-of your own.
+A copy costs what it copies. An item goes from stage to stage as a value,
+and the optimizer takes those copies out, except where a handler reads the
+item's bytes at a place it knows only when it runs, as a pattern or any
+scan does. Then the bytes of a `Line(n)` are copied to the stack: once for
+a handler that scans, and no more than once for each such handler. The
+fixture `lean_pattern_line` shows it, with a pattern as with a function of
+your own. A pipe whose items are references to lines (`*const Line(n)`)
+has no such copy. A reference is good only while what it names is there,
+which is why the line sources push values: a value can cross a `queue`.
 
 ### Choices with names
 
@@ -1730,16 +1735,17 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-three are
+Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
 whose path has stages of its own and the text patterns are `lean`, each with
 the reason next to it.
 
-The fixtures carry small items. A handler is given its item as a value, and
-for an item that holds its bytes, such as a `Line(n)`, that is a copy the
-optimizer does not take out. `lean_pattern_line` has that copy in the loop
-by hand as well, so that it compares the pattern; the loop one would write,
-over pointers, does not copy.
+The fixtures carry small items. An item goes from stage to stage as a
+value, and for one that holds its bytes, such as a `Line(n)`, a handler
+that scans those bytes makes that a copy the optimizer does not take out.
+`lean_pattern_line` has that copy in the loop by hand as well, so that it
+compares the pattern. `same_line_reference` is the pipe over references to
+lines, which has none, as the loop one would write over pointers has none.
 
 What this does and does not show: pipelines of the operators covered there
 compile to the code of the loop. The comparison is of instruction shape: it

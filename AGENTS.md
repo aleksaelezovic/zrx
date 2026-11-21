@@ -514,15 +514,25 @@ to this file; edit `AGENTS.md`, not copies.
   not "the same program": wiring is not compared, `behavior.zig` covers
   results. The tool has tests of its own. Do not widen it to make a fixture pass.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
-- A handler is given its item as a value (`di.invoke` builds a tuple), and
-  for an item that holds its bytes the optimizer does not take the copy
-  out: one `memcpy` of a `Line(n)` for each handler it is given to. That
-  was found when the first fixture with such an item failed as `lean`
-  with a function handler exactly as with a pattern, so it is the
-  contract's cost and not the pattern's. `lean_pattern_line` has the copy
-  on both sides and says so; the guide says so. Do not hide it by other
-  means, and do not change how a handler is called to remove it without a
-  decision: every composite handler takes its arguments as that tuple.
+- An item goes from stage to stage as a value. For a small item, or one
+  whose handlers read only its fields, the optimizer takes every copy
+  out. For an item that holds its bytes, such as a `Line(n)`, it does not
+  once a handler reads those bytes at a place known only at run time (a
+  scan, a pattern): the bytes are then copied to the stack. Measured on a
+  `Line(120)`: no copy where the handlers read only the length, one with
+  one handler that scans, two with three. That was found when the first
+  fixture with such an item failed as `lean` with a function handler
+  exactly as with a pattern, so it is not the pattern's cost.
+  `lean_pattern_line` has the copy on both sides and says so; the guide
+  says so. It is not the call of the handler either. This file said so
+  at first, and "one copy for each handler": a prototype in which a
+  handler declared `*const Item` and its stage passed a reference had the
+  same copies, so do not add that as a second way to write a handler.
+  What has none is a pipe whose items are references from the source on
+  (`*const Row`), which needs nothing new: `same_line_reference` holds
+  it. The line sources push values so that a line can cross a `queue`. A
+  source of references would be good only up to the next boundary, and
+  comes by decision, with a rule for that.
 
 ## Diagnostics
 

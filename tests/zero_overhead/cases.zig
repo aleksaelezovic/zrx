@@ -1004,7 +1004,7 @@ pub fn rowsRouted(comptime with_zrx: bool, rows: []const Row, sum: *u64, sensor:
         run(program(fromSlice(rows), sorted), .{ Result{ .out = sum }, Latest{ .sensor = sensor }, Second{ .out = others } });
     } else {
         for (rows) |*each| {
-            // A handler is given its item as a value: see `lean_pattern_line`.
+            // An item reaches a stage as a value: see `lean_pattern_line`.
             const row = each.*;
             if (namedReadingOf(&row)) |found| {
                 sum.* +%= @as(u32, @bitCast(found.temp_mc));
@@ -1019,14 +1019,43 @@ pub fn rowsRouted(comptime with_zrx: bool, rows: []const Row, sum: *u64, sensor:
 /// `lean`, not `same`, for the reason given at `lean_pattern_filter`.
 ///
 /// The loop by hand copies each row before it reads it, which nobody would
-/// write. A handler is given its item as a value, and for an item that
-/// holds its bytes that is a copy the optimizer does not take out: one
-/// `memcpy` of the row for each, with a function of one's own as the
-/// predicate just as with a pattern. It is in both loops so that what is
-/// compared is the pattern. Without it the loop by hand has 107
-/// instructions and no copy.
+/// write. An item goes from stage to stage as a value, and for one that
+/// holds its bytes a handler that scans them makes that a copy the
+/// optimizer does not take out: one `memcpy` of the row here, with a
+/// function of one's own as the predicate just as with a pattern. It is in
+/// both loops so that what is compared is the pattern. Without it the loop
+/// by hand has 107 instructions and no copy. `same_line_reference` is the
+/// pipe that has none either.
 export fn lean_pattern_line(ptr: [*]const Row, len: usize, sum: *u64, sensor: *Sensor, others: *u64) void {
     rowsRouted(exported_with_zrx, ptr[0..len], sum, sensor, others);
+}
+
+fn allLower(row: *const Row) bool {
+    for (row.text()) |c| if (!std.ascii.isLower(c)) return false;
+    return row.len != 0;
+}
+fn lengthOfRow(row: *const Row) u64 {
+    return row.len;
+}
+
+/// The lengths of the rows that are all letters, summed, where the items
+/// are references to rows and not rows: a handler scans the bytes where
+/// they are, and nothing is copied.
+pub fn referencesScanned(comptime with_zrx: bool, rows: []const *const Row, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ filter(allLower), map(lengthOfRow), fold(@as(u64, 0), addWide), forEach(store) });
+        run(program(fromSlice(rows), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (rows) |row| {
+            if (allLower(row)) sum +%= row.len;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_line_reference(ptr: [*]const *const Row, len: usize, out: *u64) void {
+    referencesScanned(exported_with_zrx, ptr[0..len], out);
 }
 
 // --- each ---------------------------------------------------------------------------------------
