@@ -8,8 +8,9 @@ zig build
 ./zig-out/bin/nquads-check people.nq tidy.nq
 # stderr:
 #   line 5: not a statement
+#   line 9: nested deeper than 4
 # stdout:
-#   {"statements":4,"in_graphs":2,"rejected":1}
+#   {"statements":4,"in_graphs":2,"rejected":2}
 ```
 
 `tidy.nq` holds the statements of `people.nq` with one space between their
@@ -20,7 +21,7 @@ terms and nothing after the dot. Comments and empty lines are not copied.
 | | |
 |---|---|
 | Exit 0 | Every line was a statement, a comment or empty. |
-| Exit 1 | Some line was none of those, or too long once tidied; the others are still written. |
+| Exit 1 | Some line was none of those, nested too deep, or too long once tidied; the others are still written. |
 | Exit 2, before publication | The input could not be read to its end, the output could not be written, or the output file exists already: `fatal: <error>` on stderr. Nothing is published, and a file that was there is left as it was. |
 | Exit 2, after publication | The output was published, and then the summary could not be written to stdout: `fatal: WriteFailed`. The output stays. |
 
@@ -61,21 +62,28 @@ const scheme = seq(.{ alpha, repeat(oneOf(.{ alnum, set("+-.") }), .{}) });
 const iri_byte = except(oneOf(.{ between(0, ' '), set("<>\"{}|^`\\") }));
 const iri = seq(.{ "<", scheme, ":", repeat(oneOf(.{ iri_byte, uchar }), .{}), ">" });
 
-/// `subject predicate object graph? .`
-pub const statement = seq(.{
-    ws,
-    extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
-    ws,
-    extract(.predicate, as(Term, iri)),
-    ws,
-    extract(.object, as(Term, oneOf(.{ tripleTerm(max_nesting - 1), iri, blank_node, literal }))),
-    ws,
-    optional(seq(.{ extract(.graph, as(Term, oneOf(.{ iri, blank_node }))), ws })),
-    ".",
-    line_end,
-});
+/// `subject predicate object graph? .`, with triple terms `nesting` deep.
+fn statementOf(comptime nesting: usize) type {
+    return seq(.{
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{
+            .triple = recursive(tripleTerm, .{ .depth = nesting }),
+            .term = as(Term, plain),
+        })),
+        ws,
+        optional(seq(.{ extract(.graph, as(Term, oneOf(.{ iri, blank_node }))), ws })),
+        ".",
+        line_end,
+    });
+}
 
-/// `{ subject: Term, predicate: Term, object: Term, graph: ?Term }`
+pub const statement = statementOf(max_nesting);
+
+/// A subject, a predicate, an object that is a `term` or a `triple`, and maybe a `graph`.
 pub const Quad = pattern.Extracted(statement);
 ```
 
@@ -109,6 +117,7 @@ pub const check = program(lines(Input, max_line), .{
     route(.{
         when(isEmpty, .{drain()}),
         when(isStatement, statements),
+        when(isTooDeep, too_deep),
         otherwise(rejections),
     }),
 });
@@ -119,31 +128,44 @@ pub const check = program(lines(Input, max_line), .{
   pattern is put to the line of a numbered line. Its case is given the
   `Quad` with the numbered line it was taken from.
 - The handlers are a few lines each: `Numbered.next`, the two counters of
-  `Summary`, `Tidy.of` with the `format` that writes a quad, and `judge`,
+  `Summary`, `Tidy.of` with the `writeTriple` that writes a quad, and `judge`,
   which makes a rejected line exit status 1.
 
 ## Triple terms, and how deep
 
 RDF 1.2 lets the object of a statement be a triple term, `<<( s p o )>>`,
-whose own object may be another one. That rule contains itself, and a
-pattern cannot: it is a value that has to exist before it can be a part.
-A function can build one from a shallower one:
+whose own object may be another one. A
+[rule that holds itself](../../../docs/guide.md#a-rule-that-holds-itself)
+is a function of `self`, the rule one level further in:
 
 ```zig
-fn tripleTerm(comptime depth: usize) type {
-    const plain = oneOf(.{ iri, blank_node, literal });
-    const object = if (depth == 0) plain else oneOf(.{ tripleTerm(depth - 1), plain });
-    return seq(.{ "<<(", ws, oneOf(.{ iri, blank_node }), ws, iri, ws, object, ws, ")>>" });
+fn tripleTerm(comptime self: type) type {
+    return seq(.{
+        "<<(",
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{ .triple = self, .term = as(Term, plain) })),
+        ws,
+        ")>>",
+    });
 }
 ```
 
-So the depth is written (`max_nesting = 4`), not the text's to choose, and a
-term nested deeper is no statement. Each level is code of its own: the
-ReleaseFast binary is the same size at 1 and at 4 levels, and about 17 KiB
-larger at 16.
-
-A triple term is kept whole, as the text of the object. Its parts are not
-extracted: an `extract` at every level would be the same field many times.
+- **The depth is written** (`max_nesting = 4`), not the text's to choose.
+- **Every level is taken apart.** A statement and a triple term hold the
+  same: a subject, a predicate, and an object that is a union of a `term`
+  and a `triple`. `writeTriple` switches on it and calls itself for the
+  next level, which is how the output is tidy inside a triple term too.
+- **Too deep is said.** A line whose triple terms nest deeper is no
+  statement. It is put to a second pattern, the same statement with
+  sixteen levels, and a line that one describes is reported as
+  `nested deeper than 4`. Deeper than sixteen it is `not a statement`.
+- **It has a size.** A `Quad` with four levels is 3216 bytes, and a handler
+  is given its item as a value, so that is what is copied for each. The
+  ReleaseFast binary is 434 KiB, the second pattern included.
 
 ## What this app needed from zrx
 
@@ -153,8 +175,6 @@ Nothing is worked around. What it shows is missing:
   `fold` cannot count both. The counters are kept by `tap` through a
   `*Summary`, and `execute` runs a second program of one item, the summary,
   to print it.
-- **The parts of a nested term.** A pattern extracts a flat struct. A tree
-  of triple terms would need somewhere to put it.
 
 ## Checks
 

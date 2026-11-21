@@ -2,7 +2,7 @@
 //!
 //!     line -> numbered -.- nothing or a comment
 //!                       |- a statement      -> counted -> tidied -> the output file
-//!                       |    '- too long once tidied -> counted -> "line N: longer than 512 bytes once tidied"
+//!                       |- nested too deep  -> counted -> "line N: nested deeper than 4" on stderr
 //!                       '- anything else    -> counted -> "line N: not a statement" on stderr
 const std = @import("std");
 const zrx = @import("zrx");
@@ -105,6 +105,18 @@ const statements = pipe(.{route(.{
     otherwise(too_long),
 })});
 
+const isTooDeep = compose(.{
+    field(.line),
+    nquads.deeper_statement,
+});
+
+const too_deep = pipe(.{
+    map(field(.item)),
+    map(field(.number)),
+    tap(Summary.rejection),
+    print(Diagnostics, std.fmt.comptimePrint("line {{d}}: nested deeper than {d}\n", .{nquads.max_nesting})),
+});
+
 const rejections = pipe(.{
     map(field(.number)),
     tap(Summary.rejection),
@@ -117,6 +129,7 @@ pub const check = program(lines(Input, max_line), .{
     route(.{
         when(isEmpty, .{drain()}),
         when(isStatement, statements),
+        when(isTooDeep, too_deep),
         otherwise(rejections),
     }),
 });

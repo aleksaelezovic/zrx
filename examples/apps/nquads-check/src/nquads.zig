@@ -13,6 +13,7 @@ const repeat = pattern.repeat;
 const optional = pattern.optional;
 const extract = pattern.extract;
 const as = pattern.as;
+const recursive = pattern.recursive;
 const set = pattern.set;
 const between = pattern.between;
 const except = pattern.except;
@@ -23,7 +24,7 @@ const alnum = pattern.alnum;
 /// The longest line, not counting its newline, and the longest term.
 pub const max_line = 512;
 pub const max_term = 256;
-/// How deep a triple term may hold another.
+/// How many triple terms deep an object may be, the outermost counted.
 pub const max_nesting = 4;
 
 /// A term as it is written, held as a value.
@@ -70,13 +71,23 @@ const literal = seq(.{
 
 const ws = repeat(set(" \t"), .{});
 
-/// `<<( <s> <p> "o" )>>`, whose object may be another one, `depth` deep. A
-/// pattern cannot contain itself; a function can build one from a shallower
-/// one, and the depth is then written and not the text's to choose.
-fn tripleTerm(comptime depth: usize) type {
-    const plain = oneOf(.{ iri, blank_node, literal });
-    const object = if (depth == 0) plain else oneOf(.{ tripleTerm(depth - 1), plain });
-    return seq(.{ "<<(", ws, oneOf(.{ iri, blank_node }), ws, iri, ws, object, ws, ")>>" });
+/// A term that is not a triple term.
+const plain = oneOf(.{ iri, blank_node, literal });
+
+/// `<<( <s> <p> "o" )>>`, whose object may be another one: `self` is the
+/// triple term one level further in.
+fn tripleTerm(comptime self: type) type {
+    return seq(.{
+        "<<(",
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{ .triple = self, .term = as(Term, plain) })),
+        ws,
+        ")>>",
+    });
 }
 
 // --- a line ----------------------------------------------------------------------
@@ -87,23 +98,60 @@ const line_end = seq(.{ ws, optional(comment), optional("\r") });
 /// A line that holds no statement: nothing, or a comment.
 pub const empty = line_end;
 
-/// `subject predicate object graph? .`
-pub const statement = seq(.{
-    ws,
-    extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
-    ws,
-    extract(.predicate, as(Term, iri)),
-    ws,
-    extract(.object, as(Term, oneOf(.{ tripleTerm(max_nesting - 1), iri, blank_node, literal }))),
-    ws,
-    optional(seq(.{ extract(.graph, as(Term, oneOf(.{ iri, blank_node }))), ws })),
-    ".",
-    line_end,
-});
+/// `subject predicate object graph? .`, with triple terms `nesting` deep.
+fn statementOf(comptime nesting: usize) type {
+    return seq(.{
+        ws,
+        extract(.subject, as(Term, oneOf(.{ iri, blank_node }))),
+        ws,
+        extract(.predicate, as(Term, iri)),
+        ws,
+        extract(.object, oneOf(.{
+            .triple = recursive(tripleTerm, .{ .depth = nesting }),
+            .term = as(Term, plain),
+        })),
+        ws,
+        optional(seq(.{ extract(.graph, as(Term, oneOf(.{ iri, blank_node }))), ws })),
+        ".",
+        line_end,
+    });
+}
 
-/// What a statement holds, read off its pattern:
-/// `{ subject: Term, predicate: Term, object: Term, graph: ?Term }`.
+pub const statement = statementOf(max_nesting);
+
+/// A statement but for how deep its triple terms go, as far as this looks:
+/// what a line is told to be when it is that and not a statement.
+pub const deeper_statement = statementOf(4 * max_nesting);
+
+/// What a statement holds, read off its pattern: a subject, a predicate,
+/// an object that is a `term` or a `triple`, and maybe a `graph`. A triple
+/// term holds the same but the graph, level by level.
 pub const Quad = pattern.Extracted(statement);
+
+/// `subject predicate object`, where the object is a term or a triple term,
+/// which is the same again one level in. Given a pointer to it.
+fn writeTriple(writer: *std.Io.Writer, triple: anytype) std.Io.Writer.Error!void {
+    // Further in than the innermost triple term there is nothing.
+    if (@TypeOf(triple.*) == void) return;
+    try writer.print("{f} {f} ", .{ triple.subject, triple.predicate });
+    switch (triple.object) {
+        .term => |term| try writer.print("{f}", .{term}),
+        .triple => |*inner| {
+            try writer.writeAll("<<( ");
+            try writeTriple(writer, inner);
+            try writer.writeAll(" )>>");
+        },
+    }
+}
+
+/// How long `writeTriple` writes a triple.
+fn tripleLength(triple: anytype) usize {
+    if (@TypeOf(triple.*) == void) return 0;
+    return triple.subject.len + " ".len + triple.predicate.len + " ".len + switch (triple.object) {
+        .term => |*term| term.len,
+        .triple => |*inner| "<<( ".len + tripleLength(inner) + " )>>".len,
+    };
+}
 
 /// A statement written the one way: a space between its terms, nothing after its dot.
 pub const Tidy = struct {
@@ -115,9 +163,8 @@ pub const Tidy = struct {
 
     /// How many bytes `format` writes.
     pub fn length(tidy: *const Tidy) usize {
-        const quad = &tidy.quad;
-        const graph = if (quad.graph) |*graph| " ".len + graph.len else 0;
-        return quad.subject.len + " ".len + quad.predicate.len + " ".len + quad.object.len + graph + " .".len;
+        const graph = if (tidy.quad.graph) |*graph| " ".len + graph.len else 0;
+        return tripleLength(&tidy.quad) + graph + " .".len;
     }
 
     /// Whether it is a line this can read again. Writing a statement the
@@ -127,16 +174,16 @@ pub const Tidy = struct {
     }
 
     pub fn format(tidy: Tidy, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{f} {f} {f} ", .{ tidy.quad.subject, tidy.quad.predicate, tidy.quad.object });
-        if (tidy.quad.graph) |graph| try writer.print("{f} ", .{graph});
-        try writer.writeAll(".");
+        try writeTriple(writer, &tidy.quad);
+        if (tidy.quad.graph) |graph| try writer.print(" {f}", .{graph});
+        try writer.writeAll(" .");
     }
 };
 
 // --- tests -----------------------------------------------------------------------
 
 const Line = zrx.Line(max_line);
-const Seen = struct { quad: ?Quad = null, empty: bool = false };
+const Seen = struct { quad: ?Quad = null, empty: bool = false, too_deep: bool = false };
 
 fn keep(seen: *Seen, quad: Quad) void {
     seen.quad = quad;
@@ -144,6 +191,10 @@ fn keep(seen: *Seen, quad: Quad) void {
 
 fn noteEmpty(seen: *Seen, _: Line) void {
     seen.empty = true;
+}
+
+fn noteTooDeep(seen: *Seen, _: anytype) void {
+    seen.too_deep = true;
 }
 
 fn ignore(_: Line) void {}
@@ -154,6 +205,7 @@ fn read(text: []const u8) !Seen {
     zrx.program(zrx.fromValue(try Line.from(text)), .{zrx.route(.{
         zrx.when(empty, .{zrx.forEach(noteEmpty)}),
         zrx.when(statement, .{ zrx.map(zrx.field(.found)), zrx.forEach(keep) }),
+        zrx.when(deeper_statement, .{zrx.forEach(noteTooDeep)}),
         zrx.otherwise(.{zrx.forEach(ignore)}),
     })}).run(.{&seen});
     return seen;
@@ -172,7 +224,7 @@ test "a statement is three terms, or four with its graph" {
     const quad = (try read("<http://ex.org/s> <http://ex.org/p> \"chat\"@fr-BE <http://ex.org/g> . # a cat")).quad.?;
     try std.testing.expectEqualStrings("<http://ex.org/s>", quad.subject.text());
     try std.testing.expectEqualStrings("<http://ex.org/p>", quad.predicate.text());
-    try std.testing.expectEqualStrings("\"chat\"@fr-BE", quad.object.text());
+    try std.testing.expectEqualStrings("\"chat\"@fr-BE", quad.object.term.text());
     try std.testing.expectEqualStrings("<http://ex.org/g>", quad.graph.?.text());
     try std.testing.expectEqual(null, (try read("_:a <x:p> _:b .")).quad.?.graph);
 }
@@ -187,16 +239,32 @@ test "a statement is written the one way whatever stood between its terms" {
     try expectTidy("<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .", "<x:s> <x:p> \"caf\xc3\xa9 # no comment\" .");
 }
 
-test "a triple term is an object, and may hold another to a depth" {
-    try expectTidy("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .", "<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .");
-    try expectTidy("<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .", "<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .");
+test "a triple term is an object, taken apart level by level, and may hold another to a depth" {
+    const quad = (try read("<x:s> <x:says> <<( <x:a> <x:p> <<( _:b <x:q> \"c\"@en )>> )>> <x:g> .")).quad.?;
+    const outer = quad.object.triple;
+    try std.testing.expectEqualStrings("<x:a>", outer.subject.text());
+    try std.testing.expectEqualStrings("_:b", outer.object.triple.subject.text());
+    try std.testing.expectEqualStrings("\"c\"@en", outer.object.triple.object.term.text());
+    try std.testing.expectEqualStrings("<x:g>", quad.graph.?.text());
+
+    // Written the one way inside too.
+    try expectTidy("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .", "<x:s> <x:says> <<(<x:a>   <x:p>\t\"c\")>>.");
+    try expectTidy(
+        "<x:s> <x:says> <<( <x:a> <x:p> <<( _:b <x:q> <<( <x:c> <x:r> <<( <x:d> <x:t> <x:e> )>> )>> )>> )>> <x:g> .",
+        "<x:s> <x:says> <<(<x:a> <x:p> <<(_:b <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <x:e>)>>)>>)>>)>> <x:g> .",
+    );
+    // One deeper than `max_nesting` is no statement, and is told to be too deep.
+    const deeper = try read("<x:s> <x:says> <<(<x:a> <x:p> <<(<x:b> <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <<(<x:e> <x:u> <x:f>)>>)>>)>>)>>)>> .");
+    try std.testing.expect(deeper.quad == null and deeper.too_deep);
+    try std.testing.expect(!(try read("<x:s> <x:says> <<( <x:a> <x:p> \"c\" )>> .")).too_deep);
     for ([_][]const u8{
-        // One deeper than `max_nesting`.
-        "<x:s> <x:says> <<(<x:a> <x:p> <<(<x:b> <x:q> <<(<x:c> <x:r> <<(<x:d> <x:t> <<(<x:e> <x:u> <x:f>)>>)>>)>>)>>)>> .",
         "<x:s> <x:says> <<( <x:a> <x:p> \"c\" .",
         "<<( <x:a> <x:p> <x:c> )>> <x:says> <x:o> .",
         "<x:s> <x:says> <<( \"a\" <x:p> <x:c> )>> .",
-    }) |text| try std.testing.expectEqual(null, (try read(text)).quad);
+    }) |text| {
+        const seen = try read(text);
+        try std.testing.expect(seen.quad == null and !seen.too_deep);
+    }
 }
 
 test "what is not a statement" {

@@ -13,7 +13,8 @@ const document =
     "this is not a statement\n" ++
     "_:bob <http://xmlns.com/foaf/0.1/age> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n" ++
     "<http://ex.org/carol> <http://ex.org/says> <<( _:bob <http://xmlns.com/foaf/0.1/knows> <http://ex.org/alice> )>> <http://ex.org/people> .\n" ++
-    "<http://ex.org/alice> <http://xmlns.com/foaf/0.1/name> Alice .";
+    "<http://ex.org/alice> <http://xmlns.com/foaf/0.1/name> Alice .\n" ++
+    "<x:s> <x:p> <<(<x:a> <x:p> <<(<x:b> <x:p> <<(<x:c> <x:p> <<(<x:d> <x:p> <<(<x:e> <x:p> <x:f>)>>)>>)>>)>>)>> .";
 
 const tidied =
     "<http://ex.org/alice> <http://xmlns.com/foaf/0.1/name> \"Alice\" <http://ex.org/people> .\n" ++
@@ -21,7 +22,7 @@ const tidied =
     "_:bob <http://xmlns.com/foaf/0.1/age> \"42\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n" ++
     "<http://ex.org/carol> <http://ex.org/says> <<( _:bob <http://xmlns.com/foaf/0.1/knows> <http://ex.org/alice> )>> <http://ex.org/people> .\n";
 
-const rejections = "line 5: not a statement\nline 8: not a statement\n";
+const rejections = "line 5: not a statement\nline 8: not a statement\nline 9: nested deeper than 4\n";
 
 /// What a run of the production program wrote.
 const Log = struct {
@@ -52,7 +53,7 @@ test "statements are written the one way, and the other lines reported by number
     try check(document, &log);
     try std.testing.expectEqualStrings(tidied, log.output.buffered());
     try std.testing.expectEqualStrings(rejections, log.diagnostics.buffered());
-    try std.testing.expectEqual(app.Summary{ .statements = 4, .in_graphs = 2, .rejected = 2 }, log.summary);
+    try std.testing.expectEqual(app.Summary{ .statements = 4, .in_graphs = 2, .rejected = 3 }, log.summary);
 }
 
 /// An IRI of `len` bytes.
@@ -80,6 +81,38 @@ test "what is written can be read again: a statement longer than a line once tid
     var log: Log = .init(&buffers[0], &buffers[1]);
     try check(adjacent(211) ++ "\n" ++ adjacent(208) ++ "\n", &log);
     try std.testing.expectEqualStrings(apart(208) ++ "\n", log.output.buffered());
+    try std.testing.expectEqualStrings("line 1: longer than 512 bytes once tidied\n", log.diagnostics.buffered());
+    try std.testing.expectEqual(app.Summary{ .statements = 1, .rejected = 1 }, log.summary);
+
+    // The output is all statements that fit, written the one way already.
+    var again_buffers: [2][2048]u8 = undefined;
+    var again: Log = .init(&again_buffers[0], &again_buffers[1]);
+    try check(log.output.buffered(), &again);
+    try std.testing.expectEqualStrings(log.output.buffered(), again.output.buffered());
+    try std.testing.expectEqualStrings("", again.diagnostics.buffered());
+    try std.testing.expectEqual(app.Summary{ .statements = 1 }, again.summary);
+}
+
+/// A statement with a triple term written without spaces, and the same
+/// written the one way, which is two bytes longer.
+inline fn compact(comptime object_len: usize) []const u8 {
+    return iriOf(100) ++ " <x:p> <<(" ++ iriOf(200) ++ " <x:p> " ++ iriOf(object_len) ++ ")>> .";
+}
+inline fn spaced(comptime object_len: usize) []const u8 {
+    return iriOf(100) ++ " <x:p> <<( " ++ iriOf(200) ++ " <x:p> " ++ iriOf(object_len) ++ " )>> .";
+}
+
+test "what is written can be read again, with a triple term that is written longer" {
+    const max_line = app.nquads.max_line;
+    // 512 bytes as it stands, 514 written the one way.
+    try std.testing.expectEqual(max_line, compact(190).len);
+    // 510 bytes as it stands, 512 written the one way.
+    try std.testing.expectEqual(max_line, spaced(188).len);
+
+    var buffers: [2][2048]u8 = undefined;
+    var log: Log = .init(&buffers[0], &buffers[1]);
+    try check(compact(190) ++ "\n" ++ compact(188) ++ "\n", &log);
+    try std.testing.expectEqualStrings(spaced(188) ++ "\n", log.output.buffered());
     try std.testing.expectEqualStrings("line 1: longer than 512 bytes once tidied\n", log.diagnostics.buffered());
     try std.testing.expectEqual(app.Summary{ .statements = 1, .rejected = 1 }, log.summary);
 
@@ -180,7 +213,7 @@ test "the executable tidies a file, reports what is no statement and says what i
     defer first.deinit();
     try std.testing.expectEqual(1, first.exit);
     try std.testing.expectEqualStrings(rejections, first.stderr);
-    try std.testing.expectEqualStrings("{\"statements\":4,\"in_graphs\":2,\"rejected\":2}\n", first.stdout);
+    try std.testing.expectEqualStrings("{\"statements\":4,\"in_graphs\":2,\"rejected\":3}\n", first.stdout);
     try expectFile(temp.dir, "out.nq", tidied);
 
     // What it wrote is all statements, already written the one way.
