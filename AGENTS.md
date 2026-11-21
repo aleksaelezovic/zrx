@@ -375,7 +375,12 @@ to this file; edit `AGENTS.md`, not copies.
   return when `std` decodes them with checks, or by explicit decision
   with a decoder of zrx's own. Parsing stays `std.http.Server`'s. The first version is one
   worker per open connection with no timeouts and no graceful shutdown; the
-  guide's "Not here yet" lists what was left out on purpose. What it does is
+  guide's "Not here yet" lists what was left out on purpose. Path parameters
+  are not a feature of HTTP: `http.path` takes a string, or any predicate of
+  text, and answers what that answers, so a pattern that extracts makes the
+  case's item a `Found` of the values and the request. HTTP imports nothing
+  of the pattern extension and has no router of its own; do not give it
+  one. What it does is
   described in the guide's HTTP section and pinned in `tests/http.zig`: a
   behavior goes into that section together with its test. Performance is
   stated only in the benchmark app's README, with the measurement behind it.

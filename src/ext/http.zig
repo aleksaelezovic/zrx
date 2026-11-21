@@ -27,6 +27,7 @@ const std = @import("std");
 const Io = std.Io;
 const di = @import("../di.zig");
 const core = @import("../pipe.zig");
+const transform = @import("../ops/transform.zig");
 const Flow = core.Flow;
 const End = core.End;
 const Closed = core.Closed;
@@ -936,8 +937,28 @@ fn requestOf(comptime who: []const u8, args: anytype) Request {
     return args[0];
 }
 
-/// A predicate: the request's path is exactly `expected`.
-pub fn path(comptime expected: []const u8) type {
+/// A predicate on the request's path, the target before its `?`. Given a
+/// string, it holds when the path is exactly that. Given a predicate of
+/// text, such as a pattern of `zrx.ext.pattern`, the path is put to it and
+/// the answer is that predicate's: with one that finds a value, the case of
+/// a `route` is given what it found, with the request. Text found in a path
+/// points into the request's head, as the path itself does.
+pub fn path(comptime expected: anytype) type {
+    if (comptime di.isHandler(expected)) return PathPut(expected);
+    const Given = @TypeOf(expected);
+    const is_string = switch (@typeInfo(Given)) {
+        .pointer => |pointer| switch (pointer.size) {
+            .slice => pointer.child == u8,
+            .one => @typeInfo(pointer.child) == .array and @typeInfo(pointer.child).array.child == u8,
+            else => false,
+        },
+        else => false,
+    };
+    if (!is_string) @compileError(
+        "http.path: expected a string such as `\"/items\"`, or a predicate of text such as a pattern, got `" ++
+            (if (Given == type) @typeName(expected) else @typeName(Given)) ++ "`",
+    );
+    const exact: []const u8 = expected;
     return struct {
         pub const zrx_handler = {};
 
@@ -946,7 +967,33 @@ pub fn path(comptime expected: []const u8) type {
         }
 
         pub fn call(_: anytype, args: anytype) bool {
-            return std.mem.eql(u8, requestOf("http.path", args).path(), expected);
+            return std.mem.eql(u8, requestOf("http.path", args).path(), exact);
+        }
+    };
+}
+
+/// `path`, given a predicate of text: the request's path is put to it.
+fn PathPut(comptime predicate: anytype) type {
+    // Checks the predicate's shape where `http.path` is written, not where it is used.
+    _ = di.requires("http.path", predicate, 1);
+    return struct {
+        pub const zrx_handler = {};
+
+        pub fn requires(comptime _: usize) []const type {
+            return di.requires("http.path", predicate, 1);
+        }
+
+        pub fn call(env: anytype, args: anytype) Answer(@TypeOf(env)) {
+            return di.invoke(predicate, env, .{requestOf("http.path", args).path()});
+        }
+
+        /// What the predicate answers for a path: `bool`, or what it finds.
+        fn Answer(comptime Env: type) type {
+            @setEvalBranchQuota(di.quota);
+            di.check("http.path", predicate, Env, &.{[]const u8});
+            const R = di.Result("http.path", predicate, &.{[]const u8});
+            _ = transform.Finds("http.path", R);
+            return R;
         }
     };
 }

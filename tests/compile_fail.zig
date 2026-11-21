@@ -38,6 +38,8 @@ pub const cases = .{
     .{ "http_listen_pending", "http.listen: `pending` must be at least 1; it is how many accepted connections may wait for a worker" },
     .{ "http_listen_without_io", "` needs dependency `Io`, which is not provided; provided: (nothing). Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
     .{ "http_path_item", "http.path: tests an `http.Request`, got `u32`; use it in the pipe given to `http.serve(...)`, before the request is mapped to something else" },
+    .{ "http_path_not_test", "http.path: expected a string such as `\"/items\"`, or a predicate of text such as a pattern, got `comptime_int`" },
+    .{ "http_path_answer", "http.path: predicate must return `bool`, or an optional when it finds a value, got `usize`" },
     .{ "http_fail_outside", "http.fail: answers a request, so it belongs in the pipe given to `http.serve(...)`; no `http.Response` is provided here" },
     .{ "http_fail_item", "http.fail: answers a failure, got `ext.http.Request`; end the error path of a recover with it: `recover(anyerror, .{http.fail()})`" },
     .{ "pattern_not_pattern", "seq: expected a pattern or a string, got `comptime_int`" },

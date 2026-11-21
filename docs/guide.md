@@ -1146,6 +1146,7 @@ to `serve` carries the requests of one connection.
 | `http.json()` | Terminal, in `sub`. Answers 200 with the item written by `std.json`. |
 | `http.status(code)` | Terminal, in `sub`. Answers the final status `code` with an empty body; a 204 or 304 carries no length. |
 | `http.path("/x")`, `http.method(.GET)` | Predicates on a request: the exact path before `?`, and the method. Combine them with `all` and `any`. |
+| `http.path(predicate)` | The path before `?`, put to a predicate of text such as a [text pattern](#text-patterns). See [Paths with parameters](#paths-with-parameters). |
 | `http.fail()` | Terminal, in an error path in `sub`: answers a failed request with the status of its error. |
 | `http.Disconnected` | The errors a connection that broke fails with. `recover(http.Disconnected, .{drain()})` before `serve` drops such a connection. |
 
@@ -1184,6 +1185,48 @@ fn sum(request: http.Request) !i64 {
   first; call `body` at most once. Nothing else overwrites it while the
   push runs: an item that points into the head, such as the path, is still
   that when it is answered, and after.
+
+### Paths with parameters
+
+`http.path` takes a string, or a predicate of text that the path is put to.
+With a [text pattern](#text-patterns) that extracts, the case is given what
+the pattern found together with the request, as a `Found` (see
+[route](#route)): `.found` is what was extracted and `.item` the request.
+
+```zig
+const pattern = zrx.ext.pattern;
+
+/// `/items/42`
+const item_path = pattern.seq(.{ "/items/", pattern.extract(.id, pattern.int(u32)) });
+
+fn stored(item: anytype) !Receipt {
+    var buffer: [4096]u8 = undefined;
+    return store(item.found.id, try item.item.body(&buffer));
+}
+
+route(.{
+    when(all(.{ http.method(.GET), http.path(item_path) }), .{
+        map(compose(.{ field(.found), field(.id) })),
+        map(lookup),
+        http.json(),
+    }),
+    when(all(.{ http.method(.PUT), http.path(item_path) }), .{
+        map(stored),
+        http.json(),
+    }),
+    otherwise(.{http.status(.not_found)}),
+})
+```
+
+- The predicate that finds goes last in `all`: the method is tested first,
+  and the path is taken apart only for a request the case could take.
+- A path that the pattern does not describe is the next case's. That
+  includes a number that does not fit its type: `/items/4294967296` is not
+  an item here, and is answered 404 like any path nobody takes.
+- Text extracted from a path points into the head, as the path does. Read
+  it before the body: reading the body overwrites the head (see
+  [Requests](#requests)). A number is a value and stays.
+- Nothing is percent-decoded before the path is put to the predicate.
 
 ### Answers
 
@@ -1514,8 +1557,7 @@ HTTP is deliberately small for now. Not there: timeouts for idle or slow
 peers, graceful shutdown, more connections than workers (no queue of ready
 connections, no event loop), response headers of your own, streamed bodies,
 chunked request bodies (answered 411 until `std` decodes them with checks;
-see [Answers](#answers)), path parameters, configurable buffer sizes, TLS
-and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
+see [Answers](#answers)), configurable buffer sizes, TLS and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
 
 Present in the previous implementation and not ported: signals
 (`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of

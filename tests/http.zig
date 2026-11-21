@@ -30,6 +30,8 @@ const resource = zrx.resource;
 const all = zrx.all;
 const not = zrx.not;
 const constant = zrx.constant;
+const compose = zrx.compose;
+const field = zrx.field;
 
 // ---------------------------------------------------------------------------
 // The pipe under test
@@ -304,6 +306,106 @@ test "the expectation to continue is recognized in any casing" {
 
 test "a query pair without a value has an empty one, and nothing is decoded" {
     try expectAnswer(ok("text/plain", "7"), "GET /sum?flag&&a=7&b=&c=%37 HTTP/1.1\r\nHost: test\r\n\r\n");
+}
+
+// ---------------------------------------------------------------------------
+// A path that a predicate of text is put to
+// ---------------------------------------------------------------------------
+
+const pattern = zrx.ext.pattern;
+
+/// `/items/<id>`.
+const item_path = pattern.seq(.{ "/items/", pattern.extract(.id, pattern.int(u32)) });
+/// `/files/<name>`: the name is text, which points into the head.
+const file_path = pattern.seq(.{ "/files/", pattern.extract(.name, pattern.repeat(pattern.except(pattern.set("/")), .{ .min = 1 })) });
+
+/// The id from the path and the length of the body: both halves of what the case is given.
+fn stored(item: anytype) http.Request.BodyError!struct { u32, usize } {
+    var buffer: [32]u8 = undefined;
+    return .{ item.found.id, (try item.item.body(&buffer)).len };
+}
+
+/// Any predicate of text will do, not only a pattern.
+fn isShort(path_text: []const u8) bool {
+    return path_text.len <= 2;
+}
+
+const parameters = pipe(.{
+    recover(anyerror, .{http.fail()}),
+    route(.{
+        when(all(.{ http.method(.GET), http.path(item_path) }), .{
+            map(compose(.{ field(.found), field(.id) })),
+            http.text("item {d}"),
+        }),
+        when(all(.{ http.method(.PUT), http.path(item_path) }), .{
+            map(stored),
+            http.text("item {d} holds {d} bytes"),
+        }),
+        when(http.path(file_path), .{
+            map(compose(.{ field(.found), field(.name) })),
+            http.text("file {s}"),
+        }),
+        when(http.path(isShort), .{http.status(.no_content)}),
+        otherwise(.{http.status(.not_found)}),
+    }),
+});
+
+fn expectOfParameters(comptime answer: []const u8, comptime request: []const u8) !void {
+    var wire: Wire = undefined;
+    try converse(parameters, &.{.{ .buffer = request }}, &wire);
+    try std.testing.expectEqualStrings(answer, wire.text());
+}
+
+inline fn get(comptime target: []const u8) []const u8 {
+    return "GET " ++ target ++ " HTTP/1.1\r\nHost: test\r\n\r\n";
+}
+
+test "a case whose path a pattern describes is given what it extracted" {
+    try expectOfParameters(ok("text/plain", "item 42"), get("/items/42"));
+    try expectOfParameters(ok("text/plain", "item 7"), get("/items/007"));
+}
+
+test "the case is given the request with it, to read its body from" {
+    try expectOfParameters(
+        ok("text/plain", "item 7 holds 5 bytes"),
+        "PUT /items/7 HTTP/1.1\r\nHost: test\r\nContent-Length: 5\r\n\r\nhello",
+    );
+}
+
+test "the query is not part of the path a pattern is put to" {
+    try expectOfParameters(ok("text/plain", "item 42"), get("/items/42?verbose=1&id=9"));
+}
+
+test "a path the pattern does not describe is left to the next case" {
+    inline for (.{ "/items/", "/items/4x", "/items/42/", "/x/items/42", "/items", "/items/-1" }) |target| {
+        try expectOfParameters(empty("404 Not Found", .open), get(target));
+    }
+    // The method is tested first, and a path alone does not make the case.
+    try expectOfParameters(empty("404 Not Found", .open), "DELETE /items/7 HTTP/1.1\r\nHost: test\r\n\r\n");
+}
+
+test "a number in a path that does not fit its type is no match, not a failure" {
+    try expectOfParameters(ok("text/plain", "item 4294967295"), get("/items/4294967295"));
+    try expectOfParameters(empty("404 Not Found", .open), get("/items/4294967296"));
+}
+
+test "text extracted from a path is answered from the head" {
+    try expectOfParameters(ok("text/plain", "file report-2026.txt"), get("/files/report-2026.txt"));
+    try expectOfParameters(empty("404 Not Found", .open), get("/files/a/b"));
+}
+
+test "any predicate of text can be put to a path" {
+    try expectOfParameters("HTTP/1.1 204 No Content\r\n\r\n", get("/a"));
+    try expectOfParameters(empty("404 Not Found", .open), get("/abc"));
+}
+
+test "requests on one connection are each given what their own path holds" {
+    var wire: Wire = undefined;
+    try converse(parameters, &.{.{ .buffer = get("/items/1") ++ get("/files/x") ++ get("/items/22") }}, &wire);
+    try std.testing.expectEqualStrings(
+        ok("text/plain", "item 1") ++ ok("text/plain", "file x") ++ ok("text/plain", "item 22"),
+        wire.text(),
+    );
 }
 
 // ---------------------------------------------------------------------------

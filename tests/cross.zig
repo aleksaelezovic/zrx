@@ -119,6 +119,12 @@ export fn zrx_cross_clock(io: *const std.Io, first: u32, end: u32) bool {
     return true;
 }
 
+const item_path = zrx.ext.pattern.seq(.{ "/items/", zrx.ext.pattern.extract(.id, zrx.ext.pattern.int(u32)) });
+
+fn itemId(item: anytype) u32 {
+    return item.found.id;
+}
+
 fn requestMethod(request: zrx.ext.http.Request) zrx.ext.http.Method {
     return request.method();
 }
@@ -147,6 +153,7 @@ export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
         zrx.recover(anyerror, .{http.fail()}),
         zrx.route(.{
             zrx.when(http.path("/method"), .{ zrx.map(requestMethod), http.text("{t}") }),
+            zrx.when(http.path(item_path), .{ zrx.map(itemId), http.text("{d}") }),
             zrx.when(zrx.all(.{ http.path("/json"), http.method(.GET) }), .{ zrx.map(zrx.constant(@as(u32, 1))), http.json() }),
             zrx.otherwise(.{http.status(.not_found)}),
         }),
