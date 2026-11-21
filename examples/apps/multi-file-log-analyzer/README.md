@@ -158,6 +158,13 @@ looks at how the two logs interleave.
 
 ## What this app needed from zrx
 
+The pattern is stricter than the function it replaced, which converted
+numbers with `std.fmt.parseInt` and trimmed every trailing carriage return.
+A record is now invalid where it was accepted before if a number has a
+sign (`+1`, and `-0`, which was zero), if a number has an underscore in it
+(`1_000`), or if the line ends in more than one carriage return. One
+carriage return before the line feed is taken, as before.
+
 Nothing is worked around. Taking a line apart was the one handler here that
 was not a few lines; it is a text pattern now. One thing is left:
 

@@ -79,6 +79,12 @@ const north = feed.provide(.{
   not by a function: `reading_line` says what a line looks like, and
   `Reading` is the struct read off it. A line it does not describe, or a
   number that does not fit its type, is `error.InvalidReading`.
+- The pattern is stricter than the function it replaced, which converted
+  numbers with `std.fmt.parseInt` and trimmed every trailing carriage
+  return. A reading is now invalid where it was accepted before if a
+  number has a `+` or an underscore in it, if the timestamp is `-0`, or if
+  the line ends in more than one carriage return. A temperature may still
+  be negative, and one carriage return before the line feed is taken.
 - Two handlers are functions: `alert` (labels a reading with the `Sensor`
   dependency) and the reducer `Window.add`, which gets count, minimum, maximum, sum and the first and
   last timestamp from one fold over the window's readings.

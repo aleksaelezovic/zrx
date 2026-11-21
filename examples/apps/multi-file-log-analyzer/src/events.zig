@@ -170,7 +170,13 @@ test "a record that breaks the format is rejected" {
         "1\tinfo\tapi\t-2",
         "1\tinfo\tbad name\t2",
         "1\tinfo\t\t2",
+        // Stricter than the parser this replaced, which went through
+        // `std.fmt.parseInt` and trimmed every trailing carriage return.
         "+1\tinfo\tapi\t2",
+        "-0\tinfo\tapi\t2",
+        "1\tinfo\tapi\t-0",
+        "1_000\tinfo\tapi\t2",
+        "1\tinfo\tapi\t2\r\r",
     }) |text| {
         try std.testing.expectError(error.InvalidLogRecord, parse(.left, text));
     }
