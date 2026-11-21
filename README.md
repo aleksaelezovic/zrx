@@ -48,7 +48,9 @@ pub fn main(init: std.process.Init) u8 {
         fold(0, add),
         print(zrx.Stdout, "total: {d}\n"),
     });
-    program(fromSlice(&values), total).provide(.{stdout(64)}).run(.{
+    program(fromSlice(&values), total)
+        .provide(.{stdout(64)}) // a default; it could as well be given to `run`
+        .run(.{
         init.io,
         Scale{ .by = 2 },
         &exit,
