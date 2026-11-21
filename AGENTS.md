@@ -327,18 +327,58 @@ to this file; edit `AGENTS.md`, not copies.
   a pointer anywhere in it is taken to point into the text `from` was
   given (`holdsPointer`), so it is extracted from a `[]const u8` and
   refused from a `Line`. Review showed a `from` that kept its slice being
-  extracted from a `Line` as if it were a copy. That a part can match
-  without taking a byte (`nullable`) is not that it always matches: an
-  `as` over a part that may be empty can still refuse what was matched
-  (`refuses`), and `oneOf` and `optional` object to a part only where it
-  always matches. Review found a fallback refused behind
-  `as(Line(0), optional("x"))`, and that part refused by `optional`.
-  `repeat` still asks only whether a part can match nothing, since that
-  is what would never stop. Offsets into the line
+  extracted from a `Line` as if it were a copy. Offsets into the line
   and a borrowed text that lives as long as the push were considered:
   the first makes every handler put a span back to its line, the second
   dangles behind a `queue` and needs the operators to hand a predicate a
-  pointer. Not there, and
+  pointer. A rule that holds
+  itself is `recursive(rule, .{ .depth })`, where `rule` builds the pattern
+  from `self`. It is not recursion: the rule is built `depth` times at
+  compile time, each from the one further in, and the innermost `self` is
+  a node that never matches. So the matcher is straight code, the text
+  does not choose the depth of the stack (a prototype that called itself
+  matched 20,000 levels and overran the stack at 200,000), and every
+  compile-time check works on each level. A comptime function over the
+  depth could already write this, and the helper is there by the user's
+  decision all the same: the base case and the limit are the library's,
+  not each caller's, and it is what makes nested extraction possible.
+  What a level extracts is a struct of its own (`Recorded`), a typed node
+  as `int` is, so the names of one level clash with no other and the
+  whole has a size; that is why the depth is written. That a part can
+  match without taking a byte (`nullable`) is not that it always matches:
+  an `as` over a part that may be empty can still refuse what was matched
+  (`refuses`), and `oneOf` tells a choice the ones after it cannot be
+  reached only where it always matches. Review found a fallback refused
+  behind `as(Line(0), optional("x"))`. `optional` refuses only a part that
+  always matches, for the same reason: review found
+  `optional(as(Line(0), optional("x")))` refused. `repeat` still asks
+  only whether a part can match nothing, since that is what would never
+  stop. A level is told to
+  be dead by `never`, which `seq`, `oneOf`, `repeat`, `as` and `extract`
+  pass on: a rule that is dead at depth 1 has no way to end and does not
+  compile, and `seq` does not take a dead part for the mistake of a part
+  that can never match. Choices of a `oneOf` may be written with names,
+  `oneOf(.{ .inner = self, .word = as(Word, letters) })`, and extracted
+  they are a tagged union that says which one matched, each choice
+  holding what it keeps (its value, a struct of its extracts, or `void`).
+  Without names an extracted `oneOf` is the text that matched, as
+  before: names are what a union needs, and two unnamed choices of
+  different types have none to give. That is why the user's
+  `extract(.object, oneOf(.{ self, as(Term, plain) }))` is written with
+  names. A choice that is only text holds `void` and not that text: a
+  slice would make every literal choice a borrow on a `Line`. A named
+  choice with extracts inside is the one way to group the extracts of an
+  ordinary part into a struct; there is no node for that alone. A rule has
+  no fixture, because it is not `lean`: against the same rule written by
+  hand as a function built for each depth, a filter over a rule three
+  deep measured 80 instructions to 73, no call and no `alloca`, and two
+  more loads of a byte (a choice that fails on a byte and the next that
+  reads it again). Timed on 818 MB of nested text it took 0.45 s, the
+  hand-written rule 0.58 s and a hand-written depth counter 0.61 s, and
+  eight levels took what three did. Say those numbers and not "zero
+  overhead". The first measurement was 97 instructions: a string of one
+  byte went through `std.mem.startsWith`, which asks first whether the
+  two texts are the same memory, and it is now compared as a byte. Not there, and
   back only by decision: a format string read backwards (`"/items/{id}"`
   would be a string language of our own), going back, and finding the
   places a pattern matches inside a text. The

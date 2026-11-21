@@ -37,6 +37,7 @@ const upper = pattern.upper;
 const alpha = pattern.alpha;
 const alnum = pattern.alnum;
 const as = pattern.as;
+const recursive = pattern.recursive;
 const Extracted = pattern.Extracted;
 
 /// What `p` answers for `text`: a pattern is a handler without dependencies.
@@ -185,23 +186,275 @@ test "what two choices share can be written once, and describes the same texts" 
     try expectAll(once, false, &.{ "!", "a!!", "aB" });
 }
 
-/// Letters, and groups of them in parentheses, `depth` groups deep.
-fn group(comptime depth: usize) type {
-    const inside = if (depth == 0) lower else oneOf(.{ lower, group(depth - 1) });
-    return seq(.{ "(", repeat(inside, .{}), ")" });
+// --- choices with names -----------------------------------------------------------------
+
+const key_value = seq(.{ extract(.key, repeat(lower, .{ .min = 1 })), "=", extract(.value, int(u8)) });
+const token = extract(.token, oneOf(.{
+    .number = int(u32),
+    .pair = key_value,
+    .word = as(zrx.Line(8), repeat(lower, .{ .min = 1 })),
+    .dash = "-",
+}));
+
+test "choices with names are kept as a union that says which one matched" {
+    const Token = @FieldType(Extracted(token), "token");
+    try std.testing.expectEqual(u32, @FieldType(Token, "number"));
+    try std.testing.expectEqual(void, @FieldType(Token, "dash"));
+    try std.testing.expectEqual(42, ask(token, "42").?.token.number);
+    try std.testing.expectEqualStrings("abc", ask(token, "abc").?.token.word.text());
+    try std.testing.expectEqual({}, ask(token, "-").?.token.dash);
+    // A choice that extracts holds its own struct.
+    const found = ask(token, "ab=7").?.token;
+    try std.testing.expectEqualStrings("ab", found.pair.key);
+    try std.testing.expectEqual(7, found.pair.value);
+    switch (found) {
+        .pair => {},
+        .number, .word, .dash => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(null, ask(token, "A"));
+    try std.testing.expectEqual(null, ask(token, "42x"));
 }
 
-test "a rule that contains itself is a function that builds it to a depth" {
-    try expectAll(group(0), true, &.{ "()", "(abc)" });
-    try expectAll(group(0), false, &.{ "(a(b))", "(", "a" });
-    try expectAll(group(2), true, &.{ "()", "(a(b)c)", "(a(b(c))(d)e)", "((()))" });
-    try expectAll(group(2), false, &.{ "(a(b(c(d))))", "(a(b)", "(a))", "(((())))" });
-    // What is nested is extracted whole, and taken apart by a pattern again.
-    const outer = seq(.{ "(", extract(.head, repeat(lower, .{})), extract(.rest, optional(group(1))), ")" });
-    const found = ask(outer, "(ab(c(d)))").?;
-    try std.testing.expectEqualStrings("ab", found.head);
-    try std.testing.expectEqualStrings("(c(d))", found.rest);
-    try std.testing.expectEqualStrings("(d)", ask(outer, found.rest).?.rest);
+test "a choice with a name is taken for good like any other, and what it kept is not carried on" {
+    // `ab=7` is a pair although it begins as a word would; `ab=x` is no
+    // pair, and the word after it has nothing of the pair.
+    const loose = seq(.{ extract(.first, oneOf(.{ .pair = key_value, .word = as(zrx.Line(8), repeat(lower, .{ .min = 1 })) })), extract(.rest, repeat(byte, .{})) });
+    try std.testing.expectEqualStrings("ab", ask(loose, "ab=7!").?.first.pair.key);
+    const fell = ask(loose, "ab=x").?;
+    try std.testing.expectEqualStrings("ab", fell.first.word.text());
+    try std.testing.expectEqualStrings("=x", fell.rest);
+    // A number too large for the pair's `u8` does not make it a pair.
+    try std.testing.expectEqualStrings("=256", ask(loose, "ab=256").?.rest);
+}
+
+test "what a named choice extracts and its text has not is null in its struct" {
+    const flag = seq(.{ extract(.key, repeat(lower, .{ .min = 1 })), optional(seq(.{ "=", extract(.value, int(u8)) })) });
+    const item = extract(.item, oneOf(.{ .number = int(u32), .flag = flag }));
+    try std.testing.expectEqual(null, ask(item, "verbose").?.item.flag.value);
+    try std.testing.expectEqual(3, ask(item, "level=3").?.item.flag.value.?);
+    // Of two extracts in a choice, the one that was not reached.
+    const either = seq(.{ "<", oneOf(.{ extract(.digit, digit), extract(.letter, lower) }), ">" });
+    const tagged = extract(.item, oneOf(.{ .number = int(u32), .either = either }));
+    try std.testing.expectEqualStrings("7", ask(tagged, "<7>").?.item.either.digit.?);
+    try std.testing.expectEqual(null, ask(tagged, "<7>").?.item.either.letter);
+}
+
+test "choices with names that are not extracted only match, and one that may be absent is optional" {
+    const plain = seq(.{ "<", oneOf(.{ .number = int(u32), .dash = "-" }), ">" });
+    try expectAll(plain, true, &.{ "<1>", "<->" });
+    try expectAll(plain, false, &.{ "<>", "<a>" });
+    const maybe = seq(.{ "<", optional(token), ">" });
+    try std.testing.expectEqual(null, ask(maybe, "<>").?.token);
+    try std.testing.expectEqual(7, ask(maybe, "<7>").?.token.?.number);
+}
+
+/// `<a b>` or `<a <b c>>`, the second part a union of the two.
+fn choosing(comptime self: type) type {
+    return seq(.{
+        "<",
+        extract(.name, as(zrx.Line(8), repeat(lower, .{ .min = 1 }))),
+        " ",
+        extract(.object, oneOf(.{ .inner = self, .word = as(zrx.Line(8), repeat(lower, .{ .min = 1 })) })),
+        ">",
+    });
+}
+
+/// The word a term ends in, however deep. Given a pointer: the text of a
+/// value is read where the value is, not out of a copy of it.
+fn lastWord(level: anytype) []const u8 {
+    // Further in than the innermost level there is nothing, and no text gets there.
+    if (@TypeOf(level.*) == void) return "";
+    return switch (level.object) {
+        .word => |*word| word.text(),
+        .inner => |*inner| lastWord(inner),
+    };
+}
+
+test "a rule that holds itself as a named choice is a union at every level" {
+    const rule = recursive(choosing, .{ .depth = 3 });
+    const texts = [_][]const u8{ "<a <b <c d>>>", "not one", "<x y>" };
+    const Seen = support.Recorder(Extracted(rule));
+    var seen: Seen = .{};
+    try support.run(program(fromSlice(&texts), .{
+        map(toRow),
+        route(.{
+            when(rule, .{
+                zrx.queue(1),
+                map(field(.found)),
+                forEach(support.record(Extracted(rule))),
+            }),
+            otherwise(.{zrx.drain()}),
+        }),
+    }), .{ std.testing.io, &seen });
+    try std.testing.expectEqual(2, seen.slice().len);
+    const deep = seen.slice()[0];
+    try std.testing.expectEqualStrings("a", deep.name.text());
+    try std.testing.expectEqualStrings("b", deep.object.inner.name.text());
+    try std.testing.expectEqualStrings("d", deep.object.inner.object.inner.object.word.text());
+    // The innermost level's choice of the rule holds nothing, and is never the one.
+    try std.testing.expectEqual(void, @FieldType(@TypeOf(deep.object.inner.object.inner.object), "inner"));
+    try std.testing.expectEqualStrings("y", seen.slice()[1].object.word.text());
+    try std.testing.expectEqualStrings("d", lastWord(&deep));
+    try std.testing.expectEqualStrings("y", lastWord(&seen.slice()[1]));
+    try std.testing.expectEqual(null, ask(rule, "<a <b <c <d e>>>>"));
+}
+
+// --- a rule that holds itself ----------------------------------------------------------
+
+/// Letters, and groups of them in parentheses.
+fn group(comptime self: type) type {
+    return seq(.{ "(", repeat(oneOf(.{ lower, self }), .{}), ")" });
+}
+
+test "a rule that holds itself matches as deep as its depth, and no deeper" {
+    try expectAll(recursive(group, .{ .depth = 1 }), true, &.{ "()", "(abc)" });
+    try expectAll(recursive(group, .{ .depth = 1 }), false, &.{ "(a(b))", "(", "a", "" });
+    try expectAll(recursive(group, .{ .depth = 3 }), true, &.{ "()", "(a(b)c)", "(a(b(c))(d)e)", "((()))" });
+    try expectAll(recursive(group, .{ .depth = 3 }), false, &.{ "(a(b(c(d))))", "(a(b)", "(a))", "(((())))" });
+    // Eight levels unless a depth is written.
+    try expectAll(recursive(group, .{}), true, &.{"(((((((())))))))"});
+    try expectAll(recursive(group, .{}), false, &.{"((((((((()))))))))"});
+}
+
+/// Letters and then the rule again, or a `!`.
+fn shouted(comptime self: type) type {
+    return oneOf(.{ seq(.{ repeat(lower, .{ .min = 1 }), self }), "!" });
+}
+
+test "a rule may stand behind a part that takes all it can" {
+    // Where the rule is one level too deep it describes nothing, and that
+    // is not the mistake of a part that can never match.
+    try expectAll(recursive(shouted, .{ .depth = 2 }), true, &.{ "!", "abc!" });
+    try expectAll(recursive(shouted, .{ .depth = 2 }), false, &.{ "", "abc", "a!b!" });
+}
+
+/// `<a b <c d>>`: a name, and then a word or another one of these.
+fn term(comptime self: type) type {
+    return seq(.{
+        "<",
+        extract(.name, repeat(lower, .{ .min = 1 })),
+        " ",
+        oneOf(.{ extract(.inner, self), extract(.word, repeat(lower, .{ .min = 1 })) }),
+        ">",
+    });
+}
+
+const nested_term = recursive(term, .{ .depth = 3 });
+
+test "what a level of a rule extracts is a struct of its own, with the next level in it" {
+    const found = ask(nested_term, "<a <b <c d>>>").?;
+    try std.testing.expectEqualStrings("a", found.name);
+    try std.testing.expectEqual(null, found.word);
+    const second = found.inner.?;
+    try std.testing.expectEqualStrings("b", second.name);
+    const third = second.inner.?;
+    try std.testing.expectEqualStrings("c", third.name);
+    try std.testing.expectEqualStrings("d", third.word.?);
+    // The innermost level has nothing further in: a `?void` that is never there.
+    try std.testing.expectEqual(?void, @TypeOf(third.inner));
+    try std.testing.expectEqual(null, third.inner);
+
+    try std.testing.expectEqual(@TypeOf(found), Extracted(nested_term));
+    try std.testing.expectEqualStrings("z", ask(nested_term, "<a z>").?.word.?);
+    try std.testing.expectEqual(null, ask(nested_term, "<a z>").?.inner);
+    try std.testing.expectEqual(null, ask(nested_term, "<a <b <c <d e>>>>"));
+    try std.testing.expectEqual(null, ask(nested_term, "<a <b c>"));
+    // Alone, a rule describes the whole text like any pattern.
+    try std.testing.expectEqual(null, ask(nested_term, "<a z>!"));
+}
+
+/// How many levels a term has: each level is a type of its own, so what
+/// walks them is generic, and the innermost `self` is a `void`.
+fn levels(level: anytype) usize {
+    if (@TypeOf(level) == void) return 0;
+    return 1 + if (level.inner) |inner| levels(inner) else 0;
+}
+
+test "a handler walks the levels of a rule as far as they go" {
+    try std.testing.expectEqual(1, levels(ask(nested_term, "<a z>").?));
+    try std.testing.expectEqual(3, levels(ask(nested_term, "<a <b <c d>>>").?));
+}
+
+test "a rule is a part like any other: extracted it is its struct, and its names clash with none" {
+    const said = seq(.{ extract(.name, repeat(lower, .{ .min = 1 })), ": ", extract(.said, nested_term), optional(seq(.{ " ", extract(.again, nested_term) })) });
+    const found = ask(said, "x: <a <b c>> <d e>").?;
+    try std.testing.expectEqualStrings("x", found.name);
+    try std.testing.expectEqualStrings("a", found.said.name);
+    try std.testing.expectEqualStrings("c", found.said.inner.?.word.?);
+    try std.testing.expectEqualStrings("e", found.again.?.word.?);
+    try std.testing.expectEqual(null, ask(said, "x: <a b>").?.again);
+    // Not extracted, it is matched and nothing of it is kept.
+    const only = seq(.{ extract(.name, repeat(lower, .{ .min = 1 })), ": ", nested_term });
+    try std.testing.expectEqualStrings("x", ask(only, "x: <a <b c>>").?.name);
+    try std.testing.expectEqual(null, ask(only, "x: <a <b <c <d e>>>>"));
+    // And kept as a value of another kind, it is its text.
+    const whole = extract(.text, as(zrx.Line(16), nested_term));
+    try std.testing.expectEqualStrings("<a <b c>>", ask(whole, "<a <b c>>").?.text.text());
+}
+
+test "what a level extracted before the rule failed further in is taken back" {
+    // `<c` begins as a third level and is none: the choice goes on to the rest.
+    const loose = struct {
+        fn rule(comptime self: type) type {
+            return seq(.{ "<", extract(.name, repeat(lower, .{ .min = 1 })), " ", oneOf(.{ extract(.inner, self), extract(.rest, repeat(except(set(">")), .{ .min = 1 })) }), ">" });
+        }
+    };
+    const second = ask(recursive(loose.rule, .{ .depth = 3 }), "<a <b <c>>").?.inner.?;
+    try std.testing.expectEqualStrings("b", second.name);
+    try std.testing.expectEqual(null, second.inner);
+    try std.testing.expectEqualStrings("<c", second.rest.?);
+}
+
+/// `[a,[b,c]]`: a pair, each side a letter or a pair.
+fn pairOf(comptime self: type) type {
+    const side = struct {
+        fn of(comptime letter: @EnumLiteral(), comptime inner: @EnumLiteral()) type {
+            return oneOf(.{ extract(inner, self), extract(letter, lower) });
+        }
+    };
+    return seq(.{ "[", side.of(.left, .left_pair), ",", side.of(.right, .right_pair), "]" });
+}
+
+test "a rule may hold itself in more than one place" {
+    const tree = recursive(pairOf, .{ .depth = 3 });
+    const found = ask(tree, "[[a,b],[c,[d,e]]]").?;
+    try std.testing.expectEqualStrings("a", found.left_pair.?.left.?);
+    try std.testing.expectEqualStrings("c", found.right_pair.?.left.?);
+    try std.testing.expectEqualStrings("e", found.right_pair.?.right_pair.?.right.?);
+    try std.testing.expectEqual(null, ask(tree, "[[a,b],[c,[d,[e,f]]]]"));
+    // What it extracts has a size, which each level of two doubles.
+    try std.testing.expect(@sizeOf(Extracted(recursive(pairOf, .{ .depth = 4 }))) > 2 * @sizeOf(Extracted(tree)));
+}
+
+/// `<name word>` or `<name <...>>` out of a line: every part a value.
+fn valued(comptime self: type) type {
+    return seq(.{
+        "<",
+        extract(.name, as(Name, repeat(lower, .{ .min = 1 }))),
+        " ",
+        oneOf(.{ extract(.inner, self), extract(.word, as(Name, repeat(lower, .{ .min = 1 }))) }),
+        ">",
+    });
+}
+
+test "the levels of a rule put to a line are values, and cross a queue" {
+    const Terms = support.Recorder(Extracted(recursive(valued, .{ .depth = 3 })));
+    var seen: Terms = .{};
+    const texts = [_][]const u8{ "<a <b c>>", "not one", "<d e>" };
+    try support.run(program(fromSlice(&texts), .{
+        map(toRow),
+        route(.{
+            when(recursive(valued, .{ .depth = 3 }), .{
+                zrx.queue(1),
+                map(field(.found)),
+                forEach(support.record(Extracted(recursive(valued, .{ .depth = 3 })))),
+            }),
+            otherwise(.{zrx.drain()}),
+        }),
+    }), .{ std.testing.io, &seen });
+    try std.testing.expectEqual(2, seen.slice().len);
+    try std.testing.expectEqualStrings("c", seen.slice()[0].inner.?.word.?.text());
+    try std.testing.expectEqualStrings("e", seen.slice()[1].word.?.text());
 }
 
 // --- numbers -----------------------------------------------------------------------
@@ -420,6 +673,8 @@ test "a choice that can match nothing and can still refuse does not hide the nex
     const kept = oneOf(.{ extract(.none, refusing), extract(.one, "x") });
     try std.testing.expectEqualStrings("x", ask(kept, "x").?.one.?);
     try std.testing.expectEqual(null, ask(kept, "x").?.none);
+    const named = extract(.which, oneOf(.{ .none = refusing, .one = "x" }));
+    try std.testing.expectEqual({}, ask(named, "x").?.which.one);
     // And it may stand in a choice that is not last, of a choice. Where it
     // does match nothing it is taken for good: `y` is left over.
     try expectAll(oneOf(.{ oneOf(.{ refusing, "y" }), "x" }), true, &.{ "", "x" });

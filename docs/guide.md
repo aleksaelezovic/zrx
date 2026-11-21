@@ -1027,11 +1027,13 @@ depends on whether it extracts:
 | `byte`, `digit`, `lower`, `upper`, `alpha`, `alnum` | One byte: any, or of that ASCII class. |
 | `seq(.{ a, b })` | Each part, one after the other. |
 | `oneOf(.{ a, b })` | The first choice that matches. |
+| `oneOf(.{ .x = a, .y = b })` | The same, with [names](#choices-with-names): extracted, a tagged union that says which one matched. |
 | `repeat(p, .{ .min = 1, .max = 3 })` | `p` as often as it matches, between `min` (0 unless given) and `max` (no limit unless given) times. |
 | `optional(p)` | `p`, or nothing where it does not match. |
 | `int(T)` | A decimal number that fits the integer type `T`, with a `-` before it when `T` is signed. |
 | `as(T, p)` | `p`, kept as a `T` that `T.from(text)` makes: a `Line(32)`, or a type of your own. A text `from` fails for does not match. |
 | `extract(.name, p)` | `p`, with what it matched kept under `name`. |
+| `recursive(rule, .{ .depth = 4 })` | A [rule that holds itself](#a-rule-that-holds-itself), to a depth of 8 unless one is given. |
 | `Extracted(pattern)` | The type of what a pattern extracts. A handler that names its item writes it; `anytype` takes it too. |
 
 The struct is read off the pattern. A field is the matched text
@@ -1118,28 +1120,128 @@ A copy costs what it copies. A handler is given its item as a value, and a
 the line for each handler it is given to, with a pattern as with a function
 of your own.
 
-### A rule that contains itself
+### Choices with names
 
-A pattern is a value, and it has to exist before it can be a part of
-another. So no pattern contains itself, and there is no matcher that calls
-itself as deep as a text asks. A rule that nests is written as a function
-that builds a pattern from a shallower one, to a depth that is written:
+`extract(.name, oneOf(.{ a, b }))` keeps the text that matched, whichever
+choice it was. Give the choices names and what is kept says which one:
 
 ```zig
-/// `(a(b(c)))`: letters, and groups of them in parentheses.
-fn group(comptime depth: usize) type {
-    const inside = if (depth == 0) lower else oneOf(.{ lower, group(depth - 1) });
-    return seq(.{ "(", repeat(inside, .{}), ")" });
-}
+const Word = zrx.Line(16);
 
-const nested = group(7);
+const token = extract(.token, oneOf(.{
+    .number = int(u32),
+    .word = as(Word, repeat(lower, .{ .min = 1 })),
+    .dash = "-",
+}));
+
+// Extracted(token) is:
+//   struct { token: union(enum) { number: u32, word: Word, dash: void } }
+
+fn describe(found: pattern.Extracted(token)) u32 {
+    return switch (found.token) {
+        .number => |number| number,
+        .word => |*word| @intCast(word.len),
+        .dash => 0,
+    };
+}
 ```
 
-A text nested deeper does not match. Each level is code of its own, so the
-depth costs size, not speed. An `extract` cannot stand inside such a
-function: it would be the same field once for every level. Extract the
-whole nested part, and put a pattern to that text again to go one level in.
-The [N-Quads check](../examples/apps/nquads-check/README.md) nests the
+A choice holds what it keeps: its value where it is one (`int`, `as`), a
+struct of its own where it has `extract`s inside, and nothing (`void`)
+otherwise. A choice that is only text, such as `"-"`, holds nothing: wrap
+it in `as` to keep it. Matching is what it is without names: the first
+choice that matches is taken for good. Not extracted, choices with names
+only match.
+
+### A rule that holds itself
+
+A group in parentheses may hold another group; a triple term may hold
+another triple term. Such a rule is written as a function of `self`, the
+rule one level further in, and `recursive` makes the pattern of it:
+
+```zig
+const recursive = pattern.recursive;
+
+/// `(a(b(c)))`: letters, and groups of them in parentheses.
+fn group(comptime self: type) type {
+    return seq(.{
+        "(",
+        repeat(oneOf(.{ lower, self }), .{}),
+        ")",
+    });
+}
+
+const nested = recursive(group, .{ .depth = 4 });
+```
+
+A pattern is a value and cannot contain itself, and nothing here calls
+itself as deep as a text asks. `recursive` builds the rule `depth` times,
+each from the one further in, and the innermost `self` describes nothing.
+So the depth is written, 8 unless you say otherwise, and it is not the
+text's to choose: a text nested deeper does not match, and the rule does
+not call itself, so how deep a text nests does not decide how much stack
+is used.
+
+**What a level extracts is a struct of its own.** An `extract` in the rule
+is a field of its level, not of the pattern around it, so the same names
+at every level do not clash. `self` is a value like an `int`: as a choice
+with a name it is the level further in.
+
+```zig
+/// `<a b>`, or `<a <b c>>`: a name, then a word or another of these.
+fn term(comptime self: type) type {
+    return seq(.{
+        "<",
+        extract(.name, as(Word, repeat(lower, .{ .min = 1 }))),
+        " ",
+        extract(.object, oneOf(.{
+            .inner = self,
+            .word = as(Word, repeat(lower, .{ .min = 1 })),
+        })),
+        ">",
+    });
+}
+
+const nested_term = recursive(term, .{ .depth = 3 });
+
+// "<a <b c>>" is found as:
+//   .name = "a",
+//   .object = .{ .inner = .{ .name = "b", .object = .{ .word = "c" } } }
+```
+
+- A rule is a part like any other. `extract(.said, nested_term)` keeps its
+  outermost level under `said`; without an `extract` it is matched and
+  nothing of it is kept; `as(Line(64), nested_term)` keeps its text.
+- Put to a text alone, a rule that extracts answers the struct of its
+  outermost level, which is also `Extracted(nested_term)`.
+- The struct has a size, known when the program is compiled: nothing is
+  allocated. Each level holds the next, so the size grows with the depth,
+  and doubles with each level where a rule holds itself in two places.
+- Each level is a type of its own. A handler that walks them is generic,
+  and at the innermost level the choice of `self` holds a `void` and is
+  never the one that matched. Take a pointer, so that the text of a value
+  is read where the value is:
+
+  ```zig
+  /// The word a term ends in, however deep.
+  fn lastWord(level: anytype) []const u8 {
+      if (@TypeOf(level.*) == void) return "";
+      return switch (level.object) {
+          .word => |*word| word.text(),
+          .inner => |*inner| lastWord(inner),
+      };
+  }
+  ```
+- `self` can be extracted by itself too, `extract(.inner, self)`: inside a
+  `oneOf` without names that is an optional field of the level.
+- A rule needs a way to end. One that holds itself whatever it describes,
+  such as `seq(.{ "(", self, ")" })`, does not compile.
+- The depth is a bound set when the program is compiled: a deeper rule is
+  a larger program, each level being code of its own. What it costs in
+  time has been measured on one kind of text only, where eight levels took
+  what three did. That is a measurement, not a promise for every rule.
+
+The [N-Quads check](../examples/apps/nquads-check/README.md) reads the
 triple terms of RDF 1.2 this way.
 
 ### How a pattern matches

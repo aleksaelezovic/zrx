@@ -80,6 +80,12 @@ fn Pattern(comptime N: type) type {
         /// an `extract` in the pattern, what it extracted.
         pub fn call(_: anytype, args: anytype) Asked(N, di.types(@TypeOf(args))) {
             const text: []const u8 = if (comptime isText(@TypeOf(args[0]))) args[0] else args[0].text();
+            // A rule that extracts answers its struct, as each of its levels does.
+            if (comptime @hasDecl(N, "Record")) {
+                var value: N.Record = undefined;
+                const end = N.read(text, 0, &value) orelse return null;
+                return if (end == text.len) value else null;
+            }
             if (comptime N.kept.len != 0) {
                 var out: Struct(N) = undefined;
                 inline for (N.kept) |kept| {
@@ -99,16 +105,23 @@ fn Pattern(comptime N: type) type {
 }
 
 fn Answer(comptime N: type) type {
+    if (@hasDecl(N, "Record")) return ?N.Record;
     return if (N.kept.len == 0) bool else ?Struct(N);
+}
+
+/// Whether nothing is described by `N`: a rule where it holds itself one
+/// level too deep, and whatever cannot match without that.
+fn isNever(comptime N: type) bool {
+    return @hasDecl(N, "never") and N.never;
 }
 
 /// Whether `N` can match nothing and still say no: a `from` that fails
 /// for the text it was given, in a part that may be empty.
+const pattern_refuses = refuses;
+
 fn refuses(comptime N: type) bool {
     return @hasDecl(N, "refuses") and N.refuses;
 }
-
-const pattern_refuses = refuses;
 
 /// Whether `N` matches wherever it is put. That it can match without
 /// taking a byte is not enough: what it matched may still be refused.
@@ -170,10 +183,10 @@ fn Asked(comptime N: type, comptime Args: []const type) type {
             "; put the handler that yields the text before it, as in `compose(.{ http.Request.path, pattern })`",
     );
     // What a handler is given of a value is a copy, gone when it returns.
-    if (!isText(Args[0])) for (N.kept) |kept| {
+    if (!isText(Args[0])) for (if (@hasDecl(N, "Record")) N.inner else N.kept) |kept| {
         if (!kept.borrows) continue;
         const what = "` is a value that takes its text along; keep ";
-        // A value with a pointer in it.
+        // A value with a pointer in it, a level of a rule, a named choice.
         if (kept.Type != []const u8) @compileError(
             "pattern: what `extract(." ++ kept.name ++ ", ...)` keeps has a pointer or a text in it, which would point into the item, and a `" ++ @typeName(Args[0]) ++
                 what ++ "copies, as in `as(Line(32), ...)`",
@@ -235,6 +248,9 @@ fn Literal(comptime who: []const u8, comptime text: []const u8) type {
         pub const kept: []const Kept = &.{};
 
         pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            // One byte is compared as one, as by hand: `std.mem` would ask
+            // first whether the two texts are the same memory.
+            if (comptime text.len == 1) return if (at < input.len and input[at] == text[0]) at + 1 else null;
             return if (std.mem.startsWith(u8, input[at..], text)) at + text.len else null;
         }
     };
@@ -335,6 +351,8 @@ pub fn seq(comptime parts: anytype) type {
         @setEvalBranchQuota(di.quota);
         for (Ns[0 .. Ns.len - 1], Ns[1..], 2..) |Before, After, place| {
             const taken = Before.ends_before orelse continue;
+            // A rule at its deepest level never matches, which is no mistake.
+            if (isNever(After)) continue;
             if (!After.nullable and After.first & ~taken == 0) @compileError(std.fmt.comptimePrint(
                 "seq: part {d} can never match: the part before it takes every byte it could begin with and gives none back; end that part before such a byte, as `repeat(except(set(\"/\")), .{{}})` ends before a `/`",
                 .{place},
@@ -355,6 +373,10 @@ pub fn seq(comptime parts: anytype) type {
             break :blk all;
         };
         pub const ends_before: ?Bytes = Ns[Ns.len - 1].ends_before;
+        pub const never = blk: {
+            for (Ns) |N| if (isNever(N)) break :blk true;
+            break :blk false;
+        };
         pub const refuses = blk: {
             for (Ns) |N| if (pattern_refuses(N)) break :blk true;
             break :blk false;
@@ -380,10 +402,9 @@ pub fn seq(comptime parts: anytype) type {
     });
 }
 
-/// The first of `choices` that matches. It is taken for good: a later
-/// choice is not tried when what follows the `oneOf` then does not match.
-pub fn oneOf(comptime choices: anytype) type {
-    const Ns = nodesOf("oneOf", choices);
+/// What cannot be seen to match: a choice behind one that always matches,
+/// or behind one that is its beginning.
+fn checkChoices(comptime Ns: []const type) void {
     comptime {
         @setEvalBranchQuota(di.quota);
         for (Ns, 1..) |Early, place| {
@@ -401,6 +422,111 @@ pub fn oneOf(comptime choices: anytype) type {
             }
         }
     }
+}
+
+/// Whether choices were written with names: `.{ .a = x, .b = y }`.
+fn isNamed(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and !di.isTuple(T) and @typeInfo(T).@"struct".field_names.len != 0;
+}
+
+/// What a named choice holds when it is the one that matched: its value
+/// where it is one (`int`, `as`, a level of a rule), a struct of what it
+/// extracts where it extracts, and nothing otherwise.
+fn Held(comptime N: type) type {
+    if (@hasDecl(N, "Value")) return N.Value;
+    return if (N.kept.len != 0) Struct(N) else void;
+}
+
+/// `oneOf` with names: a value that says which choice matched.
+fn Named(comptime choices: anytype) type {
+    @setEvalBranchQuota(di.quota);
+    const names = @typeInfo(@TypeOf(choices)).@"struct".field_names;
+    const Ns: [names.len]type = blk: {
+        var all: [names.len]type = undefined;
+        for (names, &all) |name, *N| N.* = nodeOf("oneOf", @field(choices, name));
+        break :blk all;
+    };
+    checkChoices(&Ns);
+    const Choice = blk: {
+        var held: [names.len]type = undefined;
+        for (Ns, &held) |N, *H| H.* = Held(N);
+        const Tag = std.math.IntFittingRange(0, names.len - 1);
+        const Which = @Enum(Tag, .exhaustive, names, &std.simd.iota(Tag, names.len));
+        break :blk @Union(.auto, Which, names, &held, &@splat(.{}));
+    };
+    return struct {
+        pub const Value = Choice;
+        pub const borrows = blk: {
+            for (Ns) |N| {
+                if (@hasDecl(N, "Value")) {
+                    if (@hasDecl(N, "borrows") and N.borrows) break :blk true;
+                } else for (N.kept) |one| {
+                    if (one.borrows) break :blk true;
+                }
+            }
+            break :blk false;
+        };
+        /// Any choice may be the one that matches nothing, since one that
+        /// can refuse need not be last; it is certain where one is.
+        pub const nullable = blk: {
+            for (Ns) |N| if (N.nullable) break :blk true;
+            break :blk false;
+        };
+        pub const refuses = blk: {
+            for (Ns) |N| if (alwaysMatches(N)) break :blk false;
+            break :blk true;
+        };
+        pub const never = blk: {
+            for (Ns) |N| if (!isNever(N)) break :blk false;
+            break :blk true;
+        };
+        pub const first: Bytes = blk: {
+            var all: Bytes = 0;
+            for (Ns) |N| all |= N.first;
+            break :blk all;
+        };
+        pub const ends_before: ?Bytes = null;
+        pub const width: ?usize = null;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            inline for (Ns) |N| {
+                if (N.match(input, at, {})) |end| return end;
+            }
+            return null;
+        }
+
+        pub fn read(input: []const u8, at: usize, value: *Choice) ?usize {
+            inline for (names, Ns) |name, N| {
+                var held: Held(N) = undefined;
+                const matched = if (comptime @hasDecl(N, "Value"))
+                    N.read(input, at, &held)
+                else if (comptime N.kept.len != 0) end: {
+                    inline for (N.kept) |one| {
+                        if (one.maybe) @field(held, one.name) = null;
+                    }
+                    break :end N.match(input, at, &held);
+                } else N.match(input, at, {});
+                if (matched) |end| {
+                    value.* = @unionInit(Choice, name, held);
+                    return end;
+                }
+            }
+            return null;
+        }
+    };
+}
+
+/// The first of `choices` that matches. It is taken for good: a later
+/// choice is not tried when what follows the `oneOf` then does not match.
+///
+/// With names, `oneOf(.{ .number = int(u32), .word = as(Name, letters) })`,
+/// it says which one matched: extracted, it is a tagged union with a field
+/// for each choice, holding what that choice keeps.
+pub fn oneOf(comptime choices: anytype) type {
+    if (isNamed(@TypeOf(choices))) return Pattern(Named(choices));
+    const Ns = nodesOf("oneOf", choices);
+    checkChoices(Ns);
     // Choices that are each one byte are one set.
     const bytes: ?Bytes = blk: {
         var all: Bytes = 0;
@@ -426,6 +552,10 @@ pub fn oneOf(comptime choices: anytype) type {
         };
         pub const ends_before: ?Bytes = null;
         pub const width: ?usize = null;
+        pub const never = blk: {
+            for (Ns) |N| if (!isNever(N)) break :blk false;
+            break :blk true;
+        };
         pub const kept: []const Kept = blk: {
             var all: []const Kept = &.{};
             for (Ns) |N| all = all ++ maybe(N.kept);
@@ -462,6 +592,7 @@ pub fn repeat(comptime p: anytype, comptime count: Count) type {
     }
     return Pattern(struct {
         pub const nullable = count.min == 0;
+        pub const never = count.min != 0 and isNever(N);
         pub const first: Bytes = N.first;
         /// Without a maximum, it stops only at a byte its pattern is not.
         pub const ends_before: ?Bytes = if (count.max == null and @hasDecl(N, "members")) N.members else null;
@@ -592,6 +723,7 @@ pub fn as(comptime T: type, comptime p: anytype) type {
         pub const borrows = holdsPointer(T);
         pub const refuses = R != T or pattern_refuses(N);
         pub const nullable = N.nullable;
+        pub const never = isNever(N);
         pub const first: Bytes = N.first;
         pub const ends_before: ?Bytes = N.ends_before;
         pub const width: ?usize = N.width;
@@ -618,6 +750,7 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
     const typed = @hasDecl(N, "Value");
     return Pattern(struct {
         pub const nullable = N.nullable;
+        pub const never = isNever(N);
         pub const refuses = pattern_refuses(N);
         pub const first: Bytes = N.first;
         pub const ends_before: ?Bytes = N.ends_before;
@@ -626,7 +759,8 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
             .name = @tagName(name),
             .Type = if (typed) N.Value else []const u8,
             .maybe = false,
-            // A value borrows where it has a pointer in it.
+            // A value borrows where it has a pointer in it, and a level of
+            // a rule or a named choice where something it holds does.
             .borrows = if (typed) @hasDecl(N, "borrows") and N.borrows else true,
         }};
 
@@ -645,6 +779,108 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
     });
 }
 
+// ---------------------------------------------------------------------------
+// A rule that holds itself
+// ---------------------------------------------------------------------------
+
+/// How deep a rule may hold itself: `depth` levels of it, the outermost
+/// counted. A text nested deeper does not match.
+pub const Nesting = struct { depth: usize = 8 };
+
+/// The rule where it would be one level too deep: it describes nothing.
+const Never = struct {
+    pub const Value = void;
+    pub const never = true;
+    pub const nullable = false;
+    pub const first: Bytes = 0;
+    pub const ends_before: ?Bytes = null;
+    pub const width: ?usize = null;
+    pub const kept: []const Kept = &.{};
+
+    pub fn match(_: []const u8, _: usize, _: anytype) ?usize {
+        return null;
+    }
+
+    pub fn read(_: []const u8, _: usize, _: *void) ?usize {
+        return null;
+    }
+};
+
+/// A rule that holds itself: `rule` builds the pattern from `self`, which
+/// stands for the rule one level further in.
+///
+///     fn group(comptime self: type) type {
+///         return seq(.{ "(", repeat(oneOf(.{ lower, self }), .{}), ")" });
+///     }
+///     const nested = recursive(group, .{ .depth = 4 });
+///
+/// A pattern is a value and cannot contain itself, and nothing here calls
+/// itself as deep as a text asks: the rule is built `depth` times, each
+/// from the one further in, and the innermost `self` describes nothing. So
+/// the depth is written, with a default, and it is not the text's to choose.
+///
+/// What a level extracts is a struct of its own, and not fields of the
+/// pattern around it: `extract(.inner, self)` keeps the level further in as
+/// that struct, and `extract(.term, rule)` keeps the outermost. The same
+/// names at every level are then no clash, and the struct has a size: at
+/// the innermost level the field of `self` is a `?void` that is never there.
+/// `Extracted(rule)` is the struct of the outermost level, which the rule
+/// answers when a text is put to it alone.
+pub fn recursive(comptime rule: anytype, comptime nesting: Nesting) type {
+    @setEvalBranchQuota(di.quota);
+    const builds = switch (@typeInfo(@TypeOf(rule))) {
+        .@"fn" => |builds| builds.param_types.len == 1 and builds.param_types[0] == type and builds.return_type == type,
+        else => false,
+    };
+    if (!builds) @compileError(
+        "recursive: expected a function that builds the rule from itself, `fn (comptime self: type) type`, got `" ++ @typeName(@TypeOf(rule)) ++ "`",
+    );
+    if (nesting.depth == 0) @compileError("recursive: `.depth = 0` leaves no level of the rule; a depth is at least 1");
+    const Outermost = Level(rule, nesting.depth);
+    if (isNever(Outermost.Node)) @compileError(
+        "recursive: the rule has no way to end: whatever it describes holds it again; give it a part without `self`, as in `oneOf(.{ self, lower })`",
+    );
+    return Outermost;
+}
+
+/// `rule` with `depth` levels of itself in it.
+fn Level(comptime rule: anytype, comptime depth: usize) type {
+    const Body = nodeOf("recursive", rule(if (depth == 1) Pattern(Never) else Level(rule, depth - 1)));
+    return Pattern(if (Body.kept.len == 0) Body else Recorded(Body));
+}
+
+/// A level of a rule that extracts: what it extracts is kept as one value.
+fn Recorded(comptime Body: type) type {
+    return struct {
+        pub const Value = Struct(Body);
+        pub const Record = Value;
+        /// What the level extracts, for whoever asks whether it borrows.
+        pub const inner = Body.kept;
+        pub const borrows = blk: {
+            for (Body.kept) |one| if (one.borrows) break :blk true;
+            break :blk false;
+        };
+        pub const never = isNever(Body);
+        pub const refuses = pattern_refuses(Body);
+        pub const nullable = Body.nullable;
+        pub const first: Bytes = Body.first;
+        pub const ends_before: ?Bytes = Body.ends_before;
+        pub const width: ?usize = Body.width;
+        pub const kept: []const Kept = &.{};
+
+        pub fn match(input: []const u8, at: usize, _: anytype) ?usize {
+            return Body.match(input, at, {});
+        }
+
+        pub fn read(input: []const u8, at: usize, value: *Value) ?usize {
+            inline for (Body.kept) |one| {
+                if (one.maybe) @field(value, one.name) = null;
+            }
+            return Body.match(input, at, value);
+        }
+    };
+}
+
 /// What `p` extracts, as a struct: a field for each `extract` in it, of the
 /// type of what that keeps (`[]const u8`, or the `T` of an `int(T)` or an
 /// `as(T, ...)`), and
@@ -652,6 +888,7 @@ pub fn extract(comptime name: @EnumLiteral(), comptime p: anytype) type {
 /// that names its item writes `Extracted(p)`; `anytype` takes it too.
 pub fn Extracted(comptime p: anytype) type {
     const N = nodeOf("Extracted", p);
+    if (@hasDecl(N, "Record")) return N.Record;
     if (N.kept.len == 0) @compileError("Extracted: the pattern extracts nothing; wrap the parts to keep in `extract(.name, ...)`");
     return Struct(N);
 }
