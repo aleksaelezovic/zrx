@@ -307,13 +307,6 @@ test "the arguments of a process are a source as they are" {
 // The standard streams
 // ---------------------------------------------------------------------------
 
-test "the roles of the streams are the ones the core names" {
-    // Until `zrx.ext.process.Stdout` and `zrx.ext.process.Stderr` leave the core there are two
-    // names, and one type behind them.
-    try std.testing.expect(process.Stdout == zrx.ext.process.Stdout);
-    try std.testing.expect(process.Stderr == zrx.ext.process.Stderr);
-}
-
 /// An `Io` whose standard streams are memory: what is read from standard
 /// input is served from `input`, a few bytes at a time, and what is written
 /// to standard output and standard error is kept. Everything else is the
