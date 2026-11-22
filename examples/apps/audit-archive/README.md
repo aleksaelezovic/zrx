@@ -38,16 +38,17 @@ pub const archiving = program(lines(Input, records.max_line), archive);
 archiving.run(.{
     io,
     exit,
-    rescue(fatal).provide(.{stderr(256)}),
+    rescue(fatal).provide(.{stderr(Stderr, 256)}),
     fileReader(Input, input, records.max_line + 1),
     fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
 });
 ```
 
-- `decode` parses a line with `std.json` into the `Record` that is kept. It
-  owns its text (`zrx.Line(96)`), so it can cross the queue. `require` fails
-  the run on a resource identifier that `isSafe` refuses. Those two are the
-  functions of the app, in [`src/records.zig`](src/records.zig).
+- `decode` is `json.decode` into what a line must hold, and then the part of
+  it that is kept, a `Record`. It owns its text (`zrx.Line(96)`), so it can
+  cross the queue. `require` fails the run on a resource identifier that
+  `isSafe` refuses. That is the domain of the app, in
+  [`src/records.zig`](src/records.zig).
 - `batch(32)` then `queue(4)` is the boundary: reading and checking run on one
   task, writing on another. When the archive is slow the queue fills and the
   reader waits, having handed over `(4 + 2) * 32` records: the queued
@@ -59,8 +60,9 @@ archiving.run(.{
   exists is not replaced.
 - The program is one constant. `run` gives it the two files as bindings; a
   test gives it a reader and a writer of its own in their place.
-- A run returns nothing. What fails it goes to `rescue(fatal)`, which
-  writes the `fatal:` line and stores the exit status `main` returns. It
+- A run returns nothing. What fails it goes to `rescue(fatal)`, a
+  `process.fail`, which writes the `fatal:` line and stores the exit status
+  `main` returns. It
   is called once the run is over and both files are closed, with a stderr
   of its own.
 - `main.zig` checks the argument count and returns the status. A wrong
@@ -96,10 +98,47 @@ these.
 archive published. The name is the Zig error: `InvalidArguments` (the
 arguments are not exactly `INPUT OUTPUT`), `FileNotFound`,
 `PathAlreadyExists`, `ReadFailed`, `WriteFailed`, `UnsafeResource`,
-`StreamTooLong` (a line over 1024 bytes or a resource over 96), or what
-`std.json` reports (`SyntaxError`, `UnknownField`, `DuplicateField`,
-`MissingField`, `InvalidEnumTag`, `Overflow`, `UnexpectedToken`). A
+`StreamTooLong` (a line over 1024 bytes), or what `std.json` reports
+(`SyntaxError`, `UnknownField`, `DuplicateField`, `MissingField`,
+`InvalidEnumTag`, `Overflow`, `UnexpectedToken`, and `LengthMismatch` for
+a resource over 96 bytes). A
 diagnostic never contains record content, and does not say which line failed.
+
+## Checks
+
+```sh
+zig build
+zig build test
+zig build test -Doptimize=ReleaseFast
+zig build check
+```
+
+`test` runs the record unit tests, the program on a reader and a writer in
+memory, the executable on temporary files, and the production pipe against a
+writer that stalls. That last test waits for the event that the source is
+suspended in a push, checks how many records it had handed over and that
+nothing was written, releases the writer and compares the whole archive.
+
+## What it leaves out
+
+- The CLI is `INPUT OUTPUT`: no `--help`, no stdin, and a wrong argument
+  count prints `fatal: InvalidArguments` without a usage line.
+- No stricter JSON than `std.json` (see [Format](#format)), and no check
+  that `actor` is not empty.
+- No benchmark and no plain-Zig baseline to compare against.
+
+## What this app needed from zrx
+
+Nothing is worked around. An earlier version had one workaround, and it is
+gone: JSON could be written but not read, so `decode` called `std.json`
+itself with a scratch buffer of its own, into a struct of slices that could
+not leave the handler. `decode` is now `json.decode` into `Entry`, a value
+whose text is `Line(n)` fields, and then `allowed`, which keeps the part
+that is archived: two handlers composed, where there was one that did both.
+
+One thing changed with it. A resource over 96 bytes is found by `std.json`
+while it fills the field, so it is reported as `LengthMismatch` and no
+longer as `StreamTooLong`.
 
 ## Checks
 

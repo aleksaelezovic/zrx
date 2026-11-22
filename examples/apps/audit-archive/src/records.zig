@@ -1,20 +1,24 @@
 //! An audit export line, and the part of it that is archived.
 const std = @import("std");
 const zrx = @import("zrx");
+const json = zrx.ext.json;
 
 pub const max_line = 1024;
 pub const Line = zrx.Line(max_line);
 pub const Resource = zrx.Line(96);
 pub const Action = enum { read, create, update, delete };
 
-/// What a line must hold. Its text borrows from the line being decoded.
+/// Text of a field that is read and not kept: a line bounds how long it is.
+const Private = zrx.Line(max_line);
+
+/// What a line must hold. What is decoded is a value, so its text is copied.
 const Entry = struct {
     id: u64,
     ts_ms: u64,
     action: Action,
-    resource: []const u8,
-    actor: []const u8,
-    detail: ?[]const u8 = null,
+    resource: Resource,
+    actor: Private,
+    detail: ?Private = null,
 };
 
 /// The allowlist: only these fields are queued and archived. It owns its text.
@@ -27,22 +31,25 @@ pub const Record = struct {
 
 const safe_bytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.";
 
-/// Text with an escape in it is unescaped into the scratch buffer; a line
-/// bounds how much there can be.
-pub fn decode(line: Line) !Record {
-    var scratch: [2 * max_line]u8 = undefined;
-    var fixed: std.heap.FixedBufferAllocator = .init(&scratch);
-    const entry = try std.json.parseFromSliceLeaky(Entry, fixed.allocator(), line.text(), .{});
-    return .{ .id = entry.id, .ts_ms = entry.ts_ms, .action = entry.action, .resource = try .from(entry.resource) };
+fn allowed(entry: Entry) Record {
+    return .{ .id = entry.id, .ts_ms = entry.ts_ms, .action = entry.action, .resource = entry.resource };
 }
+
+/// A line as the record that is archived of it. Text with an escape in it
+/// is unescaped into the scratch memory; a line bounds how much there can be.
+pub const decode = zrx.compose(.{
+    json.decode(Entry, .{ .scratch = 2 * max_line }),
+    allowed,
+});
 
 /// A resource identifier is disclosed, so it may hold nothing surprising.
 pub fn isSafe(resource: Resource) bool {
     return resource.len != 0 and std.mem.findNone(u8, resource.text(), safe_bytes) == null;
 }
 
+/// `decode` as a pipe calls it: a handler is given its item in a tuple.
 fn decoded(text: []const u8) !Record {
-    return decode(try .from(text));
+    return decode.call(.{}, .{try Line.from(text)});
 }
 
 test "only the allowlisted fields are kept, with their text unescaped" {
@@ -90,6 +97,8 @@ test "a resource is 1 to 96 safe bytes" {
     try std.testing.expect(isSafe(try .from("node-7.eu_west")));
     try std.testing.expect(isSafe(try .from(&longest)));
     try std.testing.expectError(error.StreamTooLong, Resource.from(&too_long));
+    // Decoded, it is `std.json` that says the text is longer than its field.
+    try std.testing.expectError(error.LengthMismatch, decoded("{\"id\":1,\"ts_ms\":2,\"action\":\"read\",\"resource\":\"" ++ too_long ++ "\",\"actor\":\"a\"}"));
     inline for (.{ "", "a b", "x\ny", "caf\xc3\xa9", "a/b" }) |unsafe| {
         try std.testing.expect(!isSafe(try .from(unsafe)));
     }

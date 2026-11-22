@@ -17,9 +17,11 @@ const field = zrx.field;
 const require = zrx.require;
 const lines = zrx.lines;
 const fromValue = zrx.fromValue;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
-const stderr = zrx.stderr;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
+const process = zrx.ext.process;
+const stderr = process.stderr;
+const Stderr = process.Stderr;
 const rescue = zrx.rescue;
 const forEach = zrx.forEach;
 const json = zrx.ext.json;
@@ -54,14 +56,10 @@ pub const archive = pipe(.{
 pub const archiving = program(lines(Input, records.max_line), archive);
 
 /// How the app ended, for `main` to return.
-pub const Exit = struct { code: u8 = 0 };
+pub const Exit = process.Exit;
 
 /// Whatever ends a run: one best-effort line on stderr, exit status 2.
-fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 2;
-    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
-    diagnostics.writer.flush() catch {};
-}
+const fatal = process.fail(.{ .status = 2, .prefix = "fatal" });
 
 /// Archives the export at `input` as the new file `output`, which gets its
 /// name only once every record has been written. A run returns nothing:
@@ -70,7 +68,7 @@ pub fn run(io: std.Io, input: []const u8, output: []const u8, exit: *Exit) void 
     archiving.run(.{
         io,
         exit,
-        rescue(fatal).provide(.{stderr(256)}),
+        rescue(fatal).provide(.{stderr(Stderr, 256)}),
         fileReader(Input, input, records.max_line + 1),
         fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
     });
@@ -79,7 +77,7 @@ pub fn run(io: std.Io, input: []const u8, output: []const u8, exit: *Exit) void 
 /// The same line and status for what fails before there is a run, such as
 /// a wrong argument count: a program of one item, the failure.
 pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
-    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(Stderr, 256) });
 }
 
 test {
