@@ -12,6 +12,9 @@ pub const Action = enum { read, create, update, delete };
 const Private = zrx.Line(max_line);
 
 /// What a line must hold. What is decoded is a value, so its text is copied.
+/// `std.json` checks a field where it reads it and looks for missing ones
+/// once the object is closed, so of two faults the one in a value wins: an
+/// oversized `resource` without an `actor` is `LengthMismatch`.
 const Entry = struct {
     id: u64,
     ts_ms: u64,
@@ -102,6 +105,14 @@ test "a resource is 1 to 96 safe bytes" {
     inline for (.{ "", "a b", "x\ny", "caf\xc3\xa9", "a/b" }) |unsafe| {
         try std.testing.expect(!isSafe(try .from(unsafe)));
     }
+}
+
+test "a fault in a value is reported before a missing field" {
+    const too_long: [97]u8 = @splat('r');
+    try std.testing.expectError(error.LengthMismatch, decoded("{\"id\":1,\"ts_ms\":2,\"action\":\"read\",\"resource\":\"" ++ too_long ++ "\"}"));
+    try std.testing.expectError(error.InvalidEnumTag, decoded(
+        \\{"id":1,"ts_ms":2,"action":"purge","resource":"x"}
+    ));
 }
 
 test "the longest line of escaped text fits the scratch buffer" {

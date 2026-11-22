@@ -139,7 +139,11 @@ that is archived: two handlers composed, where there was one that did both.
 
 One thing changed with it. A resource over 96 bytes is found by `std.json`
 while it fills the field, so it is reported as `LengthMismatch` and no
-longer as `StreamTooLong`.
+longer as `StreamTooLong`. It is also found before a missing field:
+`std.json` checks a value where it reads it and looks for missing fields
+only once the object is closed, so a line with an oversized resource and
+no `actor` is `LengthMismatch`, where it was `MissingField`. Of two faults
+in a line, one in a value is reported.
 
 One thing is heavier than it has to be. `actor` and `detail` must be there
 and are not kept, and a decoded type holds no slice, so `Entry` reads each
