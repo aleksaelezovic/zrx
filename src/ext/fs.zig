@@ -232,18 +232,28 @@ pub fn joinAs(
 
 /// Whether `std` takes `path` to open by the path rules of `rules`: the
 /// directory a source is given is asked before it is opened, and the path
-/// of an entry before it is given. On
-/// Windows it is converted to UTF-16 in a buffer of `PATH_MAX_WIDE` units
-/// that is not checked first, so a path of more units than that is refused
-/// here and never given: it would overrun the buffer. A unit takes at least
-/// one byte, so a path of no more bytes than that has room. Elsewhere `std`
-/// refuses a path of `std.fs.max_path_bytes` bytes or more.
+/// of an entry before it is given. On Windows it is converted to UTF-16 in
+/// a buffer of `PATH_MAX_WIDE` units that is not checked first, so a path
+/// of more units than that is refused here and never given: it would
+/// overrun the buffer. A unit takes at least one byte, so a path of no more
+/// bytes than that has room. Elsewhere `std` refuses a path of
+/// `std.fs.max_path_bytes` bytes or more.
 fn opens(comptime rules: Dir.path.PathType, path: []const u8) bool {
     if (rules != .windows) return path.len < Dir.max_path_bytes;
     const room = std.os.windows.PATH_MAX_WIDE;
-    if (path.len <= room) return true;
-    const units = std.unicode.calcWtf16LeLen(path) catch return false;
-    return units <= room;
+    return path.len <= room or utf16Units(path) <= room;
+}
+
+/// The units of UTF-16 that `path` is: one for each byte that begins a
+/// character, and one more for each that begins one of four bytes. It is
+/// read byte by byte and not decoded, because the directory a source is
+/// given is the caller's and need not be WTF-8: `std`'s own count reads
+/// past the end of one cut inside a character. For a path that is not,
+/// this is no fewer than `std` writes before it refuses it.
+fn utf16Units(path: []const u8) usize {
+    var units: usize = 0;
+    for (path) |byte| units += @as(usize, @intFromBool(byte & 0xc0 != 0x80)) + @intFromBool(byte >= 0xf0);
+    return units;
 }
 
 /// Whether a separator goes between the path of a directory and a name in
