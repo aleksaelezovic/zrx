@@ -920,6 +920,29 @@ test "a joined path that does not fit is refused, the separator counted" {
     try std.testing.expectError(error.PathTooLong, fs.joinAs(.posix, 3, &full, 3, ""));
 }
 
+test "by Windows rules a path of more UTF-16 units than std converts is refused, however few bytes over it is" {
+    // `std` converts a path to UTF-16 in a buffer of `PATH_MAX_WIDE` units
+    // and does not check first: a longer one would overrun it on open.
+    const wide_room = std.os.windows.PATH_MAX_WIDE;
+    const n = 2 * wide_room;
+    // After "C:", a name of one byte for each unit that is left, and one more.
+    const ascii: [wide_room - 1]u8 = @splat('a');
+    var fits: zrx.Line(n) = try .from("C:");
+    try fs.joinAs(.windows, n, &fits, 2, ascii[0 .. wide_room - 2]);
+    try std.testing.expectEqual(wide_room, fits.len);
+    var over: zrx.Line(n) = try .from("C:");
+    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &over, 2, &ascii));
+    // "é" is two bytes and one unit: twice the bytes, and it is the units
+    // that are counted.
+    var wide: [2 * (wide_room - 1)]u8 = undefined;
+    for (0..wide_room - 1) |i| wide[2 * i ..][0..2].* = "é".*;
+    var units: zrx.Line(n) = try .from("C:");
+    try fs.joinAs(.windows, n, &units, 2, wide[0 .. 2 * (wide_room - 2)]);
+    try std.testing.expect(units.len > wide_room);
+    var more: zrx.Line(n) = try .from("C:");
+    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &more, 2, &wide));
+}
+
 // ---------------------------------------------------------------------------
 // the guide
 // ---------------------------------------------------------------------------
