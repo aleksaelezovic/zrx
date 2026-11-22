@@ -112,7 +112,11 @@ are the one place that reads a seed, for all three; `src/di.zig` is
 unchanged. The order is: the parameter a reducer function declares, else
 the type of the seed, else `State(Item)`, else a compile error that says to
 write `@as(T, seed)`. A seed that is no value of the declared type (`-1`
-for `u32` items) is a compile error too.
+for `u32` items) is a compile error too. That is asked of the seed as the
+state it becomes, as it is of an [operand](#transforms) and for the same
+reason: the first version took any number for a float state, and
+`fold(1e300, sum)` over `f32` items began at infinity. An integer has to be
+held exactly, and a float may not round to 0 or to infinity.
 
 A seed without a type cannot be a field of the operator: there is no
 runtime type to store it in until the items are known, and a

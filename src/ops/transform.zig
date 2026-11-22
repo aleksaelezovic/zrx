@@ -149,16 +149,38 @@ pub fn State(comptime who: []const u8, comptime reducer: anytype, comptime Seed:
 /// `State` found no type for. The seed has to be a value of it.
 pub fn Inferred(comptime who: []const u8, comptime reducer: anytype, comptime seed: anytype, comptime Item: type) type {
     const A = reducer.State(Item);
+    const whole = @TypeOf(seed) == comptime_int;
     const fits = switch (@typeInfo(A)) {
-        .float => true,
-        .int => (@TypeOf(seed) == comptime_int or @trunc(seed) == seed) and seed >= std.math.minInt(A) and seed <= std.math.maxInt(A),
+        .float => if (whole) holdsWhole(A, seed) else keeps(A, seed),
+        .int => (whole or @trunc(seed) == seed) and seed >= std.math.minInt(A) and seed <= std.math.maxInt(A),
         else => false,
     };
     if (!fits) @compileError(std.fmt.comptimePrint(
-        "{s}: the seed `{d}` is not a `{s}`, which is what the reducer accumulates `{s}` items in; give a seed of that type, or choose another with `@as(T, seed)`",
-        .{ who, seed, @typeName(A), @typeName(Item) },
+        "{s}: the seed `{s}` is not a `{s}`, which is what the reducer accumulates `{s}` items in; give a seed of that type, or choose another with `@as(T, seed)`",
+        .{
+            who,
+            if (whole or @typeInfo(A) != .float) std.fmt.comptimePrint("{d}", .{seed}) else std.fmt.comptimePrint("{e}", .{seed}),
+            @typeName(A),
+            @typeName(Item),
+        },
     ));
     return A;
+}
+
+/// Whether the float type `A` holds the whole number `seed` exactly, which
+/// is what Zig asks of an integer literal that becomes a float.
+fn holdsWhole(comptime A: type, comptime seed: comptime_int) bool {
+    const nearest: A = @floatFromInt(seed);
+    return std.math.isFinite(nearest) and @as(comptime_int, @intFromFloat(nearest)) == seed;
+}
+
+/// Whether `seed` is still the number that was written once it is an `A`.
+/// It is rounded as Zig rounds a literal, and that is asked of the `A`: a
+/// seed is not 0 because it was not written as 0, and `1e300` is infinite
+/// as an `f32`.
+fn keeps(comptime A: type, comptime seed: comptime_float) bool {
+    const state: A = seed;
+    return std.math.isFinite(state) and (state == 0) == (seed == 0);
 }
 
 /// A seed without a type, kept in the type of its operator: there is no

@@ -252,7 +252,9 @@ test "a seed without a type takes the state its reducer declares for the items" 
     var halves: Halves = .{};
     try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(0.25, total), forEach(support.record(f32)) }), .{&halves});
     try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(1, total), forEach(support.record(f32)) }), .{&halves});
-    try halves.expect(&.{ 3.25, 4 });
+    // It is rounded to the state as a literal of that type is.
+    try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(0.1, total), forEach(support.record(f32)) }), .{&halves});
+    try halves.expect(&.{ 3.25, 4, ((@as(f32, 0.1) + 0.5) + 1) + 1.5 });
 }
 
 test "a seed with a type is the state, whatever the reducer would have chosen" {
