@@ -1413,7 +1413,7 @@ pub fn mathMeasured(comptime with_zrx: bool, items: []const u32, out: *Measured)
             least = @min(least, value);
             most = @max(most, value);
             const of: f64 = @floatFromInt(seen);
-            mean += @as(f64, @floatFromInt(value)) / of - mean / of;
+            mean += (@as(f64, @floatFromInt(value)) - mean) / of;
         }
         out.* = .{ .count = seen, .min = least, .max = most, .mean = mean };
     }

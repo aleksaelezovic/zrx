@@ -1469,7 +1469,8 @@ one division that overflows, the smallest value of a signed type by -1, is
 ### Stats
 
 `Stats(T)` keeps four values as items of type `T` pass: `count`, `min`,
-`max` and `mean`. It is a state with a reducer of its own, used like any:
+`max` and `mean`. `T` is a float or an integer of at most 128 bits. It is
+a state with a reducer of its own, used like any:
 
 ```zig
 const Latency = math.Stats(u32);
@@ -1488,7 +1489,8 @@ the smallest value of `T`, infinity for a float. Ask `count` whether there
 was an item.
 
 The mean of finite items is finite, also where two of them are too far
-apart for their difference: the largest `f64` and its negative come to 0.
+apart for their difference: the largest `f64` and its negative come to 0,
+as do the smallest and its negative.
 The mean of items that are all the same is that item. Otherwise it is
 close to the sum divided by the count and not that to the last digit: it
 is rounded once for each item, in its own type. That type decides how far

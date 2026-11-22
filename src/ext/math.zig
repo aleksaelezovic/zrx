@@ -243,9 +243,15 @@ fn Power(comptime is_checked: bool, comptime n: anytype) type {
         /// By squaring, and only as far as the exponent needs: these are
         /// the multiplications one writes by hand, and no product on the
         /// way is larger than the result, so the checked form fails only
-        /// where the result does not fit.
+        /// where the result does not fit. Except in `i1`, which has no 1:
+        /// the square of -1 does not fit where its cube does, so there the
+        /// checked form answers by whether the exponent is odd.
         pub fn call(_: anytype, args: anytype) Raised(@TypeOf(args[0])) {
             const T = @TypeOf(args[0]);
+            if (is_checked and T == i1) {
+                if (exponent % 2 == 1) return args[0];
+                return if (exponent != 0 and args[0] == 0) 0 else error.Overflow;
+            }
             if (exponent == 0) return 1;
             comptime var left = exponent;
             comptime var begun = false;
@@ -411,7 +417,8 @@ fn holds(comptime A: type, comptime Item: type) bool {
 
 /// How many items there were, the smallest, the largest and their mean,
 /// kept as the items pass: `fold(Stats(f64){}, Stats(f64).add)`, or with
-/// `scan` and `reduce` like any reducer. The items are `T`s.
+/// `scan` and `reduce` like any reducer. The items are `T`s: floats, or
+/// integers of at most 128 bits, the widest that becomes a float.
 ///
 /// `mean` is a float (`f64` for integer items) and is the running mean,
 /// which no number of items overflows: the mean of finite items is finite.
@@ -426,7 +433,11 @@ fn holds(comptime A: type, comptime Item: type) bool {
 /// the mean, and the item after it makes the mean NaN.
 pub fn Stats(comptime T: type) type {
     const float = switch (@typeInfo(T)) {
-        .int => false,
+        // A wider integer has no conversion to a float at run time: LLVM
+        // stops on it. And beyond 1023 bits it would be infinite.
+        .int => |int| if (int.bits > 128) @compileError(
+            "math.Stats: takes integers of at most 128 bits, got `" ++ @typeName(T) ++ "`; make the items narrower first",
+        ) else false,
         .float => true,
         else => @compileError("math.Stats: takes the type of the items, an integer or a float, got `" ++ @typeName(T) ++ "`"),
     };
@@ -434,6 +445,10 @@ pub fn Stats(comptime T: type) type {
     // What the mean is calculated in: the count has to be a value of it,
     // and no `f16` is a whole number above 65504.
     const Wide = if (@typeInfo(Mean).float.bits < 64) f64 else Mean;
+    // Only items of the type the mean is calculated in can be too far
+    // apart for their difference: an integer of 128 bits is below 2^128,
+    // and the largest `f32` far below the largest `f64`.
+    const spans = Wide == T;
     return struct {
         count: usize = 0,
         min: T = if (float) std.math.inf(T) else std.math.maxInt(T),
@@ -445,14 +460,17 @@ pub fn Stats(comptime T: type) type {
             const of: Wide = @floatFromInt(seen);
             const item: Wide = if (float) value else @floatFromInt(value);
             const mean: Wide = stats.mean;
+            // The difference of two finite values can be infinite, that of
+            // their parts cannot: then each is divided before the two are
+            // subtracted. Only then, since a part can round to nothing
+            // where the difference does not, as half the smallest float.
+            const apart = item - mean;
+            const step = if (!spans or std.math.isFinite(apart)) apart / of else item / of - mean / of;
             return .{
                 .count = seen,
                 .min = @min(stats.min, value),
                 .max = @max(stats.max, value),
-                // Each is divided before the two are subtracted: the
-                // difference of two finite values can be infinite, that of
-                // their parts cannot.
-                .mean = @floatCast(mean + (item / of - mean / of)),
+                .mean = @floatCast(mean + step),
             };
         }
     };

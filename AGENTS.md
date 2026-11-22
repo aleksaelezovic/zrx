@@ -81,7 +81,8 @@ to this file; edit `AGENTS.md`, not copies.
   `Inferred` in `src/ops/transform.zig` are the one place that reads a
   seed, for all three; `src/di.zig` knows nothing of it. A reducer that
   declares nothing is a compile error that says to write `@as(T, seed)`.
-  The rule is decided; `State(Item)` is the shape proposed for it, and
+  The rule is decided; `State(Item)` is the shape proposed for it, a
+  decision that awaits the owner's approval, and
   [docs/spec-math.md](docs/spec-math.md#the-seed) has what else was
   weighed.
 - **An optional is the answer of a predicate, nowhere else.** Zig says

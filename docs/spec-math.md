@@ -2,8 +2,9 @@
 
 Status: implemented as `zrx.ext.math` (`src/ext/math.zig`). The one change
 it needed in the core, how a seed without a type gets one, is described
-under [The seed](#the-seed) and is a proposal until the owner has decided
-on its shape.
+under [The seed](#the-seed). Its rule is decided. Its shape, a reducer's
+`State(Item)`, is a decision that awaits the owner's approval: it is what
+is implemented, and it is a proposal until it is approved.
 
 This file is the design record of the extension: why it is the way it is,
 what was rejected and what was measured. The [guide](guide.md#math) says
@@ -54,7 +55,12 @@ is the larger surprise. The guide states the consequence.
 squaring, unrolled at compile time: `pow(3)` is the two multiplications one
 writes by hand. It squares only as far as the exponent needs, so no product
 on the way is larger than the result, and the checked form fails exactly
-where the result does not fit. `std.math.pow` was not used: for integers it
+where the result does not fit. `i1` is the exception, because it has no 1:
+the square of -1 does not fit where its cube does, and a review found
+`checked.pow(3)` failing for -1. For `i1` the checked form answers by
+whether the exponent is odd: an odd power is the item, and an even one is
+0 for 0 and `error.Overflow` otherwise, as is `pow(0)`. The plain form is
+left as it is, the multiplications by hand, which fail the same way. `std.math.pow` was not used: for integers it
 is `powi(...) catch unreachable`, a loop with its own special cases, and
 for floats a general power that is not `x * x`. A root or a fractional
 power is a handler of the user's own over `std.math.pow`.
@@ -124,7 +130,9 @@ failed with Zig's "unable to resolve comptime value" at the call of
 `fold(@as(u64, 0), sum)` is how a wider accumulator is chosen, and nothing
 overrules it. A `comptime_int` or `comptime_float` seed is inferred.
 
-**The shape, which is proposed.** A composite reducer may declare
+**The shape, a decision that awaits the owner's approval.** It is
+implemented, and it is not accepted until the owner approves it. A
+composite reducer may declare
 
     pub fn State(comptime Item: type) type
 
@@ -219,27 +227,43 @@ pipe as it is, into `json.encode` or a `print`. It is the running mean,
 with no sum that a long stream would overflow. It is a float of the items'
 type, and an `f64` for integers.
 
-**The update is `mean + (item / count - mean / count)`.** The first
-version was `mean + (item - mean) / count`, one division for an item. A
-review found that it returns `-inf` for the largest `f64` followed by its
-negative: their difference is not finite, though their mean is 0. Divided
-first, neither part is more than the largest value over the count, so from
-the second item on their difference is finite, and what comes of adding it
-lies between the old mean and the item. `tests/math.zig` has that pair in
-both orders, long runs of the largest value and of two large values in
-turn, and a run that changes sign with every item.
+Its items are floats or integers of at most 128 bits; `Stats(u256)` is a
+compile error that says to make the items narrower. A review found a
+`u256` fold stopping LLVM on arm64 macOS, which converts no wider integer
+to a float at run time, and the largest `u1024` known at compile time
+giving an infinite mean: an `f64` holds no integer of more than 1023 bits.
+
+**The update is `mean + (item - mean) / count`, and where that difference
+is not finite, `mean + (item / count - mean / count)`.** The first version
+was the first form alone. A review found that it returns `-inf` for the
+largest `f64` followed by its negative: their difference is not finite,
+though their mean is 0. Divided first, neither part is more than the
+largest value over the count, so from the second item on their difference
+is finite, and what comes of adding it lies between the old mean and the
+item. The second version divided first for every item, and a review found
+that it fails at the other end: for the smallest positive `f64` followed by
+its negative, half of each rounds to 0, both parts are lost, and the first
+is left as the mean, where their difference is exact. So the parts are
+divided first only where the difference is not finite. Only items of the
+type the mean is calculated in can be that far apart, `f64` and wider: an
+integer of 128 bits and the largest `f32` are far inside an `f64`, so for
+them the test is not compiled. `tests/math.zig` has the largest value and
+its negative in both orders, long runs of the largest value and of two
+large values in turn, a run that changes sign with every item, and the
+smallest value and its negative in every float type.
 
 The calculation is done in an `f64` where the mean's type is narrower,
 and rounded to that type at the end of each step. The count has to be a
 value of what it is calculated in, and an `f16` holds no whole number
 above 65504: calculated in `f16`, the mean stopped moving there.
 
-**What it costs.** Two divisions for an item where there was one, and for
-`f16` and `f32` items a conversion each way. In accuracy it is what a
-running mean costs, and the first update cost the same: the mean is
-rounded once for each item, so it drifts from the sum divided by the
-count. Measured against that sum kept in an `f128`, items uniform in
-[0, 1):
+**What it costs.** One division for an item; for `f64` and wider items a
+test of whether the difference is finite, and a second division where it
+is not; for `f16` and `f32` items a conversion each way. In accuracy it is
+what a running mean costs: the mean is rounded once for each item, so it
+drifts from the sum divided by the count. Measured against that sum kept
+in an `f128`, items uniform in [0, 1) from `std.Random.DefaultPrng`
+seeded with 42:
 
 | Items | `Stats(f64)` | `Stats(f32)` |
 |---|---|---|
@@ -250,11 +274,11 @@ count. Measured against that sum kept in an `f128`, items uniform in
 
 The first number is the error relative to the mean. It does not grow
 evenly, as the last line of the `f64` column shows, and these are one run
-each. On the `f64` runs of up to 10^7 items the first update came to the
-same figures within one ulp. Where the mean is far smaller than the items
-(10^6 items uniform between -5·10^5 and 5·10^5) it was 558 ulp of the
-mean off and this one 590. With items of 10^9 + [0, 1) the `f64` mean was
-1.2e-13 off after 10^7 items. A `Stats(f16)` was 4.5e-3 off after 10^3
+each. Dividing first for every item, as the second version did, came to
+the same figures on every line. Where the mean is far smaller than the
+items (10^6 items uniform between -5·10^5 and 5·10^5) the mean was 456 ulp
+off, and 598 dividing first. With items of 10^9 + [0, 1) the `f64` mean
+was 1.2e-13 off after 10^7 items. A `Stats(f16)` was 4.5e-3 off after 10^3
 items and 7.3e-3 after 10^5.
 
 Two things follow from the mean being rounded in its own type. Once the
@@ -263,15 +287,15 @@ moves the mean by less than the type can show unless it is far from the
 mean, and is lost. And an integer item beyond 2^53 is rounded when it
 becomes an `f64`.
 
-The mean of items that are all the same is exactly that item: the two
-parts are equal and their difference is 0.
+The mean of items that are all the same is exactly that item: their
+difference from it is 0.
 
 **Items that are not finite.** A NaN is counted, and the mean is NaN from
 then on. `min` and `max` pass over it, because `@min` and `@max` return
 the other operand. An infinity is the `min` or the `max`, and the mean for
 that item; the item after it makes the mean NaN, whatever it is, since
 the update then subtracts infinity from infinity. A mean that stays
-infinite would need a test for every item. None is there.
+infinite would need another test for every item. None is there.
 
 Not built, and for the owner to decide: holding the mean of `f16` and
 `f32` items in an `f64`, as that of integers is. It would take most of

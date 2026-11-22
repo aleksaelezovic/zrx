@@ -151,6 +151,7 @@ pub const cases = .{
     .{ "math_sum_item", "math.sum: items must be integers or floats, got `[]const u8`; take the number out of the item first, as in `compose(.{ field(.name), ... })`" },
     .{ "math_count_state", "math.count: counts in an integer, but the state is a `f64`; give a seed such as `0` or `@as(u32, 0)`" },
     .{ "math_stats_type", "math.Stats: takes the type of the items, an integer or a float, got `[]const u8`" },
+    .{ "math_stats_width", "math.Stats: takes integers of at most 128 bits, got `u256`; make the items narrower first" },
     .{ "not_operator", "pipe: element 1 is not an operator (got `fn (u32) u32`); a pipe holds operators such as map(...), filter(...) or another pipe" },
     .{ "predicates_result", "all: every predicate must return `bool` or `E!bool`, got `u32`" },
     .{ "or_else_fallback_errors", "orElse: the fallback takes `error{Odd}` but the handler can fail with `error{Odd,TooBig}`" },

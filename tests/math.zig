@@ -275,6 +275,22 @@ test "checked.pow fails only where the result does not fit" {
     try std.testing.expectEqualSlices(i8, &.{ 1, 1, 0, 1 }, seen.slice()[4..]);
 }
 
+test "checked.pow of an i1, which has no 1, fails only where the result is 1" {
+    var seen: Seen(i1) = .{};
+    const out = forEach(seenAs(i1));
+    const both = [_]i1{ -1, 0 };
+    // An odd power of -1 is -1, though its square does not fit.
+    try support.run(program(fromSlice(&both), .{ map(checked.pow(3)), out }), .{&seen});
+    try support.run(program(fromSlice(&both), .{ map(checked.pow(1001)), out }), .{&seen});
+    try seen.expect(&.{ -1, 0, -1, 0 });
+    // An even power of -1 is 1, and so is any power of 0.
+    const zero = [_]i1{0};
+    try support.run(program(fromSlice(&zero), .{ map(checked.pow(2)), out }), .{&seen});
+    try std.testing.expectEqualSlices(i1, &.{0}, seen.slice()[4..]);
+    try std.testing.expectError(error.Overflow, support.run(program(fromSlice(&both), .{ map(checked.pow(2)), out }), .{&seen}));
+    try std.testing.expectError(error.Overflow, support.run(program(fromSlice(&zero), .{ map(checked.pow(0)), out }), .{&seen}));
+}
+
 test "checked.neg fails for the smallest value of its type" {
     var seen: Seen(i8) = .{};
     const numbers = [_]i8{ 5, -127, 0, -128, 1 };
@@ -440,6 +456,28 @@ test "the mean of finite items is finite" {
     try std.testing.expectEqual(-most, means[3].mean);
     try std.testing.expectApproxEqRel(most * 0.75, means[4].mean, 1e-12);
     try std.testing.expect(@abs(means[5].mean) <= most * 1e-12);
+}
+
+test "the mean of opposite values is 0, however small" {
+    inline for (.{ f16, f32, f64, f128 }) |T| {
+        const Real = math.Stats(T);
+        // Half of it is no float: divided first, both halves were lost.
+        const least = std.math.floatTrueMin(T);
+        try std.testing.expectEqual(@as(T, 0), Real.add(Real.add(.{}, least), -least).mean);
+        try std.testing.expectEqual(@as(T, 0), Real.add(Real.add(.{}, -least), least).mean);
+    }
+}
+
+test "the mean of the widest integers Stats takes is finite" {
+    const Unsigned = math.Stats(u128);
+    const Signed = math.Stats(i128);
+    var positive: Seen(Unsigned) = .{};
+    var both: Seen(Signed) = .{};
+    const most = std.math.maxInt(u128);
+    try support.run(program(fromSlice(&[_]u128{ most, most }), .{ fold(Unsigned{}, Unsigned.add), forEach(seenAs(Unsigned)) }), .{&positive});
+    try support.run(program(fromSlice(&[_]i128{ std.math.minInt(i128), std.math.maxInt(i128) }), .{ fold(Signed{}, Signed.add), forEach(seenAs(Signed)) }), .{&both});
+    try std.testing.expectEqual(@as(f64, @floatFromInt(most)), positive.slice()[0].mean);
+    try std.testing.expectEqual(@as(f64, 0), both.slice()[0].mean);
 }
 
 test "the mean is finite in every float type" {
