@@ -59,6 +59,11 @@ const repeated_zst =
 /// Python's `gzip.compress(b"")`: a member with no content.
 const empty_gz = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 
+/// What a zstd decoder is given to work in: a block, and a window of 2 MiB,
+/// which is what the largest frame here asks for.
+const block = std.compress.zstd.block_size_max;
+var window: [block + (2 << 20)]u8 = undefined;
+
 /// The one program most tests run. Nothing in it says what its input is.
 const listed = program(lines(Input, 8), .{print(Log, "{f},")});
 
@@ -83,9 +88,8 @@ test "a program reads plain or compressed input, and only its bindings differ" {
 
     var zs: std.Io.Reader = .fixed(words_zst);
     try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{
-        std.testing.allocator,
         Packed{ .reader = &zs },
-        compress.zstdReader(Input, Packed, 9, .{}),
+        compress.zstdReader(Input, Packed, 9, &window),
     }));
 }
 
@@ -120,18 +124,21 @@ test "the roles may be bare readers on one side" {
 
 test "the reader of the compressed bytes may have a small buffer, or none" {
     var buffer: [64]u8 = undefined;
-    inline for (.{ 0, 1, 3 }) |size| {
+    inline for (.{ 0, 1, 3, 4 }) |size| {
         var whole: std.Io.Reader = .fixed(words_gz);
         var small: [size]u8 = undefined;
         var trickle = whole.limited(.unlimited, &small);
         try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{ Packed{ .reader = &trickle.interface }, compress.gzipReader(Input, Packed, 9) }));
 
+        whole = .fixed(words_zlib);
+        trickle = whole.limited(.unlimited, &small);
+        try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{ Packed{ .reader = &trickle.interface }, compress.zlibReader(Input, Packed, 9) }));
+
         whole = .fixed(piped_zst);
         trickle = whole.limited(.unlimited, &small);
         try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{
-            std.testing.allocator,
             Packed{ .reader = &trickle.interface },
-            compress.zstdReader(Input, Packed, 9, .{}),
+            compress.zstdReader(Input, Packed, 9, &window),
         }));
     }
 }
@@ -152,9 +159,8 @@ test "every frame of a zstd stream is read" {
     var buffer: [64]u8 = undefined;
     var frames: std.Io.Reader = .fixed(words_zst ++ piped_zst);
     try std.testing.expectEqualStrings("alpha,beta,gamma,alpha,beta,gamma,", try listing(&buffer, .{
-        std.testing.allocator,
         Packed{ .reader = &frames },
-        compress.zstdReader(Input, Packed, 9, .{}),
+        compress.zstdReader(Input, Packed, 9, &window),
     }));
 }
 
@@ -165,7 +171,7 @@ fn reading(comptime format: enum { gzip, zlib, zstd }, bytes: []const u8) !void 
     _ = try switch (format) {
         .gzip => listing(&buffer, .{ Packed{ .reader = &reader }, compress.gzipReader(Input, Packed, 9) }),
         .zlib => listing(&buffer, .{ Packed{ .reader = &reader }, compress.zlibReader(Input, Packed, 9) }),
-        .zstd => listing(&buffer, .{ std.testing.allocator, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 9, .{}) }),
+        .zstd => listing(&buffer, .{ Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 9, &window) }),
     };
 }
 
@@ -224,10 +230,31 @@ test "content that does not match its checksum or its length fails the read" {
     try std.testing.expectError(error.ReadFailed, reading(.gzip, words_gz ++ wrong_sum));
 }
 
-test "bytes after a gzip member that are no member fail the read" {
+test "bytes after a gzip member or a zstd frame that are neither fail the read" {
+    // Both are read to the end of their input, so a read that succeeded
+    // has left nothing in the reader it read from.
     try std.testing.expectError(error.ReadFailed, reading(.gzip, words_gz ++ "\x00\x00\x00\x00"));
+    try std.testing.expectError(error.ReadFailed, reading(.zstd, words_zst ++ "\x00\x00\x00\x00"));
+    try std.testing.expectError(error.ReadFailed, reading(.zstd, words_zst ++ "\x00"));
     // A zlib stream is one stream: what follows it is not read.
     try reading(.zlib, words_zlib ++ "anything");
+}
+
+test "what follows a zlib stream is left in the reader it was read from" {
+    const follows = "what follows";
+    var buffer: [64]u8 = undefined;
+    var whole: std.Io.Reader = .fixed(words_zlib ++ follows);
+    try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{ Packed{ .reader = &whole }, compress.zlibReader(Input, Packed, 9) }));
+    try std.testing.expectEqualStrings(follows, whole.buffered());
+
+    // Also in a reader that fills its buffer from somewhere else, where
+    // that buffer holds the four bytes `std`'s decoder may ask it to hold.
+    whole = .fixed(words_zlib ++ follows);
+    var four: [4]u8 = undefined;
+    var filled = whole.limited(.unlimited, &four);
+    try std.testing.expectEqualStrings("alpha,beta,gamma,", try listing(&buffer, .{ Packed{ .reader = &filled.interface }, compress.zlibReader(Input, Packed, 9) }));
+    var rest: [follows.len + 1]u8 = undefined;
+    try std.testing.expectEqualStrings(follows, rest[0..try filled.interface.readSliceShort(&rest)]);
 }
 
 test "the lines before a failure have been delivered" {
@@ -286,19 +313,20 @@ const counted = program(lines(Input, 16), .{
 test "a zstd frame is read through a window of more than a megabyte" {
     var found: Tally = .{};
     var reader: std.Io.Reader = .fixed(repeated_zst);
-    try support.run(counted, .{ std.testing.allocator, &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, .{}) });
+    try support.run(counted, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, &window) });
     try std.testing.expectEqual(Tally{ .lines = repeated_lines, .bytes = repeated_lines * 10 }, found);
 }
 
-test "a zstd frame that asks for more window than it is allowed fails the read" {
+test "a zstd frame that asks for more window than the slice leaves beside a block fails the read" {
+    // The frame holds 1,100,000 bytes and says so: that is its window.
     var found: Tally = .{};
     var reader: std.Io.Reader = .fixed(repeated_zst);
-    const megabyte = compress.zstdReader(Input, Packed, 17, .{ .window = 1 << 20 });
-    try std.testing.expectError(error.ReadFailed, support.run(counted, .{ std.testing.allocator, &found, Packed{ .reader = &reader }, megabyte }));
+    const short = compress.zstdReader(Input, Packed, 17, window[0 .. block + 1_100_000 - 1]);
+    try std.testing.expectError(error.ReadFailed, support.run(counted, .{ &found, Packed{ .reader = &reader }, short }));
 
     reader = .fixed(repeated_zst);
-    const two = compress.zstdReader(Input, Packed, 17, .{ .window = 2 << 20 });
-    try support.run(counted, .{ std.testing.allocator, &found, Packed{ .reader = &reader }, two });
+    const enough = compress.zstdReader(Input, Packed, 17, window[0 .. block + 1_100_000]);
+    try support.run(counted, .{ &found, Packed{ .reader = &reader }, enough });
     try std.testing.expectEqual(@as(u64, repeated_lines), found.lines);
 }
 
@@ -314,17 +342,37 @@ test "a zstd decoder that failed is not asked again for what it would make of th
     var found: Tally = .{};
     var reader: std.Io.Reader = .fixed(&corrupt);
     const each_line = program(lines(Input, 16), .{forEach(countLine)});
-    const result = support.run(each_line, .{ std.testing.allocator, &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, .{}) });
+    const result = support.run(each_line, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, &window) });
     try std.testing.expectError(error.ReadFailed, result);
     try std.testing.expect(found.lines < repeated_lines);
 }
 
-test "a zstd window that cannot be allocated fails the run before anything is read" {
+test "a zstd slice with no room for a window fails the run before anything is read" {
     var found: Tally = .{};
     var reader: std.Io.Reader = .fixed(words_zst);
-    const result = support.run(counted, .{ std.testing.failing_allocator, &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, .{}) });
-    try std.testing.expectError(error.OutOfMemory, result);
-    try std.testing.expectEqual(@as(usize, 0), reader.seek);
+    inline for (.{ 0, 1, block }) |len| {
+        const result = support.run(counted, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, window[0..len]) });
+        try std.testing.expectError(error.ZstdWindowTooSmall, result);
+        try std.testing.expectEqual(@as(usize, 0), reader.seek);
+    }
+
+    // One byte of window is not refused: it is enough for a stream of no frames.
+    var nothing: std.Io.Reader = .fixed("");
+    try support.run(counted, .{ &found, Packed{ .reader = &nothing }, compress.zstdReader(Input, Packed, 17, window[0 .. block + 1]) });
+
+    // The frame of `words` holds 17 bytes and says so: a window of 17 will do.
+    try std.testing.expectError(error.ReadFailed, support.run(counted, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, window[0 .. block + 16]) }));
+    reader = .fixed(words_zst);
+    try support.run(counted, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, window[0 .. block + 17]) });
+    try std.testing.expectEqual(Tally{ .lines = 3, .bytes = 14 }, found);
+}
+
+test "a zstd reader asks for no allocator, and adds one error to a run beside ReadFailed" {
+    var found: Tally = .{};
+    var reader: std.Io.Reader = .fixed(words_zst);
+    const left = support.runLeft(counted, .{ &found, Packed{ .reader = &reader }, compress.zstdReader(Input, Packed, 17, window[0..0]) });
+    try std.testing.expectEqual(@as(?anyerror, error.ZstdWindowTooSmall), left.err);
+    try std.testing.expectEqualStrings("ReadFailed StreamTooLong ZstdWindowTooSmall ", left.names());
 }
 
 // ---------------------------------------------------------------------------

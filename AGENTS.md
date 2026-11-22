@@ -356,9 +356,14 @@ to this file; edit `AGENTS.md`, not copies.
   - No codec of zrx's own. What is there is what `std.compress` can do
     within a memory the caller sizes: gzip and zlib both ways, Zstandard
     read only. xz returns when `std`'s decoder is bounded.
-  - A program is not handed a `std` decoder's own reader, and the decoder
-    does not read the caller's reader directly: both assert. Do not
-    remove either buffer to save a copy.
+  - Nothing is allocated. The Zstandard window is a slice of the
+    caller's, and its length says how much window there is.
+  - A program is not handed a `std` decoder's own reader: it asserts. Do
+    not remove the buffer in front of it to save a copy.
+  - A flate decoder reads the caller's reader itself where that reader
+    can hold what the decoder asks for. Do not put a buffer of the
+    binding's between them: it takes from the caller's reader what
+    follows a zlib stream.
   - `std` compares no gzip or zlib checksum and reads one gzip member.
     The extension does both. A decoder that failed is not asked again.
   - A corrupt or truncated input is `error.ReadFailed` and nothing more
@@ -368,7 +373,8 @@ to this file; edit `AGENTS.md`, not copies.
     names its file, and the writer below is flushed there. A failed run
     leaves the stream without its end on purpose.
   - Do not wrap `std` writers. What cannot be said at compile time, a
-    writer below that `std` would assert on, is an error at acquisition.
+    writer below or a Zstandard slice that `std` would assert on, is an
+    error at acquisition.
   - Say what each window costs, and give stack use as a measurement.
   - There is no zero-overhead fixture: nothing here is in the item loop.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,

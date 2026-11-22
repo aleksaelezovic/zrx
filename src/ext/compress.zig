@@ -92,18 +92,26 @@ pub fn gzipReader(comptime Role: type, comptime From: type, comptime buffer_size
     return .{};
 }
 
-/// `gzipReader` for a zlib stream (RFC 1950). There is one stream, and what
-/// follows it is not read. Its checksum is compared.
+/// `gzipReader` for a zlib stream (RFC 1950). Its checksum is compared.
+///
+/// There is one stream, and what follows it is not read: it is still in the
+/// reader keyed by `From` when the run has returned, if that reader has a
+/// buffer of 4 bytes or more. One with less is read 4 KiB at a time, and
+/// what was read past the end of the stream is gone.
 pub fn zlibReader(comptime Role: type, comptime From: type, comptime buffer_size: usize) FlateReader(.zlib, Role, From, buffer_size) {
     return .{};
 }
 
-/// How many compressed bytes a reading binding holds itself, between the
-/// reader it was given and the decoder. `std`'s decoders assert that their
-/// input can hold what they look ahead, 10 bytes of a gzip header and 2048
-/// of a zstd table, and a reader bound by someone else may hold less, or
-/// nothing. With this in between, any reader will do.
+/// How many compressed bytes a reading binding holds itself where the
+/// reader it was given cannot hold what a decoder asks of its input. `std`'s
+/// decoders assert that their input can hold what they look at before they
+/// take it, and a reader bound by someone else may hold less, or nothing.
 const held_bytes = 4096;
+
+/// The most `std`'s flate decoder asks its input to hold: it looks at four
+/// bytes and takes what it used of them. A header is read into memory of
+/// the decoder's own.
+const flate_ahead = 4;
 
 fn FlateReader(comptime container: flate.Container, comptime Role: type, comptime From: type, comptime buffer_size: usize) type {
     expectRoles(@tagName(container) ++ "Reader", reading, Role, From);
@@ -113,58 +121,68 @@ fn FlateReader(comptime container: flate.Container, comptime Role: type, comptim
         pub const needs: []const type = &.{From};
 
         pub fn bind(_: @This(), env: anytype, next: anytype) !void {
+            // The decoder takes from its input the bytes of the stream and
+            // no more, so it reads the caller's reader itself: what follows
+            // a zlib stream is then still in that reader. One that cannot
+            // hold what the decoder looks at is read through `held`, which
+            // takes from it whatever fits, past the end of the stream too.
+            const from = interfaceOf(reading, di.get(env, From));
             var held: [held_bytes]u8 = undefined;
-            var compressed = interfaceOf(reading, di.get(env, From)).limited(.unlimited, &held);
+            var ahead = from.limited(.unlimited, &held);
+            const compressed = if (from.buffer.len >= flate_ahead) from else &ahead.interface;
             var window: [flate.max_window_len]u8 = undefined;
             var buffer: [buffer_size]u8 = undefined;
-            var plain: Plain(Inflate(container)) = .init(.{ .decoder = .init(&compressed.interface, container, &window) }, &buffer);
+            var plain: Plain(Inflate(container)) = .init(.{ .decoder = .init(compressed, container, &window) }, &buffer);
             return next.call(roleOf(reading, Role, &plain.reader));
         }
     };
 }
 
-pub const ZstdOptions = struct {
-    /// The largest window a frame may ask for, in bytes. A frame that asks
-    /// for more fails the read. The default is what the format recommends
-    /// every decoder to accept; `zstd --long` writes frames that need more.
-    window: u32 = zstd.default_window_len,
-};
-
 /// Binds as `Role` a reader of the plain bytes of the Zstandard stream that
 /// the reader keyed by `From` holds, as `gzipReader` does for gzip. Frames
 /// are read one after another, and skippable frames are skipped.
 ///
-/// The window is allocated when the binding is acquired and freed when it
-/// is released: `options.window` bytes and 128 KiB for a block, 8 MiB and
-/// 128 KiB by default, from the `std.mem.Allocator` of the run. `std`'s
-/// decoder also keeps two blocks, 256 KiB, on the stack of the task that
-/// reads.
+/// `window` is the decoder's memory, and the caller's: nothing is
+/// allocated. It holds one block, `std.compress.zstd.block_size_max` (128
+/// KiB), and in what is left the window: the largest a frame may ask for.
+/// What the format recommends every decoder to accept is
+/// `std.compress.zstd.default_window_len`, 8 MiB; `zstd --long` writes
+/// frames that need more. A slice with no room for a window fails the run
+/// with `error.ZstdWindowTooSmall` before anything is read. It is the
+/// binding's while a program runs: two runs at one time need two.
+///
+/// Beside it the binding holds 4 KiB of compressed bytes, and `std`'s
+/// decoder keeps two blocks, 256 KiB, on the stack of the task that reads.
 ///
 /// A stream that is cut short or corrupt fails the read with
 /// `error.ReadFailed`, and so does a frame that needs a larger window or a
 /// dictionary. The checksum of a frame's content is not compared: `std`
 /// does not do it yet.
-pub fn zstdReader(comptime Role: type, comptime From: type, comptime buffer_size: usize, options: ZstdOptions) ZstdReader(Role, From, buffer_size) {
-    return .{ .options = options };
+pub fn zstdReader(comptime Role: type, comptime From: type, comptime buffer_size: usize, window: []u8) ZstdReader(Role, From, buffer_size) {
+    return .{ .window = window };
 }
 
 fn ZstdReader(comptime Role: type, comptime From: type, comptime buffer_size: usize) type {
     expectRoles("zstdReader", reading, Role, From);
     return struct {
-        options: ZstdOptions,
+        window: []u8,
 
         pub const zrx_resource = {};
         pub const Provides = Role;
-        pub const needs: []const type = &.{ From, std.mem.Allocator };
+        pub const needs: []const type = &.{From};
 
         pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            // `std` asserts that a block fits beside the window it is told.
+            if (self.window.len <= zstd.block_size_max) return error.ZstdWindowTooSmall;
+            const window_len = std.math.cast(u32, self.window.len - zstd.block_size_max) orelse std.math.maxInt(u32);
+            // The decoder looks at 2048 bytes of a table before it takes
+            // them, which is more than to ask of a caller's reader. It
+            // reads to the end of its input, so nothing is taken from that
+            // reader that a successful read would have left in it.
             var held: [held_bytes]u8 = undefined;
             var compressed = interfaceOf(reading, di.get(env, From)).limited(.unlimited, &held);
-            const gpa = di.get(env, std.mem.Allocator);
-            const window = try gpa.alloc(u8, @as(usize, self.options.window) + zstd.block_size_max);
-            defer gpa.free(window);
             var buffer: [buffer_size]u8 = undefined;
-            var plain: Plain(Unzstd) = .init(.{ .decoder = .init(&compressed.interface, window, .{ .window_len = self.options.window }) }, &buffer);
+            var plain: Plain(Unzstd) = .init(.{ .decoder = .init(&compressed.interface, self.window, .{ .window_len = window_len }) }, &buffer);
             return next.call(roleOf(reading, Role, &plain.reader));
         }
     };

@@ -43,11 +43,11 @@ export fn zrx_cross_files(io: *const std.Io, from: [*:0]const u8, to: [*:0]const
 const Plain = struct { reader: *std.Io.Reader };
 const Unpacked = struct { writer: *std.Io.Writer };
 
-export fn zrx_cross_compress(gpa: *const std.mem.Allocator, from: *std.Io.Reader, to: *std.Io.Writer) bool {
+export fn zrx_cross_compress(from: *std.Io.Reader, to: *std.Io.Writer, window: [*]u8, window_len: usize) bool {
     const compress = zrx.ext.compress;
     const copy = program(zrx.lines(Plain, 256), .{zrx.write(Unpacked, "{f}\n")});
     if (!ran(copy, .{ from, to, compress.gzipReader(Plain, *std.Io.Reader, 257), compress.zlibWriter(Unpacked, *std.Io.Writer, .{}) })) return false;
-    if (!ran(copy, .{ gpa.*, from, to, compress.zstdReader(Plain, *std.Io.Reader, 257, .{}), compress.gzipWriter(Unpacked, *std.Io.Writer, .{}) })) return false;
+    if (!ran(copy, .{ from, to, compress.zstdReader(Plain, *std.Io.Reader, 257, window[0..window_len]), compress.gzipWriter(Unpacked, *std.Io.Writer, .{}) })) return false;
     return true;
 }
 

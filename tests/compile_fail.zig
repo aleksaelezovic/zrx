@@ -142,9 +142,8 @@ pub const cases = .{
     .{ "compress_reader_from", "zlibReader: `[]const u8` is not a reader role; use `*std.Io.Reader` or a struct with a `reader: *std.Io.Reader` field" },
     .{ "compress_reader_same", "gzipReader: `compress_reader_same.Input` is given as the role it provides and as the role it reads the compressed bytes from, but a type has one provider; give the compressed bytes a role of their own, such as `const Packed = struct { reader: *std.Io.Reader };`" },
     .{ "compress_reader_fields", "zstdReader: it makes the `compress_reader_fields.Input` it provides, so that must be `*std.Io.Reader` or a role with a single `reader: *std.Io.Reader` field" },
-    // What a decompressing binding reads from is a need like any other: these two are the planner's messages.
+    // What a decompressing binding reads from is a need like any other: this is the planner's message.
     .{ "compress_reader_unbound", "zrx: `ext.compress.FlateReader(.gzip,compress_reader_unbound.Input,compress_reader_unbound.Packed,9)` needs dependency `compress_reader_unbound.Packed`, which is not provided; provided: (nothing). Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
-    .{ "compress_zstd_allocator", "zrx: `ext.compress.ZstdReader(compress_zstd_allocator.Input,compress_zstd_allocator.Packed,9)` needs dependency `mem.Allocator`, which is not provided; provided: `compress_zstd_allocator.Packed`. Pass it to `run(.{ ... })` or bind it with `program(...).provide(.{ ... })`." },
     .{ "compress_writer_role", "gzipWriter: `[]const u8` is not a writer role; use `*std.Io.Writer` or a struct with a `writer: *std.Io.Writer` field" },
     .{ "compress_writer_same", "gzipWriter: `io.Stdout` is given as the role it provides and as the role it writes the compressed bytes to, but a type has one provider; give the compressed bytes a role of their own, such as `const Packed = struct { writer: *std.Io.Writer };`" },
     .{ "program_not_pipe", "program: expected an operator tuple `.{ ... }` or `pipe(.{ ... })`, got `ops.sink.ForEach((function 'ignore'))`" },

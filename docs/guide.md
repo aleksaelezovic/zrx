@@ -999,7 +999,7 @@ app.run(.{
 |---|---|
 | `gzipReader(Role, From, n)` | Binds as `Role` the plain bytes of the gzip stream read from `From`, buffered by `n` bytes. |
 | `zlibReader(Role, From, n)` | The same for a zlib stream (RFC 1950). |
-| `zstdReader(Role, From, n, options)` | The same for a Zstandard stream. Needs a `std.mem.Allocator`. `options.window` defaults to 8 MiB. |
+| `zstdReader(Role, From, n, window)` | The same for a Zstandard stream. `window` is a `[]u8` of yours that the decoder works in. |
 | `gzipWriter(Role, Into, options)` | Binds as `Role` a writer whose bytes reach `Into` as a gzip stream. `options.level` is `.default`, `.fastest`, `.best` or `.level_1` to `.level_9`. |
 | `zlibWriter(Role, Into, options)` | The same for a zlib stream. |
 
@@ -1010,27 +1010,57 @@ one provider: the same role on both sides is a compile error that says so.
 What provides the compressed side is anything that provides a reader or a
 writer: `fileReader`, `fileWriter`, `stdout`, or a value of your own in a
 test. `n` is what it is for `fileReader`: for `lines`, the line limit plus
-one. The reader of the compressed bytes may have any buffer.
+one. The reader of the compressed bytes may have any buffer. Nothing here
+allocates.
 
 Reading:
 
 - Every member of a gzip stream is read, one after another, as `gzip -d`
-  does, and every frame of a Zstandard stream. A zlib stream is one stream;
-  what follows it is not read.
+  does, and every frame of a Zstandard stream: both are read to the end of
+  their input.
+- A zlib stream is one stream, and what follows it is not read. In a reader
+  of your own it is still there when the run has returned, if that reader
+  has a buffer of 4 bytes or more. One with less is read 4 KiB at a time,
+  and what was read past the end of the stream is gone.
 - The checksum and the length a gzip member declares, and the checksum of a
   zlib stream, are compared with what was read.
 - A stream that is cut short, is corrupt, does not match its checksum, or
   (gzip) is followed by bytes that are no member fails the read, and with it
   the run, with `error.ReadFailed`: the error of any reader given to
-  `lines`, so a gzip or zlib input adds no error to a run. A Zstandard
-  input adds `error.OutOfMemory`, for its window. The lines decoded before
-  the failure have been delivered. A file of no bytes is no gzip and no
+  `lines`, so a gzip or zlib input adds no error to a run. The lines decoded
+  before the failure have been delivered. A file of no bytes is no gzip and no
   zlib stream.
 - A line longer than `n - 1` bytes is `error.StreamTooLong`, as for a file.
-- A Zstandard frame that needs a larger window than `options.window`, or a
-  dictionary, fails the read. The checksum of a frame's content is not
+- A Zstandard frame that needs a larger window than `window` has room for,
+  or a dictionary, fails the read. The checksum of a frame's content is not
   compared, because `std` does not do it yet: content that was altered and
   still decodes is delivered as it is.
+
+The memory a Zstandard decoder works in is too large for the stack, so it
+is yours to give, and it is not allocated for you. It holds one block,
+`std.compress.zstd.block_size_max` (128 KiB), and in what is left the
+window: the largest a frame may ask for.
+`std.compress.zstd.default_window_len`, 8 MiB, is what the format
+recommends every decoder to accept; `zstd --long` writes frames that need
+more.
+
+```zig
+const zstd = std.compress.zstd;
+
+var window: [zstd.block_size_max + zstd.default_window_len]u8 = undefined;
+
+app.run(.{
+    io,
+    fileReader(Packed, "access.log.zst", 4096),
+    compress.zstdReader(Input, Packed, max_line + 1, &window),
+    ...
+});
+```
+
+A slice with no room for a window, one of `block_size_max` bytes or less,
+fails the run with `error.ZstdWindowTooSmall` before anything is read: the
+one error a Zstandard input adds to a run. The slice is the binding's while
+a program runs, so two runs at the same time need two.
 
 Writing:
 
@@ -1066,7 +1096,7 @@ bytes:
 | | |
 |---|---|
 | `gzipReader`, `zlibReader` | 64 KiB of window and 4 KiB of compressed bytes, on the stack. |
-| `zstdReader` | `options.window` and 128 KiB from the allocator, 8 MiB and 128 KiB by default, and 4 KiB on the stack. `std`'s decoder puts another 256 KiB on the stack of the task that reads. Frames written by `zstd --long` need a larger window. |
+| `zstdReader` | The slice it is given, and 4 KiB of compressed bytes on the stack. `std`'s decoder puts another 256 KiB on the stack of the task that reads. |
 | `gzipWriter`, `zlibWriter` | 64 KiB of window, which is the writer's buffer, and 225 KiB of compressor state, on the stack. A Debug build copies the compressor as it is made and was measured at 741 KiB. |
 
 The codecs are `std.compress`'s, and zrx has none of its own. So there is

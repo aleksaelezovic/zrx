@@ -77,7 +77,7 @@ not part of this extension.
 
 ## What is added to `std`, and why
 
-Three things, each because of something that was measured.
+Each of these is there because of something that was measured.
 
 ### A buffer in front of the decoder
 
@@ -100,18 +100,53 @@ vtable of its own because every byte handed on has to pass through code
 that can count it (the checksum, below) and decide what the decoder's end
 means (the next gzip member, below).
 
-### The compressed side has a buffer of the binding's own too
+### What the decoder reads from
 
-The decoder does not read the caller's reader directly but through 4 KiB
-of the binding's own (`held_bytes`, a `Reader.Limited` with no limit).
-`std`'s decoders assert that their input can hold what they look ahead: 10
-bytes of a gzip header, 2048 of a Zstandard table. A reader bound by
-someone else may hold less, or nothing.
+`std`'s decoders assert that their input can hold what they look at before
+they take it: 4 bytes of a flate stream, 2048 of a Zstandard table. A
+reader bound by someone else may hold less, or nothing.
 
-**Rejected: checking the caller's buffer at acquisition.** A
-`std.Io.Reader.fixed(bytes)` has a buffer exactly as long as its bytes, so
-the check would refuse a test's short stream with an error about buffers.
-With a buffer in between there is nothing to check and no error to name.
+The first version therefore never gave a decoder the caller's reader. It
+read through 4 KiB of the binding's own (`held_bytes`, a `Reader.Limited`
+with no limit). A review of PR 65 showed what that costs: a `Limited` takes
+from the reader below whatever fits its buffer, so the bytes that followed
+a zlib stream were gone from the caller's reader when the run returned,
+although the guide said they were not read. The test that reproduced it
+is `what follows a zlib stream is left in the reader it was read from`.
+
+`std`'s flate decoder itself takes the bytes of the stream and no more: it
+looks at four bytes and tosses what it used of them. So a flate decoder now
+reads the caller's reader itself where that reader's buffer holds those
+four bytes (`flate_ahead`), and what follows a zlib stream stays in it.
+Only a reader with a smaller buffer is still read through `held`, and for
+that one the guide says that what was read past the end is gone. Four is
+what was found by running it: with a buffer of three `std` asserts, and
+the first number written here, the ten bytes of a gzip header, was wrong,
+because `std` reads a header into memory of the decoder's own.
+
+This removes a layer over `std` where the finding was, and adds none.
+
+The same cause does not reach the other two formats. A gzip stream is every
+member up to the end of its input, and bytes that are no member fail the
+read; a Zstandard stream is every frame up to the end of its input, and
+bytes that are no frame fail the read. A read that succeeded has left
+nothing behind in either. The Zstandard decoder keeps reading through
+`held`: 2048 bytes is more than to ask of a caller's reader.
+
+**Rejected: checking the caller's buffer at acquisition**, with an error
+for one that is too small. A `std.Io.Reader.fixed(bytes)` has a buffer
+exactly as long as its bytes, so the check would answer an empty stream, or
+one cut off in its first bytes, with an error about buffers where every
+other cut is `error.ReadFailed`. And it would add a name to the errors of
+every run that reads compressed input.
+
+**Rejected: only saying so in the guide**, with the advice to give a
+bounded reader. Where a zlib stream ends is known only by decoding it, so a
+caller who needs what follows often cannot bound it.
+
+**Rejected: handing the decoder a byte at a time** through the binding's
+buffer, which could keep what follows with any reader: a call into the
+caller's reader for every compressed byte. Neither tried nor measured.
 
 ### Checksums and gzip members
 
@@ -162,7 +197,8 @@ back with `ReadFailed`. It would widen the error set of every program that
 reads compressed input by some twenty names, change it with the binding,
 and name a cut-short stream `error.EndOfStream`.
 
-A Zstandard input adds `error.OutOfMemory`, for its window.
+A Zstandard input adds `error.ZstdWindowTooSmall`, when the binding is
+acquired and before anything is read (below).
 
 ## The end of a compressed stream
 
@@ -194,23 +230,54 @@ writer that small could not hold a gzip header either.
 
 ## What each binding costs
 
-Buffers are on the stack of the run, as for the other I/O bindings. Only
-the Zstandard window is too large for that.
+Buffers are on the stack of the run, as for the other I/O bindings. The
+Zstandard window is too large for that and is the caller's. Nothing is
+allocated.
 
 | | |
 |---|---|
 | `gzipReader`, `zlibReader` | The 64 KiB window (`flate.max_window_len`), 4 KiB of compressed bytes, the caller's `n`, and 3 KiB of decoder. Measured in Debug: 82 KiB of stack more than the plain reader. |
-| `zstdReader` | `options.window` and 128 KiB for a block from the run's allocator: 8 MiB and 128 KiB by default, which is what the format recommends every decoder to accept. 4 KiB and the caller's `n` on the stack. `std`'s decoder puts two blocks, 256 KiB, on the stack of the task that reads. |
+| `zstdReader` | The slice it is given: 128 KiB for a block and the window. 4 KiB and the caller's `n` on the stack. `std`'s decoder puts two blocks, 256 KiB, on the stack of the task that reads. |
 | `gzipWriter`, `zlibWriter` | The 64 KiB window, which is the writer's buffer, and `flate.Compress` itself, 230,096 bytes. `std` returns it by value, and a Debug build had three copies at once: 741 KiB of stack was measured. An optimized build was not measured. |
 
 A Zstandard frame says how much window it needs: `zstd` of a known file
 asks for the file's length up to its level's limit, `zstd` of a pipe for
 2 MiB at the default level, `zstd --long` for more than 8 MiB. A frame that
-asks for more than `options.window` fails the read.
+asks for more than the slice leaves beside a block fails the read, as a
+corrupt one does.
+
+### The Zstandard window is the caller's
+
+The first version allocated the window from the run's `std.mem.Allocator`
+when the binding was acquired, with `options.window` saying how much. The
+owner decided against it: the core and the other extensions allocate
+nothing, and a buffer is sized where it is written and held by whoever
+writes it. `zstdReader(Role, From, n, window)` takes a `[]u8`, and nothing
+in the extension asks for an allocator.
+
+`std` wants one buffer of `window_len + zstd.block_size_max` bytes, so the
+slice is exactly that and its length says both: what is left beside a block
+is the window. There is no option that repeats it. The guide shows it as a
+static array of `zstd.block_size_max + zstd.default_window_len` bytes, 8
+MiB and 128 KiB, which is what the format recommends every decoder to
+accept.
+
+A slice and not an array of a comptime length: how much window a caller
+gives may depend on what it was started with, and a pointer to an array
+becomes a slice by itself. So its length cannot be checked at compile
+time. `std` asserts on a buffer with no room for a block, and the binding
+fails with `error.ZstdWindowTooSmall` at acquisition for a slice of
+`block_size_max` bytes or less. More than that is not refused: a frame that
+says how long its content is asks for a window of that length, which can be
+a few bytes, and `tests/compress.zig` reads one with a window of 17.
+
+A binding is acquired once for a run, so the slice has one user at a time.
+Two runs at once that were given the same slice would share it; the guide
+says they need two.
 
 **Considered: the compressor and the flate window from the allocator.**
 That would take 290 KiB or more off the stack and make every compressing
-binding need an allocator, where no other I/O binding does.
+binding need an allocator, where nothing else in zrx allocates.
 
 `std`'s compression levels are not ordered by size on every text: 60,000
 lines of `line N` took 113,535 bytes at `.fastest` and 137,873 at `.best`.

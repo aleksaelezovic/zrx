@@ -6,9 +6,9 @@ const Packed = struct { reader: *std.Io.Reader };
 
 test {
     var packed_bytes: std.Io.Reader = .fixed("");
+    var window: [std.compress.zstd.block_size_max + 1024]u8 = undefined;
     zrx.program(zrx.lines(Input, 8), .{zrx.drain()}).run(.{
-        std.testing.allocator,
         Packed{ .reader = &packed_bytes },
-        zrx.ext.compress.zstdReader(Input, Packed, 9, .{}),
+        zrx.ext.compress.zstdReader(Input, Packed, 9, &window),
     });
 }
