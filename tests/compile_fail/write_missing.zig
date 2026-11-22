@@ -4,5 +4,5 @@ const program = zrx.program;
 const range = zrx.range;
 
 test {
-    program(range(u32, 0, 3), .{zrx.write(zrx.Stdout, "{d}")}).run(.{});
+    program(range(u32, 0, 3), .{zrx.write(zrx.ext.process.Stdout, "{d}")}).run(.{});
 }

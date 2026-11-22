@@ -75,26 +75,22 @@ The cost is that the common case stutters. Rejected all the same:
 arm. What is one now is the program. A binding that is one of two, chosen
 when it is acquired, is not there.
 
-**One type behind two names** *(staging, proposed)*. The core still has
-`zrx.Stdout`, `zrx.Stderr`, `zrx.stdout(n)`, `zrx.stderr(n)` and
-`zrx.stdinLines(n)`. They are to leave it in the change that moves every
-example and app onto this extension; nothing is removed from the core
-here, and `examples/` is not touched. Until then:
+**The core has no standard streams.** It had `zrx.Stdout`, `zrx.Stderr`,
+`zrx.stdout(n)`, `zrx.stderr(n)` and `zrx.stdinLines(n)` from before this
+extension, and for one change the roles were one type under two names.
+They left the core in the change that moved every example and app here:
 
-- `process.Stdout` and `process.Stderr` *are* `zrx.Stdout` and
-  `zrx.Stderr`, declared in `src/io.zig`. A second pair of roles would
-  make `print(Stdout, ...)` depend on which `Stdout` was imported. They
-  move here when the core's names go.
+- `Stdout` and `Stderr` are declared here. A second pair of roles would
+  have made `print(Stdout, ...)` depend on which `Stdout` was imported, so
+  the core's pair was not kept beside them.
 - `zrx.stdout(n)` is `process.stdout(Stdout, n)`, and `zrx.stderr(n)`
-  likewise.
-- `zrx.stdinLines(n)` becomes `lines(Stdin, n)` run with
-  `process.stdin(Stdin, n + 1)`. One difference, which that change has to
-  decide about: `stdinLines` owns its reader and fails with what the
-  system reported, and a read through a binding fails with
-  `error.ReadFailed`.
-- The two writer bindings exist twice for that time, about fifteen lines
-  each way (`Standard` in `src/io.zig`, `Output` here). The core cannot
-  import an extension, and the role parameter is what the core's lacks.
+  likewise. The role is written, which is what "this file, or standard
+  output" needs.
+- `zrx.stdinLines(n)` is `lines(Stdin, n)` run with
+  `process.stdin(Stdin, n + 1)`. The one difference went with it:
+  `stdinLines` owned its reader and failed with what the system reported,
+  and a read through a binding fails with `error.ReadFailed`, as below.
+  Nothing in the examples or apps looked at that error.
 
 **A failed read is `error.ReadFailed`.** `stdin` does what `fileReader`
 does and for its reason: by the time the failure is back at the binding, a

@@ -21,17 +21,16 @@
 const std = @import("std");
 const Io = std.Io;
 const di = @import("../di.zig");
-const io = @import("../io.zig");
 
 // ---------------------------------------------------------------------------
 // The standard streams
 // ---------------------------------------------------------------------------
 
 /// The role standard output is usually bound as: `stdout(Stdout, n)`.
-pub const Stdout = io.Stdout;
+pub const Stdout = struct { writer: *Io.Writer };
 /// The role standard error is usually bound as: `stderr(Stderr, n)`. It is
 /// the one `fail` writes to.
-pub const Stderr = io.Stderr;
+pub const Stderr = struct { writer: *Io.Writer };
 /// The role standard input is usually bound as: `stdin(Stdin, n)`.
 pub const Stdin = struct { reader: *Io.Reader };
 

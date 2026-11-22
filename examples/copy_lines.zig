@@ -4,35 +4,27 @@ const std = @import("std");
 const zrx = @import("zrx");
 const pipe = zrx.pipe;
 const program = zrx.program;
-const fileLines = zrx.fileLines;
 const filter = zrx.filter;
 const fold = zrx.fold;
 const branch = zrx.branch;
-const fileWriter = zrx.fileWriter;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
 const rescue = zrx.rescue;
+const compose = zrx.compose;
+const field = zrx.field;
+const ne = zrx.ne;
 const print = zrx.print;
+const count = zrx.ext.math.count;
+const fs = zrx.ext.fs;
+const fileLines = fs.fileLines;
+const fileWriter = fs.fileWriter;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
+const Stdout = process.Stdout;
+const Stderr = process.Stderr;
 
-const Line = zrx.Line(4096);
 const Copy = struct { writer: *std.Io.Writer };
 
-fn isNotEmpty(line: Line) bool {
-    return line.len != 0;
-}
-fn count(lines: usize, _: Line) usize {
-    return lines + 1;
-}
-
-const Exit = struct { code: u8 = 0 };
-
-/// Whatever ends the run, such as an output that already exists: one line
-/// on stderr and a status for `main`. The output is closed by then.
-fn fatal(err_out: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 1;
-    err_out.writer.print("error: {s}\n", .{@errorName(err)}) catch return;
-    err_out.writer.flush() catch {};
-}
+const isNotEmpty = compose(.{ field(.len), ne(0) });
 
 pub fn main(init: std.process.Init) u8 {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch return 2;
@@ -40,7 +32,7 @@ pub fn main(init: std.process.Init) u8 {
         std.debug.print("usage: copy-lines INPUT NEW_OUTPUT\n", .{});
         return 2;
     }
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const input = args[1];
     const output = args[2];
 
@@ -49,7 +41,7 @@ pub fn main(init: std.process.Init) u8 {
     });
     const report = pipe(.{
         fold(0, count),
-        print(zrx.Stdout, "copied {d} lines\n"),
+        print(Stdout, "copied {d} lines\n"),
     });
     const copy = program(fileLines(input, 4096), pipe(.{
         filter(isNotEmpty),
@@ -58,8 +50,10 @@ pub fn main(init: std.process.Init) u8 {
             report,
         }),
     })).provide(.{
-        stdout(64),
-        rescue(fatal).provide(.{stderr(128)}),
+        stdout(Stdout, 64),
+        // Whatever ends the run, such as an output that already exists: one
+        // line on stderr and a status for `main`. The output is closed by then.
+        rescue(process.fail(.{})).provide(.{stderr(Stderr, 128)}),
         fileWriter(Copy, output, 4096, .{ .mode = .create_new }),
     });
     copy.run(.{ init.io, &exit });

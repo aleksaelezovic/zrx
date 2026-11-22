@@ -9,18 +9,19 @@ const fromSlice = zrx.fromSlice;
 const map = zrx.map;
 const recover = zrx.recover;
 const rescue = zrx.rescue;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
 const print = zrx.print;
+const mul = zrx.ext.math.mul;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
+const Stdout = process.Stdout;
+const Stderr = process.Stderr;
 
 const ParseError = error{ Empty, NotANumber };
 
 fn parse(text: []const u8) ParseError!u32 {
     if (text.len == 0) return error.Empty;
     return std.fmt.parseInt(u32, text, 10) catch error.NotANumber;
-}
-fn double(value: u32) u32 {
-    return value * 2;
 }
 
 /// A line that did not parse, and why.
@@ -33,36 +34,30 @@ fn described(rejected: Rejected) struct { []const u8, []const u8 } {
 /// Where a rejected line goes instead: a pipe like any other.
 const rejections = pipe(.{
     map(described),
-    print(zrx.Stderr, "rejected \"{s}\": {s}\n"),
+    print(Stderr, "rejected \"{s}\": {s}\n"),
 });
 
 /// Takes exactly `ParseError`; any other error would still fail the run.
 pub const records = pipe(.{
     recover(ParseError, rejections),
     map(parse),
-    map(double),
-    print(zrx.Stdout, "{d}\n"),
+    map(mul(2)),
+    print(Stdout, "{d}\n"),
 });
-
-const Exit = struct { code: u8 = 0 };
 
 /// What belongs to no line, such as a write that fails, ends the run. A run
 /// returns nothing: the failure goes to a rescue, which reports it and
 /// leaves a status for `main`. It is called when the run is over, with a
 /// stderr of its own: the run's has been released by then.
-fn fatal(err_out: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 1;
-    err_out.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
-    err_out.writer.flush() catch {};
-}
+const fatal = rescue(process.fail(.{ .prefix = "fatal" })).provide(.{stderr(Stderr, 64)});
 
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const input = [_][]const u8{ "21", "", "4", "four" };
     const app = program(fromSlice(&input), records).provide(.{
-        stdout(256),
-        stderr(256),
-        rescue(fatal).provide(.{stderr(64)}),
+        stdout(Stdout, 256),
+        stderr(Stderr, 256),
+        fatal,
     });
     app.run(.{ init.io, &exit });
     return exit.code;

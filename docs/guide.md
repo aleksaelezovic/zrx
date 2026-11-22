@@ -184,8 +184,8 @@ programs can therefore always fail, and is run with a rescue.
 | `fromProducer(T, producer)` | Whatever `producer(deps..., out)` pushes with `out.push(item)`. |
 | `merge(.{ a, b })` | The items of several sources as they arrive. With more than one, each source runs as a task (needs `std.Io` with concurrency) and they take turns pushing. Once a push is answered `.done`, the other sources are cancelled where they wait. |
 | `mergeTagged(T, .{ .a = x, .b = y })` | `merge`, with every item marked by the source it came from; see [below](#knowing-where-an-item-came-from). |
-| `lines(Role, n)`, `stdinLines(n)`, `fileLines(path, n)` | Text lines; see [Input and output](#input-and-output). |
-| `fileBytes(path, n)` | The bytes of a file, at most `n` at a time; see [Input and output](#input-and-output). |
+| `lines(Role, n)` | The text lines of a reader; see [Input and output](#input-and-output). |
+| `fs.fileLines(path, n)`, `fs.fileBytes(path, n)` | The lines of a file, or its bytes at most `n` at a time; see [Input and output](#input-and-output). |
 
 A producer stops when a push answers `.done`:
 
@@ -220,7 +220,7 @@ const Input = union(enum) { tick: Tick, line: Line };
 
 const input = mergeTagged(Input, .{
     .tick = fromProducer(Tick, ticks),
-    .line = stdinLines(max_line),
+    .line = lines(Stdin, max_line),
 });
 ```
 
@@ -349,7 +349,7 @@ const Hash = struct {
     fn update(hash: Hash, piece: []const u8) Hash { ... }
 };
 
-fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+fn bytesOf(path: []const u8) fs.FileBytes(read_bytes) {
     return fileBytes(path, read_bytes);
 }
 
@@ -382,7 +382,7 @@ const hashed = pipe(.{
   `concurrent`.
 - **The source is any source**: `fromSlice`, `range`, `fileBytes`, one of
   your own. `source_of` takes dependencies like any handler and may fail. It
-  has to name the type it returns: `zrx.FileBytes(n)` for `fileBytes`, and
+  has to name the type it returns: `fs.FileBytes(n)` for `fileBytes`, and
   for the other built-in sources, whose types have no public name yet,
   `@TypeOf(range(u32, 0, 0))`.
 - A failure of `source_of`, of the source or of the sub-pipe fails the run
@@ -506,7 +506,7 @@ fn described(rejected: Rejected) Rejection { ... }
 /// Where a line that did not parse goes instead.
 const rejections = pipe(.{
     map(described),
-    print(zrx.Stderr, "{f}\n"),
+    print(Stderr, "{f}\n"),
 });
 
 pipe(.{
@@ -553,14 +553,14 @@ among the bindings:
 const Exit = enum(u8) { ok, failed };
 
 /// Whatever ends the run: a line on stderr and a status for `main`.
-fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
+fn fatal(diagnostics: Stderr, exit: *Exit, err: anyerror) void {
     exit.* = .failed;
     diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
     diagnostics.writer.flush() catch {};
 }
 
 const app = program(source, records).provide(.{
-    rescue(fatal).provide(.{stderr(256)}),
+    rescue(fatal).provide(.{stderr(Stderr, 256)}),
     fileWriter(Accepted, path, 4096, .{ .mode = .create_new }),
 });
 ```
@@ -1031,21 +1031,30 @@ Readers and writers are dependencies. A *role* is the type one is keyed by:
 `*std.Io.Writer` itself, or a struct with a single `writer: *std.Io.Writer`
 field when a program has several (`reader: *std.Io.Reader` for input).
 
+The core reads and writes text through a role and opens nothing. Where a
+reader or a writer comes from is a binding, and the bindings are extensions:
+files are `zrx.ext.fs`, and the standard streams are `zrx.ext.process`
+(see [The process](#the-process)). The examples in this guide use their
+names without the prefix, as a program does after
+`const fileWriter = zrx.ext.fs.fileWriter;` and
+`const Stdout = zrx.ext.process.Stdout;`.
+
 | | |
 |---|---|
 | `print(Role, "fmt")` | Terminal. Formats and flushes every item. A tuple supplies several format arguments. |
 | `write(Role, "fmt")` | Terminal. Like `print`, but flushes only at the end of the stream. |
-| `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
-| `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
+| `process.stdout(Role, n)`, `process.stderr(Role, n)` | Bind a standard stream's writer as `Role`, buffered by `n` bytes. `process.Stdout` and `process.Stderr` are the roles they usually have. |
+| `fs.fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
 | `ext.json.encode(options)` | Handler: the item as JSON text, to be formatted with `{f}`. |
 | `ext.json.decode(T, options)` | Handler: the `T` a text is the JSON of. See [Decoding JSON](#decoding-json). |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
-| `fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
-| `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
-| `fileBytes(path, n)` | Source: the bytes of a file, in pieces of at most `n`. |
+| `fs.fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
+| `process.stdin(Role, n)` | Binds a reader of standard input as `Role`, buffered by `n` bytes. |
+| `fs.fileLines(path, n)` | Source: the lines of a file; a line is at most `n` bytes, not counting its newline. |
+| `fs.fileBytes(path, n)` | Source: the bytes of a file, in pieces of at most `n`. |
 
-`stdout`, `stderr`, `fileWriter` and `fileReader` are bindings: give them
-to `provide` or to `run`. A file
+`stdout`, `stderr`, `stdin`, `fileWriter` and `fileReader` are bindings: give
+them to `provide` or to `run`. A file
 closes when the program releases its resources. `print` flushes after each
 item and again at normal stream end: use it for output someone reads as it
 is produced. `write` leaves items in the writer's buffer and flushes at
@@ -1128,12 +1137,12 @@ empty and none longer than `n`. A piece is a slice into the source's own
 buffer and is valid until the push that carries it returns. Reduce the
 pieces as they pass (`fold`), or copy what must be kept: do not send a piece
 across a `queue` or keep it in a `batch`. An empty file emits nothing.
-`zrx.FileBytes(n)` names the source's type, for a handler that returns one.
+`fs.FileBytes(n)` names the source's type, for a handler that returns one.
 
 When reading a file fails, the run fails with the error the system reported,
-such as `error.InputOutput`. That holds for `fileBytes`, `fileLines` and
-`stdinLines`, which own their reader. A reader given to `lines(Role, n)`,
-one of your own or one bound by `fileReader`, fails the run with what it
+such as `error.InputOutput`. That holds for `fileBytes` and `fileLines`,
+which own their reader. A reader given to `lines(Role, n)`, one of your own
+or one bound by `fileReader` or `process.stdin`, fails the run with what it
 reports, which for `std.Io.Reader` is `error.ReadFailed`.
 
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
@@ -1154,7 +1163,7 @@ const Record = struct { id: u64, action: Action, resource: zrx.Line(96) };
 /// Where a line that is not a record goes instead.
 const rejections = pipe(.{
     map(described),
-    print(zrx.Stderr, "{f}\n"),
+    print(Stderr, "{f}\n"),
 });
 
 const archive = pipe(.{
@@ -1383,8 +1392,10 @@ Why it is built this way, and what was measured, is in
 
 `zrx.ext.fs` makes a directory a source, so that "every file under this
 directory" is where a program begins and not a loop before it. It is an
-extension: two sources written against the public contract, compiled only
-when a program uses them.
+extension, written against the public contract and compiled only when a
+program uses it. It also holds the bindings and sources of a single file,
+`fileReader`, `fileWriter`, `fileLines` and `fileBytes`, which are
+described under [Input and output](#input-and-output).
 
 ```zig
 const fs = zrx.ext.fs;
@@ -1399,7 +1410,7 @@ const files = program(fs.walk("src", max_path, max_depth), .{
     print(Stdout, "{f}\n"),
 });
 
-files.run(.{ io, stdout(4096) });
+files.run(.{ io, stdout(Stdout, 4096) });
 ```
 
 | | |
@@ -1552,7 +1563,7 @@ const report = pipe(.{
     recover(error{InvalidRecord}, rejections),
     map(require(record, error.InvalidRecord)),
     fold(@as(u32, 0), slowest),
-    print(zrx.Stdout, "{d}\n"),
+    print(Stdout, "{d}\n"),
 });
 ```
 
@@ -1638,7 +1649,7 @@ const report = pipe(.{
     map(require(record, error.InvalidRecord)),
     queue(64),
     fold(@as(u32, 0), slowest),
-    print(zrx.Stdout, "{d}\n"),
+    print(Stdout, "{d}\n"),
 });
 
 program(fileLines(path, 128), report)
@@ -1891,7 +1902,7 @@ const report = pipe(.{
     map(math.div(1000)),
     map(math.clamp(0, 3600)),
     fold(0, math.sum),
-    print(zrx.Stdout, "{d}\n"),
+    print(Stdout, "{d}\n"),
 });
 ```
 
@@ -1994,7 +2005,7 @@ pipe(.{
     recover(error{Overflow}, rejections), // or sent down a path, with the item
     map(checked.mul(1000)),
     fold(0, checked.sum),
-    print(zrx.Stdout, "{d}\n"),
+    print(Stdout, "{d}\n"),
 })
 ```
 
@@ -2015,7 +2026,7 @@ const Latency = math.Stats(u32);
 const summary = pipe(.{
     fold(Latency{}, Latency.add),
     map(json.encode(.{})),
-    print(zrx.Stdout, "{f}\n"),
+    print(Stdout, "{f}\n"),
 });
 ```
 
@@ -2223,7 +2234,7 @@ const bytes = zrx.ext.bytes;
 
 const Sha256 = bytes.digest(std.crypto.hash.sha2.Sha256.init(.{}));
 
-fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+fn bytesOf(path: []const u8) fs.FileBytes(read_bytes) {
     return fileBytes(path, read_bytes);
 }
 
@@ -2288,7 +2299,7 @@ it returns is a struct with one field, `hasher`, that begins as `start`.
   const crc32 = pipe(.{
       fold(Crc32{}, Crc32.update),
       map(Crc32.final),
-      print(zrx.Stdout, "{x:0>8}\n"),
+      print(Stdout, "{x:0>8}\n"),
   });
   ```
 - **A stream without pieces has a digest too**: `fold` emits its seed, and
@@ -2761,12 +2772,12 @@ header.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
 body.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
 ```
 
-The core has `stdout(n)`, `stderr(n)` and `stdinLines(n)` from before this
-extension, and the roles are the same types under both names:
-`zrx.stdout(n)` is `process.stdout(Stdout, n)`, and `zrx.stdinLines(n)` is
-`lines(Stdin, n)` run with `process.stdin(Stdin, n + 1)`. One difference:
-`stdinLines` owns its reader and fails with what the system reported,
-where a failed read through a binding is `error.ReadFailed`.
+The lines of standard input are `lines(Stdin, n)` run with
+`process.stdin(Stdin, n + 1)`: there is no source for them beside that.
+The core had `stdout(n)`, `stderr(n)` and `stdinLines(n)` before this
+extension; they are gone, and so is the one difference between them, a
+`stdinLines` that failed with what the system reported where a failed read
+through a binding is `error.ReadFailed`.
 
 ### The exit status
 

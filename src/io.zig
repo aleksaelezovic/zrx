@@ -1,20 +1,19 @@
-//! Basic byte and line I/O on top of `std.Io`.
+//! Text in and out of a pipe, on top of `std.Io.Reader` and `std.Io.Writer`.
 //!
 //! Writers and readers are ordinary dependencies. A *role* is the type they
 //! are keyed by: `*std.Io.Writer` itself, or a struct with a single
 //! `writer: *std.Io.Writer` field (`reader: *std.Io.Reader` for input) when a
 //! program has more than one. Print flushes the writer it uses.
+//!
+//! Nothing here opens anything: where a reader or a writer comes from is a
+//! binding. The standard streams are `zrx.ext.process`'s and files are
+//! `zrx.ext.fs`'s.
 const std = @import("std");
 const Io = std.Io;
 const di = @import("di.zig");
 const core = @import("pipe.zig");
 const Flow = core.Flow;
 const End = core.End;
-
-/// The role provided by `stdout(n)`.
-pub const Stdout = struct { writer: *Io.Writer };
-/// The role provided by `stderr(n)`.
-pub const Stderr = struct { writer: *Io.Writer };
 
 fn isRole(comptime Role: type, comptime field_name: []const u8, comptime Interface: type) bool {
     if (Role == *Interface) return true;
@@ -97,140 +96,9 @@ fn Text(comptime who: []const u8, comptime Role: type, comptime format: []const 
     };
 }
 
-/// Binds a standard-output writer for the duration of a program.
-pub fn stdout(comptime buffer_size: usize) Standard(.stdout, buffer_size) {
-    return .{};
-}
-
-/// Binds a standard-error writer for the duration of a program.
-pub fn stderr(comptime buffer_size: usize) Standard(.stderr, buffer_size) {
-    return .{};
-}
-
-fn Standard(comptime which: enum { stdout, stderr }, comptime buffer_size: usize) type {
-    const Role = switch (which) {
-        .stdout => Stdout,
-        .stderr => Stderr,
-    };
-    return struct {
-        pub const zrx_resource = {};
-        pub const Provides = Role;
-        pub const needs: []const type = &.{Io};
-
-        pub fn bind(_: @This(), env: anytype, next: anytype) !void {
-            var buffer: [buffer_size]u8 = undefined;
-            const file: Io.File = switch (which) {
-                .stdout => .stdout(),
-                .stderr => .stderr(),
-            };
-            var writer = file.writerStreaming(di.get(env, Io), &buffer);
-            return next.call(Role{ .writer = &writer.interface });
-        }
-    };
-}
-
-pub const FileMode = enum {
-    /// Create the file, or empty it if it exists.
-    replace,
-    /// Create the file; `error.PathAlreadyExists` if something is there.
-    create_new,
-    /// Write to a temporary file in the same directory, and give it its name
-    /// once everything this binding wraps has returned without an error and
-    /// the writer is flushed. A failure before publication leaves the
-    /// destination untouched. If the path already exists at publication,
-    /// the run fails with `error.PathAlreadyExists`. With several published
-    /// files, the last one acquired is named first. Any files already published
-    /// stay in place if a later publication fails.
-    publish,
-};
-
-pub const FileWriterOptions = struct {
-    mode: FileMode = .replace,
-};
-
-/// Creates a file and binds its writer for the duration of a program.
-pub fn fileWriter(
-    comptime Role: type,
-    path: []const u8,
-    comptime buffer_size: usize,
-    options: FileWriterOptions,
-) FileWriter(Role, buffer_size) {
-    return .{ .path = path, .options = options };
-}
-
-fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
-    expectWriter("fileWriter", Role);
-    if (Role != *Io.Writer and @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
-        "fileWriter: use `*std.Io.Writer` or a role with a single `writer: *std.Io.Writer` field",
-    );
-    return struct {
-        path: []const u8,
-        options: FileWriterOptions,
-
-        pub const zrx_resource = {};
-        pub const Provides = Role;
-        pub const needs: []const type = &.{Io};
-
-        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
-            const io = di.get(env, Io);
-            var buffer: [buffer_size]u8 = undefined;
-            if (self.options.mode == .publish) {
-                var pending = try Io.Dir.cwd().createFileAtomic(io, self.path, .{});
-                defer pending.deinit(io);
-                var writer = pending.file.writer(io, &buffer);
-                try next.call(roleOf(&writer.interface));
-                try writer.interface.flush();
-                return pending.link(io);
-            }
-            const file = try Io.Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
-            defer file.close(io);
-            var writer = file.writer(io, &buffer);
-            return next.call(roleOf(&writer.interface));
-        }
-
-        fn roleOf(writer: *Io.Writer) Role {
-            return if (Role == *Io.Writer) writer else .{ .writer = writer };
-        }
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
-
-/// Opens the file at `path` and binds its reader as `Role` for the duration
-/// of a program, for `lines(Role, n)` to read. With `lines`, `buffer_size`
-/// must be at least the line limit plus one, for the newline.
-///
-/// A program over `lines(Role, n)` is the same value whether its reader is a
-/// file (this binding) or one a test supplies in its place. A failed read
-/// fails the run with `error.ReadFailed`, as with any reader given to `lines`.
-pub fn fileReader(comptime Role: type, path: []const u8, comptime buffer_size: usize) FileReader(Role, buffer_size) {
-    return .{ .path = path };
-}
-
-fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
-    expectReader("fileReader", Role);
-    if (Role != *Io.Reader and @typeInfo(Role).@"struct".field_names.len != 1) @compileError(
-        "fileReader: use `*std.Io.Reader` or a role with a single `reader: *std.Io.Reader` field",
-    );
-    return struct {
-        path: []const u8,
-
-        pub const zrx_resource = {};
-        pub const Provides = Role;
-        pub const needs: []const type = &.{Io};
-
-        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
-            const io = di.get(env, Io);
-            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
-            defer file.close(io);
-            var buffer: [buffer_size]u8 = undefined;
-            var reader = file.reader(io, &buffer);
-            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
-        }
-    };
-}
 
 /// A line with its bytes stored inline, without the newline. Also serves as
 /// owned text of bounded length: `Line(32).from(name)`.
@@ -300,15 +168,6 @@ fn Lines(comptime Role: type, comptime max_line_bytes: usize) type {
     };
 }
 
-/// `std.Io.File.Reader` reports a failed read as `error.ReadFailed` and keeps
-/// what the system said. This gives a read that just failed on `reader` that
-/// cause. Use it where the read happens: further from it, a `ReadFailed` may
-/// be another reader's, which is why `fileReader` does not translate.
-fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.File.Reader.Error) {
-    if (@as(anyerror, err) == error.ReadFailed) if (reader.err) |cause| return cause;
-    return err;
-}
-
 fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) !void {
     while (true) {
         const buffered_line = reader.peekDelimiterInclusive('\n') catch |err| switch (err) {
@@ -324,91 +183,4 @@ fn pushLines(comptime max_line_bytes: usize, reader: *Io.Reader, down: anytype) 
         reader.toss(buffered_line.len);
         if (try down.push(line) == .done) return;
     }
-}
-
-/// The lines of standard input. A line may be at most `max_line_bytes` long,
-/// not counting its `\n`; a longer one fails the run with
-/// `error.StreamTooLong`. Needs `std.Io`.
-pub fn stdinLines(comptime max_line_bytes: usize) StdinLines(max_line_bytes) {
-    return .{};
-}
-
-fn StdinLines(comptime max_line_bytes: usize) type {
-    return struct {
-        pub const zrx_source = {};
-        pub const Item = Line(max_line_bytes);
-
-        pub fn run(_: *const @This(), env: anytype, down: anytype) !void {
-            comptime expectProvided("stdinLines", @TypeOf(env), Io);
-            // Room for the longest line and the newline that ends it.
-            var buffer: [max_line_bytes + 1]u8 = undefined;
-            var reader = Io.File.stdin().readerStreaming(di.get(env, Io), &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
-        }
-    };
-}
-
-/// The lines of the file at `path`, opened when the program runs and closed
-/// when it ends. A line may be at most `max_line_bytes` long, not counting
-/// its `\n`; a longer one fails the run with `error.StreamTooLong`. Needs `std.Io`.
-pub fn fileLines(path: []const u8, comptime max_line_bytes: usize) FileLines(max_line_bytes) {
-    return .{ .path = path };
-}
-
-fn FileLines(comptime max_line_bytes: usize) type {
-    return struct {
-        path: []const u8,
-
-        pub const zrx_source = {};
-        pub const Item = Line(max_line_bytes);
-
-        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
-            comptime expectProvided("fileLines", @TypeOf(env), Io);
-            const io = di.get(env, Io);
-            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
-            defer file.close(io);
-            // Room for the longest line and the newline that ends it.
-            var buffer: [max_line_bytes + 1]u8 = undefined;
-            var reader = file.reader(io, &buffer);
-            return pushLines(max_line_bytes, &reader.interface, down) catch |err| readCause(&reader, err);
-        }
-    };
-}
-
-/// The bytes of the file at `path`, at most `max_bytes` at a time, opened
-/// when the source runs and closed when it ends. An item is a slice into
-/// the source's own buffer: it is valid until the push that carries it
-/// returns, so a stage that keeps bytes copies them. A failed read fails
-/// the run with the error the system reported. Needs `std.Io`.
-pub fn fileBytes(path: []const u8, comptime max_bytes: usize) FileBytes(max_bytes) {
-    return .{ .path = path };
-}
-
-/// The type of `fileBytes(path, max_bytes)`, for a handler that returns one.
-pub fn FileBytes(comptime max_bytes: usize) type {
-    if (max_bytes == 0) @compileError("fileBytes: needs room for at least one byte at a time; pass a positive comptime size such as `fileBytes(path, 4096)`");
-    return struct {
-        path: []const u8,
-
-        pub const zrx_source = {};
-        pub const Item = []const u8;
-
-        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
-            comptime expectProvided("fileBytes", @TypeOf(env), Io);
-            const io = di.get(env, Io);
-            const file = try Io.Dir.cwd().openFile(io, self.path, .{});
-            defer file.close(io);
-            var buffer: [max_bytes]u8 = undefined;
-            var reader = file.reader(io, &buffer);
-            while (true) {
-                const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
-                    error.EndOfStream => return,
-                    // The reader keeps what went wrong to itself.
-                    error.ReadFailed => return reader.err orelse err,
-                };
-                if (try down.push(bytes) == .done) return;
-                reader.interface.toss(bytes.len);
-            }
-        }
-    };
 }

@@ -1,7 +1,8 @@
-# Spec: directories
+# Spec: files and directories
 
-Status: implemented as `zrx.ext.fs` (`src/ext/fs.zig`), in a first version
-of two sources, `entries(path, n)` and `walk(path, n, depth)`. That nothing
+Status: implemented as `zrx.ext.fs` (`src/ext/fs.zig`): two sources of a
+directory, `entries(path, n)` and `walk(path, n, depth)`, and the bindings
+and sources of a file that the core had before (see [Files](#files)). That nothing
 here allocates is the owner's decision. Everything else in this file is a
 proposal until the owner has reviewed it.
 
@@ -21,6 +22,37 @@ Neither source can be written with what was there. `fromIterator` takes an
 iterator whose `next` has no arguments, and `std.Io.Dir.Iterator.next` takes
 an `Io`; and the names it returns are borrowed. `fromProducer` could hold
 the loop by hand, which is what the extension is there to replace.
+
+## Files
+
+`fileReader`, `fileWriter`, `fileLines` and `fileBytes` (with `FileMode`,
+`FileWriterOptions` and `FileBytes`) were in the core, in `src/io.zig`.
+They moved here unchanged in the change that moved the examples and apps
+onto the extensions, with the standard streams, which went to
+`zrx.ext.process`.
+
+- The core now opens nothing. `src/io.zig` is `print`, `write`, `lines`
+  and `Line`, over a `std.Io.Reader` or a `std.Io.Writer` somebody else
+  made. That the core compiles freestanding held before because nothing
+  referenced the file code there; now there is none to reference.
+- It is a move and not a rename. `fs.reader` and `fs.lines` were
+  considered: a program writes these names without the prefix, after an
+  alias at its top, and there `fileLines(path, n)` says what `lines` of a
+  path would not, beside the core's `lines(Role, n)`.
+- `fileLines` is the core's `lines` over the reader it opens: it runs
+  `lines(*std.Io.Reader, n)` with that reader as its environment. So the
+  rule for what a line is stays in one place, and the extension uses
+  nothing of the core that a caller could not.
+- What the system reported for a failed read is still what `fileLines`
+  and `fileBytes` fail with, since they own their reader; `fileReader`
+  does not translate, for the reason given in the source.
+- Not changed, and open: `fileLines` and `fileBytes` borrow their path,
+  where `entries` and `walk` copy theirs. So neither may be made from a
+  path inside an item in the `source_of` of an `each`, such as an entry
+  of a walk. Holding a copy needs a bound for the path, which is one more
+  parameter on both; that is a decision of its own.
+- The tests of these four are still in `tests/io.zig`, with the tests of
+  `lines`, `print` and `write` they share helpers with.
 
 ## How the directory is given
 

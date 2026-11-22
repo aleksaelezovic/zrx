@@ -17,8 +17,8 @@ const forEach = zrx.forEach;
 const print = zrx.print;
 const recover = zrx.recover;
 const rescue = zrx.rescue;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
 const process = zrx.ext.process;
 
 const Stdin = process.Stdin;
@@ -308,10 +308,10 @@ test "the arguments of a process are a source as they are" {
 // ---------------------------------------------------------------------------
 
 test "the roles of the streams are the ones the core names" {
-    // Until `zrx.Stdout` and `zrx.Stderr` leave the core there are two
+    // Until `zrx.ext.process.Stdout` and `zrx.ext.process.Stderr` leave the core there are two
     // names, and one type behind them.
-    try std.testing.expect(process.Stdout == zrx.Stdout);
-    try std.testing.expect(process.Stderr == zrx.Stderr);
+    try std.testing.expect(process.Stdout == zrx.ext.process.Stdout);
+    try std.testing.expect(process.Stderr == zrx.ext.process.Stderr);
 }
 
 /// An `Io` whose standard streams are memory: what is read from standard
@@ -548,7 +548,7 @@ test "fail takes by name the many errors of a run that opens files" {
     const path = try tmpPath(&path_bytes, &tmp, "taken");
 
     var exit: process.Exit = .{};
-    const copy = program(zrx.fileLines(path, 8), .{zrx.print(Output, "{f}\n")});
+    const copy = program(zrx.ext.fs.fileLines(path, 8), .{zrx.print(Output, "{f}\n")});
     copy.run(.{
         io,
         &exit,
