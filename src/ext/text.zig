@@ -15,10 +15,13 @@
 //!
 //! What each is put to, and what it gives back, follows from where the bytes
 //! are. A `[]const u8` points at bytes that stay where they are, so a part
-//! of it is a slice of the same bytes. A `Line` holds its bytes, and a
-//! handler is given a copy of its item that is gone when it returns, so what
-//! is made of a line is a line. Changing bytes needs bytes of one's own:
-//! the case of a `[]const u8` is not converted, a line's is.
+//! of it is a slice of the same bytes. A `Line` is a value that holds its
+//! bytes, and a handler is given its item by value, so a piece of a line's
+//! text lives no longer than the call: what is made of a line is a line.
+//! Changing bytes needs bytes of one's own: the case of a `[]const u8` is
+//! not converted, a line's is.
+//!
+//! `docs/spec-text.md` is the design record.
 //!
 //! Bytes only: the classes and the case are ASCII's, and a byte that is not
 //! ASCII is left as it is.
@@ -86,8 +89,8 @@ const Side = enum { both, start, end };
 /// `map(text.trim(" \t"))`, or `map(text.trim(text.whitespace))`.
 ///
 /// Put to a `[]const u8` it answers a slice of the same bytes. Put to a
-/// `Line(n)` it answers a `Line(n)`: a line holds its bytes, and the copy a
-/// handler is given is gone when it returns.
+/// `Line(n)` it answers a `Line(n)`: a handler is given its item by value,
+/// and a piece of a line's text lives no longer than the call.
 pub fn trim(comptime strip: []const u8) type {
     return Trim("trim", .both, strip);
 }
@@ -113,9 +116,14 @@ fn Trim(comptime who: []const u8, comptime side: Side, comptime strip: []const u
 
         pub fn call(_: anytype, args: anytype) Trimmed(di.types(@TypeOf(args))) {
             if (comptime isText(@TypeOf(args[0]))) return kept(args[0]);
-            // What is kept points into the copy this handler was given. It
-            // is no longer than the line it is a part of, so it fits.
-            return @TypeOf(args[0]).from(kept(args[0].text())) catch unreachable;
+            // What is kept points into the line this handler was given by
+            // value, and is no longer than that line, so it fits a new one.
+            // Made here and not by `from`, which would ask whether it fits:
+            // that is a branch never taken and two more copies of the line.
+            const part = kept(args[0].text());
+            var line: @TypeOf(args[0]) = .{ .bytes = undefined, .len = part.len };
+            @memcpy(line.bytes[0..part.len], part);
+            return line;
         }
 
         fn kept(whole: []const u8) []const u8 {
@@ -168,7 +176,7 @@ fn Case(comptime who: []const u8, comptime letters: Letters) type {
         }
 
         pub fn call(_: anytype, args: anytype) Converted(di.types(@TypeOf(args))) {
-            // The copy this handler was given is its own to change.
+            // The handler was given the line by value: it is its own to change.
             var line = args[0];
             for (line.bytes[0..line.len]) |*byte| byte.* = switch (letters) {
                 .upper => std.ascii.toUpper(byte.*),
@@ -202,9 +210,9 @@ const Division = enum { split, tokenize };
 ///
 /// The item is a `[]const u8`, or a value that reads its text with
 /// `text()`, as a `Line` does. A piece is a `[]const u8` that points into
-/// the item: for a `[]const u8` into its bytes, for a value into the copy
-/// that `each` holds while it works on that item. Either way it is there
-/// for the push of that item and no longer.
+/// the item: for a `[]const u8` into its bytes, for a value into the value
+/// as `each` holds it while it works on that item. A piece of a value
+/// lives no longer than the push of that item.
 pub fn split(comptime delimiter: []const u8) type {
     if (delimiter.len == 0) @compileError("split: an empty delimiter separates nothing; name what stands between two pieces, as in `text.split(\",\")`");
     return Divide("split", .split, delimiter);
@@ -230,8 +238,9 @@ fn Divide(comptime who: []const u8, comptime division: Division, comptime delimi
             return &.{};
         }
 
-        /// The source keeps the item itself, not a slice of it: of a value
-        /// this handler has only a copy, which is gone when it returns.
+        /// The source keeps the item itself, not a slice of it: a handler
+        /// is given a value by value, and a slice of that lives no longer
+        /// than this call.
         pub fn call(_: anytype, args: anytype) Pieces(Held(di.types(@TypeOf(args))), division, delimiter) {
             return .{ .whole = args[0] };
         }

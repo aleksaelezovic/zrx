@@ -1155,22 +1155,31 @@ pub fn rowsTrimmed(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
     } else {
         var sum: u64 = 0;
         for (rows) |*each| {
-            // A handler is given its item as a value, in a tuple of its data.
-            const given: struct { Row } = .{each.*};
-            const trimmed = Row.from(std.mem.trim(u8, given[0].text(), " \t")) catch unreachable;
+            // An item reaches a stage as a value: see `lean_text_trim_line`.
+            const row = each.*;
+            const kept = std.mem.trim(u8, row.text(), " \t");
+            var trimmed: Row = .{ .bytes = undefined, .len = kept.len };
+            @memcpy(trimmed.bytes[0..kept.len], kept);
             for (trimmed.text()) |byte| sum +%= byte;
         }
         out.* = sum;
     }
 }
 
+/// `lean`, not `same`, and not for a loop of another shape: the two have
+/// the same loops, and differ in one instruction on either target (66 to
+/// 65 on aarch64, 127 to 126 on x86_64). The pipe marks where a stack
+/// slot begins and ends, which the loop by hand does not, and the loop by
+/// hand has one store of a zero that the pipe has not.
+///
 /// The loop by hand copies each row before it reads it, which nobody would
-/// write: see `lean_pattern_line`. A handler is given its item as a value,
-/// and for a line that is a copy the optimizer does not take out. It is in
-/// both loops, as the tuple the handler's data is passed in, so that what
-/// is compared is the trimming: making a line of what is kept is the same
-/// code as `Row.from` by hand.
-export fn same_text_trim_line(ptr: [*]const Row, len: usize, out: *u64) void {
+/// write: see `lean_pattern_line`. An item goes from stage to stage as a
+/// value, and in this pipe the optimizer does not take that copy out. It
+/// is in both loops so that what is compared is the trimming. Measured on
+/// both sides, for this pipe and both targets: the row copied once, and
+/// what is kept copied once into the new line. That is a measurement of
+/// this pipe, not a rule for others.
+export fn lean_text_trim_line(ptr: [*]const Row, len: usize, out: *u64) void {
     rowsTrimmed(exported_with_zrx, ptr[0..len], out);
 }
 
@@ -1191,11 +1200,12 @@ pub fn rowsUpper(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
 }
 
 /// The loop by hand copies each row and converts the copy, where one would
-/// convert the bytes as one reads them: the copy is the one a handler is
-/// given of its item (see `lean_pattern_line`), and the handler converts it
-/// in place. A sink that keeps the row, instead of reading it as this one
-/// does, was measured too: the row is then copied once more than by hand,
-/// for the second handler it is given to.
+/// convert the bytes as one reads them. An item reaches a stage as a value
+/// (see `lean_pattern_line`), and the handler converts the one it was
+/// given: in this pipe that is the row copied once, on both sides. With a
+/// sink that stores the row, where this one reads it, the pipe measured
+/// one copy of the row's bytes and one stack slot more than the loop by
+/// hand (41 instructions to 35 on aarch64). `docs/spec-text.md` has both.
 export fn same_text_upper(ptr: [*]const Row, len: usize, out: *u64) void {
     rowsUpper(exported_with_zrx, ptr[0..len], out);
 }

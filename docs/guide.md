@@ -1405,22 +1405,29 @@ Where the bytes are decides what a handler takes and what it answers.
 
 - A `[]const u8` points at bytes that stay where they are. `trim` answers a
   slice of the same bytes, which lives as long as they do.
-- A [line](#lines-and-values) holds its bytes, and a handler is given a copy
-  of it that is gone when the handler returns. So `trim` put to a `Line(n)`
-  answers a `Line(n)`: a value, which crosses a `queue` like any other.
+- A [line](#lines-and-values) is a value that holds its bytes, a handler is
+  given it by value, and a piece of its text lives no longer than the call.
+  So `trim` put to a `Line(n)` answers a `Line(n)`: what is made of a value
+  is a value, which crosses a `queue` like any other.
 - Changing bytes needs bytes of one's own. `toUpper` and `toLower` are put
   to a line and answer a line. Put to a `[]const u8` they do not compile:
   copy the text into a line first.
+- Where the items are references to lines (`*const Row`), put the handler
+  that yields the text first, as [for a pattern](#lines-and-values):
+  `compose(.{ Row.text, text.trim(" ") })` answers a slice of the line
+  where it is.
 
 ```zig
 /// A name from a slice, in upper case: `error.StreamTooLong` if it is longer.
 const shouted = compose(.{ Name.from, text.toUpper });
 ```
 
-A copy costs what it copies, as [for a pattern](#lines-and-values): a
-`Line(n)` is copied for each handler it is given to. The handlers are
-otherwise the code one writes with `std.mem` by hand, which the fixtures
-`same_text_*` hold them to.
+A copy costs what it copies. [Lines and values](#lines-and-values) has what
+was measured of the copies of a line, pipe by pipe, and that there is no
+rule to give. Two fixtures are further examples, each with a `Line(32)`
+and with its copies on both sides of the comparison: `lean_text_trim_line`
+and `same_text_upper`. Put to a `[]const u8`, nothing is copied:
+`same_text_trim` is the loop over `std.mem.trim`.
 
 ### Pieces
 
@@ -1432,21 +1439,21 @@ is a source, and the sub-pipe runs over its pieces.
   field of the item is reached through it:
   `each(compose(.{ field(.tags), text.tokenize(" ") }), sub)`.
 - A piece is a `[]const u8` that points into the item. For a `[]const u8`
-  item that is its bytes. For a line it is the copy that `each` holds while
-  it works on that line.
-- So a piece of a line is there for the sub-pipe, and for the stages after
-  the `each` that the push of that line still runs through. When that push
-  returns it points at nothing. Nothing checks this: do not send a piece of
-  a line across a task boundary after the `each` (`queue`, `batchWithin`,
-  `debounce`, `concurrent`), and do not keep one in a `batch` or in the
-  state of a `fold` there. A boundary *inside* the sub-pipe is a compile
-  error, as for any `each`.
+  item that is its bytes, and the piece lives as long as they do. For a
+  line it is the line as `each` holds it while it works on that item.
+- So a piece of a line lives no longer than the push of that line. It is
+  there for the sub-pipe, and for the stages after the `each` that the push
+  still runs through. Like a piece of [`fileBytes`](#input-and-output), it
+  is not to be sent across a task boundary after the `each` (`queue`,
+  `batchWithin`, `debounce`, `concurrent`), nor kept in a `batch` or in
+  the state of a `fold` there. Nothing checks this. A boundary *inside*
+  the sub-pipe is a compile error, as for any `each`.
 - Make a value of what has to stay: a copy (`map(Name.from)`), a number, or
   a `fold` in the sub-pipe that puts the columns into a struct, as `Entry`
   above.
 - What goes on after the `each` is a `Tagged(Item, T)`, the line with what
-  the sub-pipe emitted. For a `Line(n)` that is `n` bytes carried with every
-  value; `map(field(.item))` drops them.
+  the sub-pipe emitted: a `Line(n)` goes along with every value, until
+  `map(field(.item))` leaves it behind.
 
 ### What is not here
 
@@ -1466,7 +1473,7 @@ Whether a text *ends* with some text, or holds it somewhere, is neither: a
 `repeat` gives nothing back, so `seq(.{ repeat(byte, .{}), ".zig" })` does
 not compile, and finding the places a pattern matches inside a text is not
 there. Until one of the two is decided, that test is a handler of your own
-over `std.mem.endsWith`.
+over `std.mem.endsWith`. [The design record](spec-text.md) has the reasons.
 
 Also not here: Unicode, in the classes or the case; a delimiter chosen while
 the program runs (write a `source_of` of your own for it); and the other
@@ -1902,10 +1909,10 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
+Every synchronous operator has a fixture, and so has `rescue`. Twenty-eight are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
-whose path has stages of its own and the text patterns are `lean`, each with
-the reason next to it.
+whose path has stages of its own, the text patterns and `trim` put to a line
+are `lean`, each with the reason next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the

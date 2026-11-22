@@ -122,6 +122,19 @@ test "a trimmed []const u8 goes on down the pipe as it is" {
     try expectTexts(&.{ "a", "b", "" }, &seen);
 }
 
+test "a line reached by reference is trimmed where it is: Row.text goes first" {
+    const rows = [_]Row{ row("  ab "), row("c") };
+    const references = [_]*const Row{ &rows[0], &rows[1] };
+    var seen: Texts = .{};
+    program(fromSlice(&references), .{
+        map(compose(.{ Row.text, text.trim(" ") })),
+        forEach(support.record([]const u8)),
+    }).run(.{&seen});
+    try expectTexts(&.{ "ab", "c" }, &seen);
+    // A slice of the row itself, not of a copy of it.
+    try std.testing.expectEqual(@as([*]const u8, &rows[0].bytes) + 2, seen.items[0].ptr);
+}
+
 // --- ASCII case ------------------------------------------------------------------
 
 test "toUpper and toLower convert the ASCII letters and leave every other byte" {
@@ -376,6 +389,19 @@ test "a piece is text like any other: a pattern is put to it" {
     try seen.expect(&.{ 2, 0, 3 });
 }
 
+test "the pieces of a line reached by reference point into that line" {
+    const rows = [_]Row{ row("ab,c"), row("d") };
+    const references = [_]*const Row{ &rows[0], &rows[1] };
+    var seen: Texts = .{};
+    program(fromSlice(&references), .{
+        each(compose(.{ Row.text, text.split(",") }), .{skip(0)}),
+        map(field(.item)),
+        forEach(support.record([]const u8)),
+    }).run(.{&seen});
+    try expectTexts(&.{ "ab", "c", "d" }, &seen);
+    try std.testing.expectEqual(@as([*]const u8, &rows[0].bytes) + 3, seen.items[1].ptr);
+}
+
 // --- what the guide shows --------------------------------------------------------
 
 const Name = zrx.Line(8);
@@ -445,6 +471,20 @@ test "the guide's example: a line becomes a record column by column, and says wh
 }
 
 // --- what is a pattern already ---------------------------------------------------
+
+test "a suffix is a pattern only after bytes that cannot be in it" {
+    // `seq(.{ repeat(byte, .{}), ".zig" })` does not compile: the `repeat`
+    // would take the suffix too. This one ends before the dot.
+    const zig_file = pattern.seq(.{ pattern.repeat(pattern.except(pattern.set(".")), .{}), ".zig" });
+    const wholes = [_][]const u8{ "a.zig", ".zig", "a.zig.zig", "a.b.zig", "a.zi", "zig" };
+    var seen: Texts = .{};
+    program(fromSlice(&wholes), .{
+        filter(zig_file),
+        forEach(support.record([]const u8)),
+    }).run(.{&seen});
+    // A name with a dot of its own ends in `.zig` and is not described.
+    try expectTexts(&.{ "a.zig", ".zig" }, &seen);
+}
 
 test "a text that starts with some text, or is it, is a pattern" {
     const starts = pattern.seq(.{ "ab", pattern.repeat(pattern.byte, .{}) });
