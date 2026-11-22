@@ -344,6 +344,35 @@ to this file; edit `AGENTS.md`, not copies.
     read: chunked request bodies return by decision.
   - Parsing stays `std.http.Server`'s. HTTP imports nothing of the
     pattern extension and has no router of its own; do not give it one.
+- **A directory is a source, named by its path.** `src/ext/fs.zig`
+  (`zrx.ext.fs`) holds two sources, `entries` and `walk`, written against
+  the source contract alone.
+  [docs/spec-fs.md](docs/spec-fs.md) is its design record: the reasons and
+  what was rejected. Read it before changing the extension. The rules it
+  gives:
+  - The directory is given by path, as for `fileLines`, not by a role. A
+    source holds a copy of its path, so one may be made from an entry
+    inside the `source_of` of an `each`.
+  - An item holds its path inline (`Entry(n)`), beginning with the
+    directory's as it was given. What does not fit fails the run with
+    `error.PathTooLong`.
+  - Every directory that was opened is closed on every way out. Do not
+    use `std`'s `Walker`: its `deinit` leaves them open.
+  - Depth is allocated, never the call stack; nothing is allocated for an
+    entry. A directory is pushed before it is opened.
+  - A kind the listing left `.unknown` is asked for. Links are never
+    followed, also not one put in a directory's place since it was listed.
+  - What cannot be opened or read fails the run: it is the source's
+    failure and belongs to no item. An error path takes one directory
+    when the directory is an item (`each` under `attempt`). Do not carry
+    a failure in the item to go on past it.
+  - Both sources ask for `zrx.Stop` and look at it before each read.
+  - Tests depend neither on the order of a listing nor on permissions:
+    the test `Io` in `tests/fs.zig` stands in for what is not at hand.
+  - No zero-overhead fixture and no claim of zero overhead.
+  - Not there, and back only by decision: watching, globbing, following
+    links, sorting, metadata beyond the kind, going on past an
+    unreadable directory within one walk.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
