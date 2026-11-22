@@ -172,40 +172,27 @@ to this file; edit `AGENTS.md`, not copies.
   `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a boundary in a sub-pipe. A rejoining route case cannot contain a boundary.
-- **Time is an extension without a task.** `src/ext/time.zig`, exported as
-  `zrx.ext.time` and analyzed only when referenced, holds a source
-  (`ticks`), a handler (`stamp`) and a synchronous operator (`throttle`),
-  each written against its public contract. What tells it from the core's
-  `debounce` and `batchWithin` is that nothing here keeps an item or starts
-  a task: an operator that has to emit while its input is silent is a
-  boundary and belongs with those. `timeout`, `delay` and `sample` are not
-  there for that reason; they return with stopping from outside or by
-  decision, and the stage contract does not grow for them. The choices that
-  follow are the first draft's and are proposals until reviewed. `ticks`
-  pushes the count and not the time, since the time is `map(stamp(clock))`
-  and there is one spelling; its times are fixed when it starts, and a tick
-  whose time has passed when the pipe gets back is skipped, so a slow pipe
-  is never handed a burst and the missing number shows the skip. `stamp` is
-  always called with its clock, as `json.encode` is with its options, and
-  emits a `Stamped(T)` of its own: the field of a `Tagged` says `source`.
-  `throttle` is the leading edge only; one that emits the last item is
-  `debounce`'s kind. `ticks` waits on `Stop.waitTimeout`, the one addition
-  outside the extension (`src/completion.zig`): a timed wait on the run's
-  stop signal cannot be composed from `stop.wait` without two tasks for
-  every tick, and reading `stop.signal` in the extension would be writing
-  against the representation. A wake is not the deadline:
-  `std.Io.Event.waitTimeout` reports any wake that did not set the event as
-  a timeout, so the source looks at the clock again. A stage's state is
-  reached through a pointer, and there Zig keeps an `i96` extended to 128
-  bits: with the 96-bit nanoseconds of `std.Io`, `throttle` measured one
-  `sext` more than the loop by hand and compared in 128 bits. It keeps 64
-  (`Nanoseconds`) and is `same`; keep a stage's state in integers the size
-  of a register. The `stamp` fixture builds its pair through a function by
-  hand too: written in place, the stack slot the clock answers into is
-  declared `%Io.Timestamp` on one side and `[16 x i8]` on the other, which
-  the tool rightly does not equate. Tests move time with
-  `zrx.testing.Clock`: `waitingAt` for the source, and a `tap` that sets
-  the clock for the synchronous two, which run on the test's own task.
+- **Time is an extension without a task.** `src/ext/time.zig`
+  (`zrx.ext.time`) holds a source (`ticks`), a handler (`stamp`) and a
+  synchronous operator (`throttle`), each written against its public
+  contract. [docs/spec-time.md](docs/spec-time.md) is its design record:
+  the reasons, what was rejected and what was measured, and the choices
+  that are proposals until the owner decides. Read it before changing the
+  extension. The rules it gives:
+  - Nothing here keeps an item or starts a task. An operator that has to
+    emit while its input is silent is a boundary and belongs with
+    `debounce` and `batchWithin`.
+  - `ticks` pushes the count; the time is `map(time.stamp(clock))`. A
+    late tick is skipped, not caught up.
+  - `ticks` waits on `Stop.waitTimeout`, the one addition outside the
+    extension, and not with `sleep`. A wake is not the deadline: look at
+    the stop and the clock again.
+  - `stamp` is always called with its clock.
+  - Keep a stage's state in integers the size of a register: `throttle`
+    keeps 64 bits of nanoseconds, not the 96 of `std.Io`.
+  - Not there, and back only with stopping from outside or by decision:
+    `timeout`, `delay`, `sample`, a throttle that emits the last item.
+    The stage contract does not grow for them.
 - **Concurrent worker pipes are synchronous.** `concurrent(n, sub)` gives
   each worker its own pipe state and serializes pushes into the continuation.
   The boundary registers workers through `Tasks` and `tasks` in the existing

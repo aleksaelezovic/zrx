@@ -968,7 +968,8 @@ dependencies and `clock.advanceTo` in the handler.
 `same_time_throttle`): the same instructions as a loop by hand that reads
 the same clock. Reading the clock is a call through the `std.Io` in both.
 `throttle` keeps the end of its window in 64 bits of nanoseconds, good for
-292 years of a clock that starts with the system.
+292 years of a clock that starts with the system. The reasons, and what was
+measured, are in [the time spec](spec-time.md).
 
 ### Not here
 
