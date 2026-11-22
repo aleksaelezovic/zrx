@@ -189,6 +189,85 @@ test "a custom composite handler forwards dependencies" {
     try seen.expect(&.{ 0, 1, 2 });
 }
 
+// --- a composite reducer that says what it accumulates ---------------------------
+
+/// The items added up, in their own type unless the seed names another.
+const total = struct {
+    pub const zrx_handler = {};
+
+    pub fn State(comptime Item: type) type {
+        return Item;
+    }
+
+    pub fn requires(comptime _: usize) []const type {
+        return &.{};
+    }
+
+    pub fn call(_: anytype, args: anytype) @TypeOf(args[0]) {
+        return args[0] + args[1];
+    }
+};
+
+/// How many items there were, whatever they are.
+const howMany = struct {
+    pub const zrx_handler = {};
+
+    pub fn State(comptime _: type) type {
+        return usize;
+    }
+
+    pub fn requires(comptime _: usize) []const type {
+        return &.{};
+    }
+
+    pub fn call(_: anytype, args: anytype) @TypeOf(args[0]) {
+        return args[0] + 1;
+    }
+};
+
+const Wide = support.Recorder(u64);
+const Sizes = support.Recorder(usize);
+const Halves = support.Recorder(f32);
+
+fn halved(value: u32) f32 {
+    return @as(f32, @floatFromInt(value)) / 2;
+}
+
+test "a seed without a type takes the state its reducer declares for the items" {
+    // Each recorder takes one type only: what is emitted is checked by the compiler.
+    var seen: Numbers = .{};
+    try support.run(program(range(u32, 1, 5), .{ zrx.fold(0, total), forEach(record) }), .{&seen});
+    try support.run(program(range(u32, 1, 4), .{ zrx.scan(10, total), forEach(record) }), .{&seen});
+    const rows = [_][3]u32{ .{ 1, 2, 3 }, .{ 10, 20, 30 } };
+    try support.run(program(zrx.fromSlice(&rows), .{ map(zrx.reduce(100, total)), forEach(record) }), .{&seen});
+    try seen.expect(&.{ 10, 11, 13, 16, 106, 160 });
+
+    // The state need not be the item's type: that is why the reducer says it.
+    var sizes: Sizes = .{};
+    try support.run(program(range(u32, 5, 8), .{ zrx.fold(0, howMany), forEach(support.record(usize)) }), .{&sizes});
+    try support.run(program(zrx.fromSlice(&rows), .{ map(zrx.reduce(0, howMany)), forEach(support.record(usize)) }), .{&sizes});
+    try sizes.expect(&.{ 3, 3, 3 });
+
+    // A number without a type is whatever the state is: a float here.
+    var halves: Halves = .{};
+    try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(0.25, total), forEach(support.record(f32)) }), .{&halves});
+    try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(1, total), forEach(support.record(f32)) }), .{&halves});
+    // It is rounded to the state as a literal of that type is.
+    try support.run(program(range(u32, 1, 4), .{ map(halved), zrx.fold(0.1, total), forEach(support.record(f32)) }), .{&halves});
+    try halves.expect(&.{ 3.25, 4, ((@as(f32, 0.1) + 0.5) + 1) + 1.5 });
+}
+
+test "a seed with a type is the state, whatever the reducer would have chosen" {
+    var wide: Wide = .{};
+    const large = [_]u32{ std.math.maxInt(u32), 1 };
+    try support.run(program(zrx.fromSlice(&large), .{ zrx.fold(@as(u64, 0), total), forEach(support.record(u64)) }), .{&wide});
+    try support.run(program(zrx.fromSlice(&large), .{ zrx.scan(@as(u64, 1), total), forEach(support.record(u64)) }), .{&wide});
+    const rows = [_][2]u32{large};
+    try support.run(program(zrx.fromSlice(&rows), .{ map(zrx.reduce(@as(u64, 2), total)), forEach(support.record(u64)) }), .{&wide});
+    try support.run(program(range(u32, 5, 8), .{ zrx.fold(@as(u64, 0), howMany), forEach(support.record(u64)) }), .{&wide});
+    try wide.expect(&.{ 1 << 32, 1 << 32, (1 << 32) + 1, (1 << 32) + 2, 3 });
+}
+
 // --- a binding ------------------------------------------------------------------
 
 const Tally = struct { count: u32 = 0 };

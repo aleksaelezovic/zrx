@@ -408,3 +408,89 @@ test "attemptedCapped" {
     try std.testing.expect(!cases.attemptedCapped(true, inputs[3], &untouched));
     try std.testing.expectEqual(@as(u64, 99), untouched);
 }
+
+test "mathChanged, mathReduced" {
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.mathChanged(true, items, &with);
+        cases.mathChanged(false, items, &without);
+        try std.testing.expectEqual(without, with);
+
+        const Reduced = struct { count: usize = 99, low: u32 = 99, high: u32 = 99, product: u64 = 99, sum: u64 = 99 };
+        var reduced: Reduced = .{};
+        var by_hand: Reduced = .{ .count = 98 };
+        cases.mathReduced(true, items, &reduced.count, &reduced.low, &reduced.high, &reduced.product, &reduced.sum);
+        cases.mathReduced(false, items, &by_hand.count, &by_hand.low, &by_hand.high, &by_hand.product, &by_hand.sum);
+        try std.testing.expectEqual(by_hand, reduced);
+    }
+}
+
+test "mathSigned, mathDistance" {
+    const signed = [_][]const i32{
+        &.{},
+        &.{-7},
+        &.{ -20, -3, -1, 0, 1, 2, 3, 100, -100, std.math.maxInt(i32), std.math.minInt(i32) },
+    };
+    for (signed) |items| {
+        var with: i64 = 99;
+        var without: i64 = 98;
+        cases.mathSigned(true, items, &with);
+        cases.mathSigned(false, items, &without);
+        try std.testing.expectEqual(without, with);
+
+        var far: u64 = 99;
+        var far_by_hand: u64 = 98;
+        cases.mathDistance(true, items, &far);
+        cases.mathDistance(false, items, &far_by_hand);
+        try std.testing.expectEqual(far_by_hand, far);
+    }
+}
+
+test "mathFloats" {
+    const floats = [_][]const f64{ &.{}, &.{0.5}, &.{ -3, 0, 1.25, 7.5, 1e3, -1e-3 } };
+    for (floats) |items| {
+        var with: f64 = 99;
+        var without: f64 = 98;
+        cases.mathFloats(true, items, &with);
+        cases.mathFloats(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "mathPlaced" {
+    const rows = [_][4]u32{ .{ 1, 6, 7, 2 }, .{ 0, 0, 0, 0 }, .{ 100, 5, 6, 1000 } };
+    for ([_][]const [4]u32{ &.{}, rows[0..1], &rows }) |some| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.mathPlaced(true, some, &with);
+        cases.mathPlaced(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}
+
+test "mathChecked" {
+    // The last input holds a value whose square does not fit: both variants
+    // fail there and leave the result as it was.
+    for (inputs) |items| {
+        var with: u32 = 99;
+        var without: u32 = 99;
+        const passed = cases.mathChecked(false, items, &without);
+        try std.testing.expectEqual(passed, cases.mathChecked(true, items, &with));
+        try std.testing.expectEqual(without, with);
+    }
+    var untouched: u32 = 99;
+    try std.testing.expect(!cases.mathChecked(true, inputs[3], &untouched));
+    try std.testing.expectEqual(@as(u32, 99), untouched);
+    try std.testing.expect(cases.mathChecked(true, inputs[2], &untouched));
+}
+
+test "mathMeasured" {
+    for (inputs) |items| {
+        var with: cases.Measured = .{ .count = 99 };
+        var without: cases.Measured = .{ .count = 98 };
+        cases.mathMeasured(true, items, &with);
+        cases.mathMeasured(false, items, &without);
+        try std.testing.expectEqual(without, with);
+    }
+}

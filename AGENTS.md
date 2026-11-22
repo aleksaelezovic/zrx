@@ -71,6 +71,20 @@ to this file; edit `AGENTS.md`, not copies.
   dependencies, trailing parameters are the operator's data and may be
   `anytype`. Composite handlers (`all`, `compose`, ...) are struct types that
   forward their children's requirements. No closures, no runtime function pointers.
+- **A seed that has a type is the state; a number without one asks the
+  reducer.** `scan`, `fold` and `reduce` take the type of the state from
+  the parameter a reducer function declares, else from the seed. A
+  `comptime_int` or `comptime_float` seed has none to give, and then a
+  composite reducer says it with `State(Item) type`: `fold(0, sum)`
+  accumulates in the item's type, `fold(0, count)` in a `usize`, and
+  `fold(@as(u64, 0), sum)` in a `u64` whatever is declared. `State` and
+  `Inferred` in `src/ops/transform.zig` are the one place that reads a
+  seed, for all three; `src/di.zig` knows nothing of it. A reducer that
+  declares nothing is a compile error that says to write `@as(T, seed)`.
+  The rule is decided; `State(Item)` is the shape proposed for it, a
+  decision that awaits the owner's approval, and
+  [docs/spec-math.md](docs/spec-math.md#the-seed) has what else was
+  weighed.
 - **An optional is the answer of a predicate, nowhere else.** Zig says
   "maybe" three ways. `bool` and `E!T` mean something everywhere; `?T` means
   something only where a predicate is asked, and there it means what the
@@ -331,6 +345,34 @@ to this file; edit `AGENTS.md`, not copies.
   - Not there, and back only by decision: a format string read
     backwards, going back, finding the places a pattern matches inside a
     text, a node that only groups extracts.
+- **Math is handlers over `std.math`, and has no operator.**
+  `src/ext/math.zig` (`zrx.ext.math`) is written against the handler
+  contract alone. [docs/spec-math.md](docs/spec-math.md) is its design
+  record: the reasons, what was rejected and what was measured. Read it
+  before changing the extension. The rules it gives:
+  - A transform changes one item and has an operand known at compile
+    time. A reducer takes a state and an item, and one reducer serves
+    `fold`, `scan` and `reduce`: there is no operator that adds up a
+    stream.
+  - The plain forms are the plain operators. Do not make them check, wrap
+    or saturate.
+  - `checked` holds only what can fail, and fails with nothing but
+    `error.Overflow`. Do not add a checked form of what cannot fail
+    (`div`, `mod`, `abs`, `clamp`, `min`, `max`, `count`).
+  - An operand is a value of the items' type, and is judged as that type
+    has it, never as it was written: `1e-10` is 0 for `f16` items.
+    `operand` is the one function that makes an operand a `T`. One that
+    can never work is a compile error.
+  - The mean of `Stats` divides the item and the mean by the count before
+    it subtracts them. Do not put back the update with one division: the
+    difference of two finite items can be infinite.
+  - The seed takes part like an item, and it is what a stream without
+    items comes to. `min` and `max` have no value before the first item
+    only in a state that is an optional, which is then a value: a reducer
+    drops nothing and skips nothing.
+  - Not there, and back only by decision: forms that wrap or saturate, a
+    power that is not a whole number, conversion between integers and
+    floats, vectors, `fold(null, min)`.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -490,6 +532,12 @@ to this file; edit `AGENTS.md`, not copies.
   matches its negation. Say "the same instructions" for a `same_*` fixture,
   not "the same program": wiring is not compared, `behavior.zig` covers
   results. The tool has tests of its own. Do not widen it to make a fixture pass.
+- A fixture that names an error no fixture names yet stands before the
+  first one that names an error (`recover`), not at the end of
+  `cases.zig`. The integer behind an error is given out as the compiler
+  comes to the name, the exported functions at the end of the file first:
+  appended, `same_math_checked` shifted the errors of three older
+  fixtures and with them the form of their comparisons.
 - `queue` costs a real buffer and a task; say so rather than hiding it.
 - An item goes from stage to stage as a value, and whether the optimizer
   takes a copy out depends on the pipe. Give the measurements and no
