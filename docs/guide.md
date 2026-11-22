@@ -1877,6 +1877,175 @@ program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
 The [HTTP benchmark app](../examples/apps/http-bench/README.md) compares this
 with a server written against `std` alone and records what was measured.
 
+## The process
+
+`zrx.ext.process` is the process a program runs in: its three standard
+streams as bindings, and the status `main` returns. It is an extension:
+bindings, a type and two handlers written against the public contract,
+compiled only when a program uses them. Nothing in it allocates, and
+nothing in it ends the process.
+
+```zig
+const process = zrx.ext.process;
+const Stderr = process.Stderr;
+
+const fatal = process.fail(.{ .status = 2, .prefix = "fatal" });
+
+const app = program(lines(Input, max_line), .{
+    recover(error{InvalidRecord}, .{forEach(process.status(1))}),
+    map(parsed),
+    print(Output, "{f}\n"),
+}).provide(.{
+    process.stdout(Output, 4096),
+    rescue(fatal).provide(.{process.stderr(Stderr, 256)}),
+});
+
+pub fn main(init: std.process.Init) u8 {
+    var exit: process.Exit = .{};
+    if (input_path) |path| {
+        app.run(.{ init.io, &exit, fileReader(Input, path, max_line + 1) });
+    } else {
+        app.run(.{ init.io, &exit, process.stdin(Input, max_line + 1) });
+    }
+    return exit.code;
+}
+```
+
+### The standard streams
+
+| | |
+|---|---|
+| `process.stdin(Role, n)` | Binds a reader of standard input as `Role`, buffered by `n` bytes. |
+| `process.stdout(Role, n)` | Binds a writer to standard output as `Role`, buffered by `n` bytes. |
+| `process.stderr(Role, n)` | Binds a writer to standard error as `Role`, buffered by `n` bytes. |
+| `process.Stdin`, `process.Stdout`, `process.Stderr` | The roles the streams usually have: `stdout(Stdout, 4096)`. |
+
+A stream is a binding like a file, and names its
+[role](#input-and-output) first, as `fileReader` and `fileWriter` do. So
+"this file, or standard input" is one program and a choice of binding:
+`app` above reads `lines(Input, max_line)`, and `main` runs it with a
+`fileReader(Input, ...)` or with `process.stdin(Input, ...)`. A program
+that writes with `print(Output, ...)` goes to a file or to standard output
+the same way. A test gives `run` a value of the role, an
+`Input{ .reader = &reader }`, which replaces either.
+
+- The choice is still an `if` around two runs. A binding is a type, so two
+  of them cannot be one value. What is one is the program.
+- With `lines`, the buffer of `stdin` needs room for the longest line and
+  its newline, as with `fileReader`. A read that fails fails the run with
+  `error.ReadFailed`, as with any reader given to `lines`.
+- Nothing is flushed by the binding. `print` and `write` flush what they
+  wrote, and `fail` flushes its line.
+- The buffer is in the binding, for as long as the run lasts. `n` is a
+  comptime size, and `0` is a writer without a buffer.
+- The reader of `stdin` reads ahead, and what it has read past where the
+  pipe stopped goes with the binding. A second run with a `stdin` of its
+  own starts where the first one's reads stopped, not where its pipe did:
+  after a `take(1)`, the next line may be gone in part or whole. Runs that
+  read on from one another share a reader `main` makes, given to each as a
+  value of the role:
+
+```zig
+var buffer: [max_line + 1]u8 = undefined;
+var reader = std.Io.File.stdin().readerStreaming(init.io, &buffer);
+header.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
+body.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
+```
+
+The core has `stdout(n)`, `stderr(n)` and `stdinLines(n)` from before this
+extension, and the roles are the same types under both names:
+`zrx.stdout(n)` is `process.stdout(Stdout, n)`, and `zrx.stdinLines(n)` is
+`lines(Stdin, n)` run with `process.stdin(Stdin, n + 1)`. One difference:
+`stdinLines` owns its reader and fails with what the system reported,
+where a failed read through a binding is `error.ReadFailed`.
+
+### The exit status
+
+`process.Exit` is `struct { code: u8 = 0 }`. A run returns nothing, so the
+status is an effect: `main` gives `run` a `*process.Exit`, and whoever has
+something to say about the outcome asks for it. Two handlers do:
+
+| | |
+|---|---|
+| `process.status(n)` | Raises the status to at least `n` when an item reaches it. For `tap` or `forEach`, usually on an error path. |
+| `process.fail(options)` | For the [rescue](#the-failure-of-a-run): sets the status and writes one line that names the error. |
+
+`status(n)` says that the program finished, and not with everything: in
+`app` above a record that is refused leaves status 1 and the run goes on.
+It never lowers a status, so the order in which two of them are reached
+does not matter. It writes through the `*Exit` like any handler that writes
+through a dependency: put it where one task calls it, after a `concurrent`
+and not in its workers. A status that depends on more than an item getting
+there is a handler of your own:
+
+```zig
+fn judge(exit: *process.Exit, summary: Summary) void {
+    if (summary.rejected * 2 > summary.seen) exit.code = 3;
+}
+```
+
+`fail(options)` is given the failure of the run. It sets the status, writes
+one line that names the error to `process.Stderr`,
+`fatal: PathAlreadyExists` above, and flushes it. The options are always
+given, `.{}` for the defaults:
+
+| Option | Default | |
+|---|---|---|
+| `.status` | `1` | The status left in the `*process.Exit`, from 1 to 255. |
+| `.prefix` | `"error"` | What the line begins with, as plain text. `null` writes nothing, and the handler then asks for no `Stderr`. |
+
+The defaults are what Zig does with an error returned from `main`:
+`error: OutOfMemory` and status 1.
+
+- The status is set first, and it is set, not raised: the failure of the
+  run decides it, whatever a `status` left. The line is best effort: a
+  write or a flush that fails is dropped, and the status stands.
+- The stderr is one the rescue is given for itself, as above: the run's own
+  is released by the time a rescue is called, and asking for that one is a
+  compile error. A test gives `run` a `Stderr{ .writer = &writer }`, which
+  replaces it.
+- The line holds the prefix, the name of the error and nothing else. A
+  prefix with a control byte in it, such as a newline, is a compile error.
+  A name declared in quotes can hold one, so every byte of the name that
+  is not printable ASCII is written as `\xNN` (`std.ascii.hexEscape`): a
+  newline in it as `\x0a`. An identifier is written as it is.
+  A failure that should say more (which file, which line) is an item's:
+  take it in the pipe with an error path, where the item is at hand.
+- A cancellation is given to it like any failure and is written as
+  `Canceled`. Nothing here calls `io.recancel()`, and nothing ends the
+  process: `main` returns the status.
+
+`fail` is a handler of one error, so it also ends a pipe whose item is one.
+That is how a program says the same of what failed before there was a run,
+such as a wrong number of arguments:
+
+```zig
+fn refuse(io: std.Io, exit: *process.Exit, err: anyerror) void {
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, process.stderr(Stderr, 256) });
+}
+```
+
+`status` raises with the `@max` one writes where the item is seen. Bound as
+a rescue, `fail` compiles to the store a loop by hand makes where it fails,
+and its line to the `print` and `flush` one writes there
+(`same_process_status`, `same_process_fail_silent` and `same_process_fail`
+among the [fixtures](#how-zero-overhead-is-checked)).
+
+### What is not in it
+
+- The arguments. They are a source as they are: `fromSlice(args[1..])` for
+  the slice `init.minimal.args.toSlice(arena)` returns, or
+  `fromIterator(&iterator)` for `init.minimal.args.iterate()`. Which
+  program to run for them is decided once, before any run, and is a
+  `switch` in `main`. A typed parser of options and a usage text are a
+  design of their own, and are not here.
+- Environment variables. `init.environ_map` is a value `main` has: pass
+  what a handler needs of it to `run`.
+- Child processes.
+- Signals. Ending a run on Ctrl-C needs a source that can be stopped from
+  outside, which is [proposed](spec-segments.md#stopping-from-outside) and
+  not there.
+
 ## Lifetimes
 
 A run goes through these steps:
@@ -1998,10 +2167,11 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
-`same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
-whose path has stages of its own and the text patterns are `lean`, each with
-the reason next to it.
+Every synchronous operator has a fixture, and so have `rescue`,
+`process.fail` and `process.status`. Twenty-seven are `same`; `take`,
+`batch`, the handler combinators, `attempt`, a `recover` whose path has
+stages of its own and the text patterns are `lean`, each with the reason
+next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the

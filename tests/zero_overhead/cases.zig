@@ -415,6 +415,96 @@ export fn same_rescue(ptr: [*]const u32, len: usize, rejected: *u32, out: *u64, 
     rescued(exported_with_zrx, ptr[0..len], rejected, out, failed);
 }
 
+// --- the process: its exit status (zrx.ext.process) -------------------------------------
+
+const process = zrx.ext.process;
+pub const Exit = process.Exit;
+
+fn admitted(value: u32) error{ Zero, TooLarge }!u32 {
+    if (value == 0) return error.Zero;
+    if (value > 1000) return error.TooLarge;
+    return value;
+}
+
+/// A run that fails leaves a status: through `process.fail` as the rescue of
+/// the run, and by hand where the loop fails.
+pub fn exited(comptime with_zrx: bool, items: []const u32, out: *u64, exit: *Exit) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(admitted), tap(accumulate), drain() });
+        program(fromSlice(items), total).run(.{
+            Result{ .out = out },
+            exit,
+            zrx.rescue(process.fail(.{ .status = 2, .prefix = null })),
+        });
+    } else {
+        for (items) |value| {
+            if (value >= 1 and value <= 1000) {
+                out.* +%= value;
+            } else {
+                exit.code = 2;
+                return;
+            }
+        }
+    }
+}
+
+export fn same_process_fail_silent(ptr: [*]const u32, len: usize, out: *u64, exit: *Exit) void {
+    exited(exported_with_zrx, ptr[0..len], out, exit);
+}
+
+/// The line that names the error, for one the caller hands over: a program
+/// of one item, as an app says what failed before there was a run. The
+/// error is a parameter so that its number is in neither variant: errors
+/// are numbered per compilation, and the two variants are two. Formatting
+/// is a call into `std.Io.Writer` in both, as in `printed`.
+///
+/// As the rescue of `exited`, `process.fail(.{ .status = 2, .prefix = "fatal" })`
+/// was compared once with the function one writes in its place: the same
+/// 145 instructions, but for those numbers.
+pub fn refused(comptime with_zrx: bool, err: anyerror, exit: *Exit, writer: *std.Io.Writer) void {
+    if (with_zrx) {
+        program(zrx.fromValue(err), .{forEach(process.fail(.{ .status = 2, .prefix = "fatal" }))}).run(.{
+            exit,
+            zrx.Stderr{ .writer = writer },
+        });
+    } else {
+        exit.code = 2;
+        writer.print("fatal: {f}\n", .{std.ascii.hexEscape(@errorName(err), .lower)}) catch return;
+        writer.flush() catch {};
+    }
+}
+
+export fn same_process_fail(code: u16, exit: *Exit, writer: *std.Io.Writer) void {
+    refused(exported_with_zrx, @errorFromInt(code), exit, writer);
+}
+
+fn overLimit(value: u32) bool {
+    return value > 1000;
+}
+
+/// A run that finishes, but not with everything: every value is added up,
+/// and one over the limit raises the status. `process.status(3)` against
+/// the `@max` one writes where the value is seen.
+pub fn judged(comptime with_zrx: bool, items: []const u32, out: *u64, exit: *Exit) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            tap(accumulate),
+            filter(overLimit),
+            forEach(process.status(3)),
+        });
+        program(fromSlice(items), total).run(.{ Result{ .out = out }, exit });
+    } else {
+        for (items) |value| {
+            out.* +%= value;
+            if (value > 1000) exit.code = @max(exit.code, 3);
+        }
+    }
+}
+
+export fn same_process_status(ptr: [*]const u32, len: usize, out: *u64, exit: *Exit) void {
+    judged(exported_with_zrx, ptr[0..len], out, exit);
+}
+
 // --- handler combinators ----------------------------------------------------------------
 
 pub const Order = extern struct { id: u32, price: u32 };

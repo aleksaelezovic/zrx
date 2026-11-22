@@ -430,6 +430,42 @@ to this file; edit `AGENTS.md`, not copies.
   `std` asserts an acknowledged request, and a handler can return
   `error.Canceled` without one. The rescue is given the cancellation and
   the choice is its handler's.
+- **The process is an extension: its streams are bindings, and nothing in
+  it ends the process.** `src/ext/process.zig` (`zrx.ext.process`) holds
+  the three standard streams, `Exit`, `status` and `fail`, written against
+  the resource and handler contracts alone.
+  [docs/spec-process.md](docs/spec-process.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - A stream names its role first, as `fileReader` and `fileWriter` do:
+    `stdin(Role, n)`, `stdout(Role, n)`, `stderr(Role, n)`. There is no
+    form without a role beside it.
+  - `process.Stdout` and `process.Stderr` are the core's types, not a
+    second pair of roles. The core's `stdout(n)`, `stderr(n)` and
+    `stdinLines(n)` leave it in the change that moves the examples; until
+    then do not add to them and do not remove them in passing.
+  - Nothing allocates and the binding flushes nothing. A read that fails
+    through `stdin` is `error.ReadFailed`, as through `fileReader`: do not
+    put the system's error in its place there.
+  - `status(n)` raises and never lowers. `fail(options)` sets: a rescue is
+    called once. `status` refuses an error alone and `fail` anything but
+    one, so there is one way to write each.
+  - `fail` is not a binding:
+    `rescue(process.fail(.{})).provide(.{stderr(Stderr, 256)})` stays the
+    one way to bind a rescue, and what `fail` asks for is checked by the
+    errors `rescue` already has.
+  - One spelling: `fail` is always called with its options, and the silent
+    form is `.prefix = null`, not a second handler.
+  - The status is set first. The line is best effort, and it is one line:
+    a control byte in the prefix is refused where it is written.
+  - `fail` is given `error.Canceled` like any failure. Nothing here calls
+    `std.process.exit` or `io.recancel()`.
+  - A fixture in which an error's name is written takes the error as a
+    parameter: errors are numbered per compilation.
+  - Not there, and back only by decision: an arguments source, a typed
+    parser of options, a usage text, choosing a program, a `refuse`, a
+    binding chosen at run time, environment variables, child processes,
+    signals.
 
 ## Zero overhead
 
