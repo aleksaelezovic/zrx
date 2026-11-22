@@ -435,6 +435,38 @@ to this file; edit `AGENTS.md`, not copies.
   That makes it atomic per file and not per run: say so wherever it is
   described. The first wording promised that a failed run leaves no file,
   and a review showed two published files where it did.
+- **Bytes are an extension named after what it works on, not after
+  cryptography.** `src/ext/bytes.zig` (`zrx.ext.bytes`) is written against
+  the handler contract alone and has no operator.
+  [docs/spec-bytes.md](docs/spec-bytes.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - Digests of `std.crypto.hash` and of `std.hash` alike, and the text of
+    bytes. No ciphers, signatures, keys or constant-time comparison.
+  - `digest(start)` is a type, the state of a `fold`:
+    `fold(State{}, State.update)`, then `map(State.final)`. Plain
+    functions, so that a state of a caller's own can hold one.
+  - It takes the hasher as its own `init` starts it, a value and not a
+    type. Do not guess how a hasher is started.
+  - A hasher is told by shape (`Finish.of`), not by a list of names:
+    `update`, and a `final` that returns the digest, an unsigned
+    integer, or fills an array of bytes with it. What is a digest is
+    said in `finished` and nowhere else; what does not have that shape
+    is refused, not worked around.
+  - Do not call the digest zero overhead without saying what the state
+    costs: a reducer is given its state as a value, and a hasher that
+    holds a block is copied out and back for each piece. Do not remove
+    the copies by another way of calling a reducer without a decision.
+  - `hex` and `base64` make an array of an array. Of an item whose length
+    is not known at compile time they make a value that holds the item
+    and is written with `{f}`, as `json.encode` does.
+  - Decoding returns `[n]u8`: the length is written, so the result is a
+    value. A text of another length is `error.InvalidLength`.
+  - A fixture here brings no error names of its own into `cases.zig`:
+    one did, and five fixtures of other operators stopped matching.
+  - Not there, and back only by decision: decoding to a length the text
+    chooses, Base64 of a stream of pieces, an operator that feeds a
+    hasher in place.
 - **HTTP is an extension, not core.** `src/ext/http.zig` (`zrx.ext.http`)
   is written against the public source, operator and handler contracts,
   and the core knows nothing of it (it still compiles freestanding).
