@@ -113,7 +113,10 @@ is an array of places, at least twice as many as keys and a power of two; a
 place holds zero, or one more than the index of its key, in the smallest of
 `u8`, `u16`, `u32` that fits. A key is looked for from the place its hash
 names, one place after the other, until it or an empty place is found.
-Nothing is ever taken out, so there are no markers for that.
+Nothing is ever taken out, so there are no markers for that. A room whose
+places a `usize` cannot count is a compile error that names the operator;
+a review found that the doubling overflowed first, with the compiler's own
+message.
 
 How many keys are kept is not in the table: the stage after it counts, and
 says which index a new key gets.
@@ -171,6 +174,14 @@ first touched beyond its end, if that place is not mapped: the one run that
 did not fault wrote 16 MiB from a stack of 16 MiB, so some of it was
 written to memory that was not the stack's. That is why the guide does not
 promise a fault.
+
+How many bytes a room comes to is not written out in the guide: it is
+`@sizeOf` of the pipe's stage, which a reader can name through the operator
+contract, and the guide shows how. Its first wording, `n` times the size of
+an item, was a sixteenth of what a review measured for `top(1_500_000,
+...)` over `u8` (24 MB, with a `usize` arrival number padded beside each
+byte; 12 MB now, with a `u32`). An entry, padding and a counter's width
+are the compiler's to add up.
 
 `sorted` needs more than its room while it sorts: `std.sort.block`, which
 is `std.mem.sort`, has a `[512]T` of its own on the stack. For the `u64`
@@ -256,6 +267,29 @@ error that says to do what can fail in a `map` before.
 with each item and orders ties by it, so that it emits exactly what
 `sorted` and `take` emit.
 
+### When the arrival numbers run out
+
+The first version counted arrivals in a `usize`. A review found that the
+count overflows: a trap in Debug, and ties in the wrong order optimized. On
+a 32-bit target that is after some 4.29 billion items, whatever the room. A
+`u64` would make it unreachable in practice, at eight bytes for every entry
+on every target, and still be a count that runs out.
+
+Only the order of two numbers is ever read, and only for two entries that
+tie. So when the numbers run out, `top` puts the kept entries in order (as
+it does at the end of the stream), numbers them from 0 along that order,
+and reverses them, which leaves them a heap again, the last at the root.
+Two entries that tie are next to each other in that order, the earlier
+first, so they keep their order; the next item is numbered after all of
+them.
+
+That makes the type of the number free. It is the smallest of `u16`, `u32`
+and `u64` that counts to 256 times the room, so the entries are numbered
+again once in at least 255 times the room items, which costs fewer than one
+call of the order per item on average. A small type keeps an entry small,
+and it lets a test run the numbers out: `top(3, ...)` does after 65535
+items.
+
 ### A float that is not a number
 
 A review found that for `3, NaN, 1` `sorted` followed by `take(1)` emitted
@@ -300,7 +334,7 @@ variants, so neither calls anything. On aarch64-linux and x86_64-linux:
 |---|---|---|
 | `same_take_last` | 41, 103 | the same |
 | `lean_sorted` | 1890, 3295 | 1889, 3294 |
-| `lean_top` | 207, 251 | 227, 271 |
+| `lean_top` | 311, 445 | 329, 463 |
 | `lean_distinct` | 75, 75 | 74, 74 |
 | `lean_fold_by` | 98, 131 | 100, 133 |
 
@@ -310,7 +344,8 @@ variants, so neither calls anything. On aarch64-linux and x86_64-linux:
 - `sorted`: what differs is inside `std`'s sort, where the optimizer counts
   from zero in one variant and from one in the other.
 - `top`: the optimizer lays out the sifting of the heap differently, and
-  the pipeline is the shorter one.
+  the pipeline is the shorter one. The loop numbers its arrivals in a `u16`
+  and numbers them again when they run out, as the operator does.
 - `distinct` and `foldBy`: the keys and the places of the stage are one
   stack slot, and an array each by hand.
 

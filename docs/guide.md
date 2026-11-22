@@ -1703,11 +1703,25 @@ every item that brings another key fails the same way. `sorted` fails every
 later item, and pushes the `n` it kept in order when the stream ends.
 
 The room is part of the operator's stage, and nothing is allocated for it.
-It is `n` items for `sorted` and `takeLast`, `n` items with a `usize` each
-for `top`, and for `distinct` and `foldBy` `n` keys (and states) and
-between `2n` and `4n` places of one, two or four bytes. It is there whole
-from the start of the run, used or not, and a run that fails leaves nothing
-of it behind.
+It is `n` items for `sorted` and `takeLast`; `n` items for `top`, each with
+an arrival number of two, four or eight bytes beside it; and for `distinct`
+and `foldBy` `n` keys (and states) and between `2n` and `4n` places of one,
+two or four bytes. It is there whole from the start of the run, used or
+not, and a run that fails leaves nothing of it behind.
+
+What that comes to in bytes depends on alignment and padding: an item of
+`top` and its number take the alignment of the larger, so `top(1_500_000,
+...)` over `u8` holds 12 MB where its items are 1.5 MB. Do not add it up;
+ask the compiler. A pipe's stage is a type, by the operator contract
+([Writing your own](#writing-your-own)), and its size is the room of its
+operators with their counters:
+
+```zig
+const ranking = pipe(.{top(1_500_000, ascending(itself))});
+
+// The tuple holds the types the handlers ask for: none here.
+const bytes = @sizeOf(@TypeOf(ranking).Stage(@Tuple(&.{}), u8));
+```
 
 The stages of a program are on the stack of the task that calls `run`, also
 those of a segment behind a `queue`: the tasks of the other segments work
@@ -1727,13 +1741,15 @@ inside `each` behind a `queue`, ran to its end. 16 MiB is the stack Zig
 gives the main thread of an executable there, and the one
 `std.Io.Threaded` gives its threads
 (`std.Thread.SpawnConfig.default_stack_size`). So the room of all the
-operators of a program together, `n` times the size of an item for each,
-stays well under the stack of the thread that calls `run`; for more, give
-the executable a larger stack (`stack_size` in `build.zig`) or the threads
-of the `Io` (`stack_size` in the options of `std.Io.Threaded`). Linux and
-Windows were not measured, nor an `Io` that runs tasks on stacks of
-another size. While it sorts, `sorted` needs 512 items more than its `n`:
-`std`'s sort keeps that many on the stack for itself.
+operators of a program together stays well under the stack of the thread
+that calls `run`: the size of each operator's stage, once for every copy of
+it (every sub-pipe of a `branch` or `route` and every worker of
+`concurrent` that holds it), and for `sorted` 512 items more, which `std`'s
+sort keeps on the stack for itself while it sorts. For more, give the
+executable a larger stack (`stack_size` in `build.zig`) or the threads of
+the `Io` (`stack_size` in the options of `std.Io.Threaded`). Linux and
+Windows were not measured, nor an `Io` that runs tasks on stacks of another
+size.
 
 ### Keys
 

@@ -1247,7 +1247,9 @@ export fn lean_sorted(ptr: [*]const u32, len: usize, out: *u64) bool {
     return sortedSum(exported_with_zrx, ptr[0..len], out);
 }
 
-const Arrival = struct { item: u32, at: usize };
+/// `top(4, ...)` numbers arrivals in a `u16` and numbers what it keeps again
+/// when the numbers run out; so does the loop.
+const Arrival = struct { item: u32, at: u16 };
 
 fn largerFirst(_: void, a: Arrival, b: Arrival) bool {
     if (b.item < a.item) return true;
@@ -1256,6 +1258,13 @@ fn largerFirst(_: void, a: Arrival, b: Arrival) bool {
 }
 fn smallestAtRoot(_: void, a: Arrival, b: Arrival) std.math.Order {
     return if (largerFirst({}, b, a)) .lt else .gt;
+}
+
+const TopHeap = std.PriorityQueue(Arrival, void, smallestAtRoot);
+
+fn inOrder(kept: []Arrival) void {
+    var heap: TopHeap = .{ .items = kept, .cap = 4, .context = {} };
+    while (heap.pop()) |entry| kept[heap.items.len] = entry;
 }
 
 /// The four largest values, largest first, combined so that the order counts.
@@ -1268,12 +1277,17 @@ pub fn topSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
         });
         run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
-        const Heap = std.PriorityQueue(Arrival, void, smallestAtRoot);
         var kept: [4]Arrival = undefined;
         var len: usize = 0;
-        var arrived: usize = 0;
+        var arrived: u16 = 0;
         for (items) |value| {
-            var heap: Heap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
+            if (arrived == std.math.maxInt(u16)) {
+                inOrder(kept[0..len]);
+                for (kept[0..len], 0..) |*entry, at| entry.at = @intCast(at);
+                std.mem.reverse(Arrival, kept[0..len]);
+                arrived = @intCast(len);
+            }
+            var heap: TopHeap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
             const at = arrived;
             arrived += 1;
             if (len == kept.len) {
@@ -1284,8 +1298,7 @@ pub fn topSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
             }
             heap.push(.failing, .{ .item = value, .at = at }) catch unreachable;
         }
-        var heap: Heap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
-        while (heap.pop()) |entry| kept[heap.items.len] = entry;
+        inOrder(kept[0..len]);
         var sum: u64 = 0;
         for (kept[0..len]) |entry| sum = sum *% 31 +% entry.item;
         out.* = sum;

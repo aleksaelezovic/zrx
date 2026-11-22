@@ -120,6 +120,14 @@ fn expectCounts(counts: *const Counts, expected: []const Count) !void {
 
 // --- room -----------------------------------------------------------------------
 
+test "the stage of a pipe says how many bytes its room takes" {
+    // As the guide asks for it: an item of `u8` with its arrival number
+    // takes eight bytes.
+    const ranking = pipe(.{top(1_500_000, ascending(itself))});
+    const bytes = @sizeOf(@TypeOf(ranking).Stage(@Tuple(&.{}), u8));
+    try std.testing.expect(bytes >= 12_000_000 and bytes < 12_000_000 + 64);
+}
+
 test "sorted, distinct and foldBy fail the item that does not fit, with an error that has a name" {
     var pushed: usize = 0;
     const items = [_]u32{ 31, 4, 15, 9, 26, 5 };
@@ -731,6 +739,40 @@ test "top: an empty stream, a pipe that is done, a pipe that fails" {
     const result = support.run(program(fromSlice(&items), .{ top(4, ascending(itself)), map(failAt(9)), forEach(record) }), .{&failed});
     try std.testing.expectError(error.Bad, result);
     try failed.expect(&.{ 4, 5 });
+}
+
+/// An item with a key that many share, and its place in the stream.
+const Placed = struct { key: u8, id: u32 };
+
+/// Where the two items with key 1 come. The first three items have key 5,
+/// all others key 9.
+const Plan = struct { first: u32, second: u32 };
+
+fn placed(plan: *const Plan, id: u32) Placed {
+    const key: u8 = if (id < 3) 5 else if (id == plan.first or id == plan.second) 1 else 9;
+    return .{ .key = key, .id = id };
+}
+
+test "top keeps ties in the order they came when its arrival numbers run out" {
+    // `top(3, ...)` numbers what comes in a `u16`. The numbers run out
+    // after 65535 items and again 65532 items later, and the three kept
+    // are numbered again each time. The two items with key 1 take the
+    // places of the last two with key 5, which came later than item 0, and
+    // tie with each other: the earlier of them comes first.
+    const runs_out: u32 = 65535;
+    for ([_]u32{ runs_out - 2, runs_out - 1, runs_out, runs_out + 1 }) |first| {
+        for ([_]u32{ first + 1, first + 70_000 }) |second| {
+            const plan: Plan = .{ .first = first, .second = second };
+            var kept: Numbers = .{};
+            try support.run(program(range(u32, 0, second + 3), .{
+                map(placed),
+                top(3, ascending(field(.key))),
+                map(field(.id)),
+                forEach(record),
+            }), .{ &kept, &plan });
+            try kept.expect(&.{ first, second, 0 });
+        }
+    }
 }
 
 // --- takeLast -------------------------------------------------------------------

@@ -203,9 +203,15 @@ fn Keys(comptime who: []const u8, comptime Returned: type) type {
 /// one more than the index of its key. There are at least twice as many
 /// places as keys, so a walk always ends at an empty one. How many keys it
 /// holds is not in the table: whoever keeps a key says which one it is.
-fn Table(comptime Kept: type, comptime room: usize) type {
+/// `usage` is the operator as one writes it, for the error.
+fn Table(comptime who: []const u8, comptime usage: []const u8, comptime Kept: type, comptime room: usize) type {
     const K = Kept.Key;
-    const places = std.math.ceilPowerOfTwo(usize, room * 2) catch @compileError("zrx: a table of that many keys does not fit in memory");
+    // Twice the room is a power of two that a `usize` counts up to this.
+    const places = if (room <= std.math.maxInt(usize) / 4 + 1) std.math.ceilPowerOfTwoAssert(usize, room * 2) else @compileError(std.fmt.comptimePrint(
+        "{s}: room for {d} keys does not fit in memory: its table has at least twice as many places, more than a `usize` counts; " ++
+            "write a count the stack has room for, as in `{s}`",
+        .{ who, room, usage },
+    ));
     const Number = if (room < 1 << 8) u8 else if (room < 1 << 16) u16 else if (room < 1 << 32) u32 else usize;
     return struct {
         keys: [room]K,
@@ -257,7 +263,7 @@ pub fn distinct(comptime room: usize, comptime key: anytype) core.Spliced("disti
 fn Seen(comptime room: usize, comptime key: anytype) fn (comptime type, comptime type) type {
     return struct {
         fn Held(comptime Env: type, comptime In: type) type {
-            return Table(Keys("distinct", di.Bound("distinct", key, Env, &.{In}).Return), room);
+            return Table("distinct", "distinct(1024, key)", Keys("distinct", di.Bound("distinct", key, Env, &.{In}).Return), room);
         }
     }.Held;
 }
@@ -334,7 +340,7 @@ fn Folded(comptime room: usize, comptime key: anytype, comptime A: type) fn (com
         fn Held(comptime Env: type, comptime In: type) type {
             const Kept = Keys("foldBy", di.Bound("foldBy", key, Env, &.{In}).Return);
             return struct {
-                keys: Table(Kept, room),
+                keys: Table("foldBy", "foldBy(1024, key, seed, reducer)", Kept, room),
                 states: [room]A,
 
                 const Key = Kept.Key;
@@ -583,6 +589,7 @@ fn Sorted(comptime room: usize, comptime before: anytype) type {
 ///
 /// Holds room for `count` items and an arrival number with each. It is
 /// never full: an item that comes before the last one kept takes its place.
+/// When the arrival numbers have run out, the kept items are numbered again.
 pub fn top(comptime count: usize, comptime before: anytype) core.Spliced("top", @Tuple(&.{ Room("top", Arrived(count)), Top(count, before) })) {
     expectRoom("top", "items", "top(3, order)", count);
     return .{ .ops = .{ .{}, .{} } };
@@ -590,15 +597,23 @@ pub fn top(comptime count: usize, comptime before: anytype) core.Spliced("top", 
 
 /// An item and when it came: of two that the order does not tell apart,
 /// the earlier comes first, as in `sorted`.
-fn Arrival(comptime In: type) type {
-    return struct { item: In, at: usize };
+fn Arrival(comptime In: type, comptime count: usize) type {
+    return struct { item: In, at: Counter(count) };
+}
+
+/// The arrival numbers of `top(count, ...)`. They count to at least 256
+/// times `count`, and when they have run out the kept entries are numbered
+/// again from 0 (`renumber`): once in at least 255 times `count` items.
+/// Only the order of two numbers is read, never how far apart they are.
+fn Counter(comptime count: usize) type {
+    return if (count < 1 << 8) u16 else if (count < 1 << 24) u32 else u64;
 }
 
 /// Room for `count` items, each with when it came.
 fn Arrived(comptime count: usize) fn (comptime type, comptime type) type {
     return struct {
         fn Held(comptime _: type, comptime In: type) type {
-            return [count]Arrival(In);
+            return [count]Arrival(In, count);
         }
     }.Held;
 }
@@ -618,11 +633,12 @@ fn Top(comptime count: usize, comptime before: anytype) type {
         pub fn Stage(comptime Env: type, comptime Got: type) type {
             const In = ItemOf(Got);
             const Call = di.Bound(name, before, Env, &.{ In, In });
-            const Entry = Arrival(In);
+            const Entry = Arrival(In, count);
+            const Number = Counter(count);
             return struct {
                 call: Call,
                 len: usize,
-                arrived: usize,
+                arrived: Number,
                 /// Where the entries are, for the end of the stream: told
                 /// with every item, and not looked at while none is kept.
                 room: *[count]Entry,
@@ -649,9 +665,10 @@ fn Top(comptime count: usize, comptime before: anytype) type {
 
                 pub fn push(self: *@This(), given: Got, _: anytype) !Flow {
                     const held = self.len;
+                    self.room = given.room;
+                    if (self.arrived == std.math.maxInt(Number)) self.arrived = renumber(given.room[0..held], self.call);
                     const at = self.arrived;
                     self.arrived = at + 1;
-                    self.room = given.room;
                     var heap: Heap = .{ .items = given.room[0..held], .cap = count, .context = self.call };
                     if (held == count) {
                         // Later than all that are kept: it takes the place of
@@ -665,16 +682,34 @@ fn Top(comptime count: usize, comptime before: anytype) type {
                     return .more;
                 }
 
-                /// Takes the last of the order off the heap again and again,
-                /// each into the place the heap gave up for it: that leaves
-                /// the entries in order.
                 pub fn finish(self: *@This(), down: anytype) !void {
                     const kept = self.room[0..self.len];
-                    var heap: Heap = .{ .items = kept, .cap = count, .context = self.call };
-                    while (heap.pop()) |entry| kept[heap.items.len] = entry;
+                    inOrder(kept, self.call);
                     for (kept) |entry| {
                         if (try down.push(entry.item) == .done) return;
                     }
+                }
+
+                /// Takes the last of the order off the heap again and again,
+                /// each into the place the heap gave up for it: that leaves
+                /// the entries in order.
+                fn inOrder(kept: []Entry, call: Call) void {
+                    var heap: Heap = .{ .items = kept, .cap = count, .context = call };
+                    while (heap.pop()) |entry| kept[heap.items.len] = entry;
+                }
+
+                /// Numbers the kept entries again from 0, once the numbers
+                /// have run out, and returns the next number. A number is
+                /// read only for two entries that tie, and two that tie are
+                /// next to each other in the order, the earlier first: so
+                /// the entries are put in order and numbered along it. In
+                /// the opposite order they are a heap again, the last at
+                /// the root, as each comes after those below it.
+                fn renumber(kept: []Entry, call: Call) Number {
+                    inOrder(kept, call);
+                    for (kept, 0..) |*entry, at| entry.at = @intCast(at);
+                    std.mem.reverse(Entry, kept);
+                    return @intCast(kept.len);
                 }
             };
         }

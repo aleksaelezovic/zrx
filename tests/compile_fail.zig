@@ -206,6 +206,8 @@ pub const cases = .{
     .{ "collections_ascending_alone", "ascending: says which of two items comes first, but receives 1 values here; use it where an order is taken, as in `sorted(n, ascending(key))`" },
     .{ "collections_distinct_zero", "distinct: has room for 0 keys; write a count of at least 1, as in `distinct(1024, key)`" },
     .{ "collections_fold_by_zero", "foldBy: has room for 0 keys; write a count of at least 1, as in `foldBy(1024, key, seed, reducer)`" },
+    .{ "collections_distinct_too_many", "distinct: room for 18446744073709551615 keys does not fit in memory: its table has at least twice as many places, more than a `usize` counts; write a count the stack has room for, as in `distinct(1024, key)`" },
+    .{ "collections_fold_by_too_many", "foldBy: room for 9223372036854775807 keys does not fit in memory: its table has at least twice as many places, more than a `usize` counts; write a count the stack has room for, as in `foldBy(1024, key, seed, reducer)`" },
     .{ "collections_sorted_zero", "sorted: has room for 0 items; write a count of at least 1, as in `sorted(1024, order)`" },
     .{ "collections_top_zero", "top: has room for 0 items; write a count of at least 1, as in `top(3, order)`" },
     .{ "collections_take_last_zero", "takeLast: has room for 0 items; write a count of at least 1, as in `takeLast(3)`" },
