@@ -335,8 +335,13 @@ to this file; edit `AGENTS.md`, not copies.
   - `checked` holds only what can fail, and fails with nothing but
     `error.Overflow`. Do not add a checked form of what cannot fail
     (`div`, `mod`, `abs`, `clamp`, `min`, `max`, `count`).
-  - An operand is a value of the items' type, and nothing is converted.
-    One that can never work is a compile error where it is written.
+  - An operand is a value of the items' type, and is judged as that type
+    has it, never as it was written: `1e-10` is 0 for `f16` items.
+    `operand` is the one function that makes an operand a `T`. One that
+    can never work is a compile error.
+  - The mean of `Stats` divides the item and the mean by the count before
+    it subtracts them. Do not put back the update with one division: the
+    difference of two finite items can be infinite.
   - The seed takes part like an item, and it is what a stream without
     items comes to. `min` and `max` have no value before the first item
     only in a state that is an optional, which is then a value: a reducer

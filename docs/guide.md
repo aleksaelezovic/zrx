@@ -1364,8 +1364,11 @@ first: `compose(.{ field(.cents), math.div(100) })`.
 ### Transforms
 
 A transform changes one item. Its operand is known at compile time, as the
-value of `gt(80)` is, and has to be a value of the items' type: nothing is
-converted.
+value of `gt(80)` is, and has to be a value of the items' type. An integer
+is never converted: `add(-1)` does not compile for unsigned items, nor
+`mul(100000)` for `f16` items, which hold no whole number that large. A
+float is rounded to a float type as Zig rounds a literal, so `add(0.1)` is
+what it is for an `f32`.
 
 | | |
 |---|---|
@@ -1381,7 +1384,10 @@ converted.
 `-3`, and `-7` modulo 2 is `1`.
 
 An operand that can never work does not compile: `div(0)`, `mod(0)`, a
-bound of `clamp` above the other, `add(-1)` for unsigned items.
+bound of `clamp` above the other, NaN. That is asked of the operand as the
+items' type has it and not as it was written: `div(1e-10)` does not compile
+for `f16` items, for which it is 0, nor `add(1e300)` for `f32` items, for
+which it is infinite.
 
 These are the plain operators, and an overflow is what it is for `+`: a bug
 that a safe build stops at and a fast one does not look for. Where an
@@ -1480,6 +1486,19 @@ no number of items overflows. Before the first item `count` is 0, `mean` is
 0, and `min` and `max` are the values every item replaces: the largest and
 the smallest value of `T`, infinity for a float. Ask `count` whether there
 was an item.
+
+The mean of finite items is finite, also where two of them are too far
+apart for their difference: the largest `f64` and its negative come to 0.
+The mean of items that are all the same is that item. Otherwise it is
+close to the sum divided by the count and not that to the last digit: it
+is rounded once for each item, in its own type. That type decides how far
+off it can be, so a `Stats(f32)` of many items is a rough mean, and
+[the record](spec-math.md#stats) has what was measured. An integer item
+beyond what an `f64` holds exactly is rounded before it is taken in.
+
+Items that are not finite are counted like any. A NaN makes the mean NaN
+from then on, and `min` and `max` pass over it. An infinity is the `min` or
+the `max` and the mean, and the item after it makes the mean NaN.
 
 ### What it costs
 

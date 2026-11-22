@@ -131,6 +131,18 @@ test "an operand may have a type, or be a float that is a whole number" {
     try seen.expect(&.{ 8, 9, 10, 12, 6, 6 });
 }
 
+test "an operand is rounded to a float item's type as a literal is" {
+    var seen: Seen(f32) = .{};
+    const out = forEach(seenAs(f32));
+    const one = [_]f32{1};
+    try support.run(program(fromSlice(&one), .{ map(math.add(0.1)), out }), .{&seen});
+    try support.run(program(fromSlice(&one), .{ map(math.div(@as(f64, 0.1))), out }), .{&seen});
+    // A whole number an f32 holds exactly, and an infinity that was written.
+    try support.run(program(fromSlice(&one), .{ map(math.mul(16777216)), out }), .{&seen});
+    try support.run(program(fromSlice(&one), .{ map(math.clamp(-std.math.inf(f64), 0.5)), out }), .{&seen});
+    try seen.expect(&.{ 1 + @as(f32, 0.1), 1 / @as(f32, 0.1), 16777216, 0.5 });
+}
+
 const Order = struct { cents: u32 };
 
 test "a transform is a handler: it composes" {
@@ -398,4 +410,106 @@ test "the mean of large integers does not overflow" {
     try support.run(program(fromSlice(&large), .{ fold(Summary{}, Summary.add), forEach(seenAs(Summary)) }), .{&seen});
     try std.testing.expectEqual(@as(usize, 2), seen.slice()[0].count);
     try std.testing.expectEqual(@as(f64, @floatFromInt(std.math.maxInt(u64))), seen.slice()[0].mean);
+}
+
+/// A thousand items, `first` and `second` in turn.
+fn inTurn(first: f64, second: f64) [1000]f64 {
+    var items: [1000]f64 = undefined;
+    for (&items, 0..) |*item, at| item.* = if (at % 2 == 0) first else second;
+    return items;
+}
+
+test "the mean of finite items is finite" {
+    const Real = math.Stats(f64);
+    const most = std.math.floatMax(f64);
+    var seen: Seen(Real) = .{};
+    const measured = .{ fold(Real{}, Real.add), forEach(seenAs(Real)) };
+    // The difference of these two is not finite, and their mean is 0.
+    try support.run(program(fromSlice(&[_]f64{ most, -most }), measured), .{&seen});
+    try support.run(program(fromSlice(&[_]f64{ -most, most }), measured), .{&seen});
+    // A long run of one sign, the same value and two in turn, and one
+    // that changes sign with every item.
+    try support.run(program(fromSlice(&inTurn(most, most)), measured), .{&seen});
+    try support.run(program(fromSlice(&inTurn(-most, -most)), measured), .{&seen});
+    try support.run(program(fromSlice(&inTurn(most, most / 2)), measured), .{&seen});
+    try support.run(program(fromSlice(&inTurn(most, -most)), measured), .{&seen});
+    const means = seen.slice();
+    try std.testing.expectEqual(@as(f64, 0), means[0].mean);
+    try std.testing.expectEqual(@as(f64, 0), means[1].mean);
+    try std.testing.expectEqual(most, means[2].mean);
+    try std.testing.expectEqual(-most, means[3].mean);
+    try std.testing.expectApproxEqRel(most * 0.75, means[4].mean, 1e-12);
+    try std.testing.expect(@abs(means[5].mean) <= most * 1e-12);
+}
+
+test "the mean is finite in every float type" {
+    inline for (.{ f16, f32, f64, f128 }) |T| {
+        const Real = math.Stats(T);
+        const most = std.math.floatMax(T);
+        try std.testing.expectEqual(@as(T, 0), Real.add(Real.add(.{}, most), -most).mean);
+        try std.testing.expectEqual(@as(T, 0), Real.add(Real.add(.{}, -most), most).mean);
+        try std.testing.expectEqual(most, Real.add(Real.add(Real.add(.{}, most), most), most).mean);
+    }
+}
+
+test "the mean of items that are all the same is that item, and of others it is close" {
+    const Real = math.Stats(f64);
+    var same = Real{};
+    for (0..1000) |_| same = Real.add(same, 0.1);
+    try std.testing.expectEqual(@as(f64, 0.1), same.mean);
+
+    // Rounded once for each item: close to the sum divided by the count,
+    // and not that to the last digit.
+    var random = std.Random.DefaultPrng.init(42);
+    var stats = Real{};
+    var total: f128 = 0;
+    for (0..100_000) |_| {
+        const item = random.random().float(f64);
+        stats = Real.add(stats, item);
+        total += item;
+    }
+    try std.testing.expectApproxEqRel(@as(f64, @floatCast(total / 100_000)), stats.mean, 1e-13);
+}
+
+test "the count is not kept in the items' float type" {
+    // An f16 holds no whole number above 65504: the mean is still that of
+    // every item.
+    const Half = math.Stats(f16);
+    var stats = Half{};
+    for (0..66000) |_| stats = Half.add(stats, 0);
+    stats = Half.add(stats, 1000);
+    try std.testing.expectEqual(@as(usize, 66001), stats.count);
+    try std.testing.expectEqual(@as(f16, 1000.0 / 66001.0), stats.mean);
+}
+
+test "Stats counts a NaN and passes over it for min and max, and the mean is NaN from then on" {
+    const Real = math.Stats(f64);
+    var seen: Seen(Real) = .{};
+    const items = [_]f64{ 2, std.math.nan(f64), 4 };
+    try support.run(program(fromSlice(&items), .{ scan(Real{}, Real.add), forEach(seenAs(Real)) }), .{&seen});
+    const states = seen.slice();
+    try std.testing.expectEqual(Real{ .count = 1, .min = 2, .max = 2, .mean = 2 }, states[0]);
+    try std.testing.expectEqual(@as(usize, 2), states[1].count);
+    try std.testing.expectEqual(@as(f64, 2), states[1].min);
+    try std.testing.expectEqual(@as(f64, 2), states[1].max);
+    try std.testing.expect(std.math.isNan(states[1].mean));
+    try std.testing.expectEqual(@as(usize, 3), states[2].count);
+    try std.testing.expectEqual(@as(f64, 2), states[2].min);
+    try std.testing.expectEqual(@as(f64, 4), states[2].max);
+    try std.testing.expect(std.math.isNan(states[2].mean));
+}
+
+test "an infinity is the min or the max and the mean, and the item after it makes the mean NaN" {
+    const Real = math.Stats(f64);
+    const inf = std.math.inf(f64);
+    var seen: Seen(Real) = .{};
+    try support.run(program(fromSlice(&[_]f64{ 2, inf, 4 }), .{ scan(Real{}, Real.add), forEach(seenAs(Real)) }), .{&seen});
+    try support.run(program(fromSlice(&[_]f64{ 2, -inf }), .{ fold(Real{}, Real.add), forEach(seenAs(Real)) }), .{&seen});
+    const states = seen.slice();
+    try std.testing.expectEqual(Real{ .count = 2, .min = 2, .max = inf, .mean = inf }, states[1]);
+    try std.testing.expectEqual(@as(usize, 3), states[2].count);
+    try std.testing.expectEqual(@as(f64, 2), states[2].min);
+    try std.testing.expectEqual(inf, states[2].max);
+    try std.testing.expect(std.math.isNan(states[2].mean));
+    try std.testing.expectEqual(Real{ .count = 2, .min = -inf, .max = 2, .mean = -inf }, states[3]);
 }

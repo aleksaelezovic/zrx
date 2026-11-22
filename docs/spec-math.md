@@ -63,12 +63,35 @@ power is a handler of the user's own over `std.math.pow`.
 of its size. The alternative, keeping the type, overflows for the smallest
 value and would have needed a checked form; this one cannot fail.
 
-**An operand is a value of the items' type.** Nothing is converted:
-`add(-1)` for unsigned items and `add(1.5)` for integers are compile
-errors where the items are known. An operand may carry a type, and a float
-that is a whole number is taken for integers, since Zig takes both. What
-can be seen where the operand is written is refused there: `div(0)`,
-`mod(0)`, a `clamp` whose bounds are the wrong way round.
+**An operand is a value of the items' type, and is judged as that type
+has it.** `operand` is the one function that makes an operand a `T`, and
+whatever asks something of an operand asks it of what that returns: whether
+`div` is given 0, whether `mod` is given something greater than 0. The
+first version asked those two of the operand as it was written and then
+converted it. A review found `div(1e-10)` for `f16` items: not 0 where it
+is written, 0 for the items, and every item divided by 0. The same cause
+let `add(1e300)` add infinity to `f32` items, and
+`add(@as(u32, 100000))` to `f16` items. So `div(0)` is no longer refused
+where it is written but where the items are known, which every use of the
+handler comes to.
+
+What `operand` takes:
+
+- for integer items, a whole number in their range, with or without a
+  type: `add(-1)` for unsigned items and `add(1.5)` are compile errors, a
+  float that is a whole number is taken, since Zig takes it;
+- for float items, an integer the type holds exactly. That is what Zig
+  asks of a literal (`const x: f32 = 16777217` does not compile), and an
+  operand with a type is asked the same;
+- for float items, a float rounded as Zig rounds a literal, so `add(0.1)`
+  is the `f32` nearest to it. One that the rounding makes 0 or infinite
+  has become another number and is refused. An infinity that was written
+  is taken: `clamp(-inf, hi)` is a bound on one side;
+- never NaN.
+
+The order of the bounds of `clamp` is still judged as they were written:
+rounding can make two bounds equal and cannot turn them round. The
+exponent of `pow` is never a value of the items' type.
 
 `clamp` hands `std.math.clamp` a bound written without a type as it was
 written. Given as a `u32`, `@min` did not narrow its result as it does for
@@ -193,9 +216,67 @@ fail with, and the answer is `Overflow` alone.
 
 `mean` is a field and not a method so that a `Stats` can go on down the
 pipe as it is, into `json.encode` or a `print`. It is the running mean,
-`mean + (item - mean) / count`: a division per item, and no sum that a
-long stream of integers would overflow. It is a float of the items' type,
-and an `f64` for integers.
+with no sum that a long stream would overflow. It is a float of the items'
+type, and an `f64` for integers.
+
+**The update is `mean + (item / count - mean / count)`.** The first
+version was `mean + (item - mean) / count`, one division for an item. A
+review found that it returns `-inf` for the largest `f64` followed by its
+negative: their difference is not finite, though their mean is 0. Divided
+first, neither part is more than the largest value over the count, so from
+the second item on their difference is finite, and what comes of adding it
+lies between the old mean and the item. `tests/math.zig` has that pair in
+both orders, long runs of the largest value and of two large values in
+turn, and a run that changes sign with every item.
+
+The calculation is done in an `f64` where the mean's type is narrower,
+and rounded to that type at the end of each step. The count has to be a
+value of what it is calculated in, and an `f16` holds no whole number
+above 65504: calculated in `f16`, the mean stopped moving there.
+
+**What it costs.** Two divisions for an item where there was one, and for
+`f16` and `f32` items a conversion each way. In accuracy it is what a
+running mean costs, and the first update cost the same: the mean is
+rounded once for each item, so it drifts from the sum divided by the
+count. Measured against that sum kept in an `f128`, items uniform in
+[0, 1):
+
+| Items | `Stats(f64)` | `Stats(f32)` |
+|---|---|---|
+| 10^3 | 1.4e-15 (7 ulp) | 9.4e-7 (8 ulp) |
+| 10^6 | 9.4e-15 (42 ulp) | 1.7e-6 (14 ulp) |
+| 10^7 | 1.4e-13 (631 ulp) | 4.4e-5 (372 ulp) |
+| 10^8 | 7.0e-16 (3 ulp) | 1.0e-4 (851 ulp) |
+
+The first number is the error relative to the mean. It does not grow
+evenly, as the last line of the `f64` column shows, and these are one run
+each. On the `f64` runs of up to 10^7 items the first update came to the
+same figures within one ulp. Where the mean is far smaller than the items
+(10^6 items uniform between -5·10^5 and 5·10^5) it was 558 ulp of the
+mean off and this one 590. With items of 10^9 + [0, 1) the `f64` mean was
+1.2e-13 off after 10^7 items. A `Stats(f16)` was 4.5e-3 off after 10^3
+items and 7.3e-3 after 10^5.
+
+Two things follow from the mean being rounded in its own type. Once the
+count is near what that type holds exactly (2^24 for an `f32`), an item
+moves the mean by less than the type can show unless it is far from the
+mean, and is lost. And an integer item beyond 2^53 is rounded when it
+becomes an `f64`.
+
+The mean of items that are all the same is exactly that item: the two
+parts are equal and their difference is 0.
+
+**Items that are not finite.** A NaN is counted, and the mean is NaN from
+then on. `min` and `max` pass over it, because `@min` and `@max` return
+the other operand. An infinity is the `min` or the `max`, and the mean for
+that item; the item after it makes the mean NaN, whatever it is, since
+the update then subtracts infinity from infinity. A mean that stays
+infinite would need a test for every item. None is there.
+
+Not built, and for the owner to decide: holding the mean of `f16` and
+`f32` items in an `f64`, as that of integers is. It would take most of
+the right-hand column of the table away, and change the type of the
+field.
 
 Before the first item `count` is 0, `mean` is 0, and `min` and `max` are
 the values every item replaces: the largest and the smallest value of `T`,

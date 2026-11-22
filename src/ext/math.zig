@@ -79,10 +79,12 @@ pub fn clamp(comptime lo: anytype, comptime hi: anytype) type {
             return std.math.clamp(args[0], comptime bound(@TypeOf(args[0]), lo), comptime bound(@TypeOf(args[0]), hi));
         }
 
+        // The order of the bounds is judged as they were written: rounding
+        // can make two bounds equal and cannot turn them round.
         fn Clamped(comptime T: type) type {
             expectNumber(who, T);
-            expectFits(who, "lower bound", T, lo);
-            expectFits(who, "upper bound", T, hi);
+            _ = operand(who, "lower bound", T, lo);
+            _ = operand(who, "upper bound", T, hi);
             return T;
         }
     };
@@ -92,7 +94,7 @@ pub fn clamp(comptime lo: anytype, comptime hi: anytype) type {
 /// written without a type as it was written, which is what one writes by
 /// hand and what `@min` and `@max` read the range of the result from.
 fn bound(comptime T: type, comptime n: anytype) if (isLiteral(T, n)) @TypeOf(n) else T {
-    return if (isLiteral(T, n)) n else as(T, n);
+    return if (isLiteral(T, n)) n else operand("math.clamp", "bound", T, n);
 }
 
 fn isLiteral(comptime T: type, comptime n: anytype) bool {
@@ -174,11 +176,6 @@ fn Binary(comptime operation: Operation, comptime is_checked: bool, comptime n: 
     const name = @tagName(operation);
     const who = (if (is_checked) "math.checked." else "math.") ++ name;
     expectOperand(who, "operand", n);
-    switch (operation) {
-        .div => if (n == 0) @compileError(who ++ ": dividing by 0 never works; give an operand other than 0"),
-        .mod => if (n <= 0) @compileError(std.fmt.comptimePrint("{s}: the operand must be greater than 0, got `{d}`", .{ who, n })),
-        else => {},
-    }
     return struct {
         pub const zrx_handler = {};
 
@@ -190,26 +187,39 @@ fn Binary(comptime operation: Operation, comptime is_checked: bool, comptime n: 
         pub fn call(_: anytype, args: anytype) Changed(@TypeOf(args[0])) {
             const T = @TypeOf(args[0]);
             const item = args[0];
-            const operand = comptime as(T, n);
+            const by = comptime judged(T);
             if (is_checked) return switch (operation) {
-                .add => std.math.add(T, item, operand),
-                .sub => std.math.sub(T, item, operand),
-                .mul => std.math.mul(T, item, operand),
+                .add => std.math.add(T, item, by),
+                .sub => std.math.sub(T, item, by),
+                .mul => std.math.mul(T, item, by),
                 .div, .mod => comptime unreachable,
             };
             return switch (operation) {
-                .add => item + operand,
-                .sub => item - operand,
-                .mul => item * operand,
-                .div => if (comptime @typeInfo(T) == .int) @divTrunc(item, operand) else item / operand,
-                .mod => @mod(item, operand),
+                .add => item + by,
+                .sub => item - by,
+                .mul => item * by,
+                .div => if (comptime @typeInfo(T) == .int) @divTrunc(item, by) else item / by,
+                .mod => @mod(item, by),
             };
         }
 
         fn Changed(comptime T: type) type {
             if (is_checked) expectInteger(who, name, T) else expectNumber(who, T);
-            expectFits(who, "operand", T, n);
+            _ = judged(T);
             return if (is_checked) error{Overflow}!T else T;
+        }
+
+        /// The operand as a `T`, and whether the operation takes it. That
+        /// is asked of the `T`, since it is the `T` the items are divided
+        /// by: an operand is not 0 because it was not written as 0.
+        fn judged(comptime T: type) T {
+            const by = operand(who, "operand", T, n);
+            switch (operation) {
+                .div => if (by == 0) @compileError(who ++ ": dividing by 0 never works; give an operand other than 0"),
+                .mod => if (!(by > 0)) @compileError(std.fmt.comptimePrint("{s}: the operand must be greater than 0, got `{d}`", .{ who, n })),
+                else => {},
+            }
+            return by;
         }
     };
 }
@@ -404,10 +414,16 @@ fn holds(comptime A: type, comptime Item: type) bool {
 /// `scan` and `reduce` like any reducer. The items are `T`s.
 ///
 /// `mean` is a float (`f64` for integer items) and is the running mean,
-/// which no number of items overflows. Before the first item `count` is 0,
-/// `mean` is 0, and `min` and `max` are the values every item replaces: the
-/// largest and the smallest value of `T` (infinity for a float). Ask `count`
+/// which no number of items overflows: the mean of finite items is finite.
+/// It is rounded once for each item, so it is not the sum divided by the
+/// count to the last digit. Before the first item `count` is 0, `mean` is
+/// 0, and `min` and `max` are the values every item replaces: the largest
+/// and the smallest value of `T` (infinity for a float). Ask `count`
 /// whether there was an item.
+///
+/// An item that is NaN is counted and makes the mean NaN from then on;
+/// `min` and `max` pass over it. An infinity is the `min` or the `max` and
+/// the mean, and the item after it makes the mean NaN.
 pub fn Stats(comptime T: type) type {
     const float = switch (@typeInfo(T)) {
         .int => false,
@@ -415,6 +431,9 @@ pub fn Stats(comptime T: type) type {
         else => @compileError("math.Stats: takes the type of the items, an integer or a float, got `" ++ @typeName(T) ++ "`"),
     };
     const Mean = if (float) T else f64;
+    // What the mean is calculated in: the count has to be a value of it,
+    // and no `f16` is a whole number above 65504.
+    const Wide = if (@typeInfo(Mean).float.bits < 64) f64 else Mean;
     return struct {
         count: usize = 0,
         min: T = if (float) std.math.inf(T) else std.math.maxInt(T),
@@ -423,12 +442,17 @@ pub fn Stats(comptime T: type) type {
 
         pub fn add(stats: @This(), value: T) @This() {
             const seen = stats.count + 1;
-            const exact: Mean = if (float) value else @floatFromInt(value);
+            const of: Wide = @floatFromInt(seen);
+            const item: Wide = if (float) value else @floatFromInt(value);
+            const mean: Wide = stats.mean;
             return .{
                 .count = seen,
                 .min = @min(stats.min, value),
                 .max = @max(stats.max, value),
-                .mean = stats.mean + (exact - stats.mean) / @as(Mean, @floatFromInt(seen)),
+                // Each is divided before the two are subtracted: the
+                // difference of two finite values can be infinite, that of
+                // their parts cannot.
+                .mean = @floatCast(mean + (item / of - mean / of)),
             };
         }
     };
@@ -474,13 +498,46 @@ fn expectOperand(comptime who: []const u8, comptime what: []const u8, comptime n
     }
 }
 
-/// An operand has to be a value of the items' type: nothing is converted.
-fn expectFits(comptime who: []const u8, comptime what: []const u8, comptime T: type, comptime n: anytype) void {
-    const fits = switch (@typeInfo(T)) {
-        .int => isWhole(n) and n >= std.math.minInt(T) and n <= std.math.maxInt(T),
-        else => true,
+/// The operand `n` as the items' type `T` has it. Whatever judges an
+/// operand judges what this returns and not what was written: `1e-10` is
+/// not 0 where it is written, and it is 0 for `f16` items.
+///
+/// An operand has to be a value of the items' type. An integer type takes
+/// a whole number in its range, and a float takes an integer it holds
+/// exactly, which is what Zig takes for a literal. A float is rounded to a
+/// float type as Zig rounds a literal, unless that makes it 0 or infinite:
+/// then it is another number, and refused. So is NaN.
+fn operand(comptime who: []const u8, comptime what: []const u8, comptime T: type, comptime n: anytype) T {
+    const integer = switch (@typeInfo(@TypeOf(n))) {
+        .comptime_int, .int => true,
+        else => false,
     };
-    if (!fits) @compileError(std.fmt.comptimePrint(
+    switch (@typeInfo(T)) {
+        .int => if (isWhole(n) and n >= std.math.minInt(T) and n <= std.math.maxInt(T)) {
+            return if (integer) @intCast(n) else @intFromFloat(n);
+        },
+        .float => if (integer) {
+            const nearest: T = @floatFromInt(n);
+            if (std.math.isFinite(nearest) and @as(comptime_int, @intFromFloat(nearest)) == n) return nearest;
+        } else {
+            // Every float there is, is an `f128`.
+            const written: f128 = n;
+            const rounded: T = @floatCast(written);
+            if (std.math.isNan(written)) @compileError(who ++ ": the " ++ what ++ " is NaN, which nothing can be calculated with");
+            const became = if (std.math.isInf(rounded) and !std.math.isInf(written))
+                "infinite"
+            else if (rounded == 0 and written != 0)
+                "0"
+            else
+                return rounded;
+            @compileError(std.fmt.comptimePrint(
+                "{s}: the {s} `{e}` is {s} as a `{s}`, which is what the items are; give one that type holds",
+                .{ who, what, n, became, @typeName(T) },
+            ));
+        },
+        else => comptime unreachable,
+    }
+    @compileError(std.fmt.comptimePrint(
         "{s}: the {s} `{d}` is not a `{s}`, which is what the items are",
         .{ who, what, n, @typeName(T) },
     ));
@@ -490,15 +547,5 @@ fn isWhole(comptime n: anytype) bool {
     return switch (@typeInfo(@TypeOf(n))) {
         .comptime_int, .int => true,
         else => @trunc(n) == n,
-    };
-}
-
-/// The operand `n` as a `T`, once `expectFits` has passed.
-fn as(comptime T: type, comptime n: anytype) T {
-    return switch (@typeInfo(@TypeOf(n))) {
-        .comptime_int, .comptime_float => n,
-        .int => if (@typeInfo(T) == .int) @intCast(n) else @floatFromInt(n),
-        .float => if (@typeInfo(T) == .int) @intFromFloat(n) else @floatCast(n),
-        else => comptime unreachable,
     };
 }
