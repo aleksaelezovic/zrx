@@ -12,6 +12,7 @@
 - [Input and output](#input-and-output)
 - [Math](#math)
 - [HTTP](#http)
+- [Collections](#collections)
 - [Lifetimes](#lifetimes)
 - [Writing your own](#writing-your-own)
 - [How zero overhead is checked](#how-zero-overhead-is-checked)
@@ -2540,6 +2541,198 @@ among the [fixtures](#how-zero-overhead-is-checked)).
   outside, which is [proposed](spec-segments.md#stopping-from-outside) and
   not there.
 
+## Collections
+
+`zrx.ext.collections` holds the operators that have to keep items: the keys
+seen so far, a state for every key, the whole stream to put it in order.
+Each keeps them in room whose size is written with it, as `queue(n)` and
+`batch(n)` have theirs. None of them uses an allocator.
+
+```zig
+const collections = zrx.ext.collections;
+const foldBy = collections.foldBy;
+const top = collections.top;
+const descending = collections.descending;
+
+const Request = struct { service: Service, millis: u32 };
+
+fn count(total: u64, _: Request) u64 {
+    return total + 1;
+}
+
+/// The three services with the most requests, the busiest first.
+const busiest = pipe(.{
+    foldBy(64, field(.service), @as(u64, 0), count),
+    top(3, descending(field(.item))),
+    forEach(report),
+});
+
+program(requests, busiest).run(.{rescue(fatal)});
+```
+
+| Operator | Effect | Holds room for | When it is used up |
+|---|---|---|---|
+| `distinct(n, key)` | Passes an item the first time its key is seen. | `n` keys. | An item with one key more fails with `error.TooManyKeys`. |
+| `foldBy(n, key, seed, f)` | `fold`, once for every key. When the stream ends, each key goes on with its state as a `Tagged(Key, State)`, in the order the keys were first seen. | `n` keys and a state for each. | An item with one key more fails with `error.TooManyKeys`. |
+| `sorted(n, before)` | When the stream ends, every item, in order. | `n` items. | One item more fails with `error.TooManyItems`. |
+| `top(n, before)` | When the stream ends, the first `n` items of the order, in order. | `n` items, and an arrival number with each. | Never: an item that comes before the last one kept takes its place. |
+| `takeLast(n)` | When the stream ends, the last `n` items, as they came. | `n` items. | Never: an item takes the place of the oldest. |
+
+`n` is known at compile time and is at least 1. `key` is a handler
+`fn (deps..., item) Key`, `before` one that says which of two items comes
+first, and `f` a reducer as `fold` takes one. None of the five is a task
+boundary. `distinct` passes items on as they come; the other four push
+nothing before the stream has ended, so the source runs to its end whatever
+follows them, and a `take` after them stops what they push.
+
+### Room
+
+An item that does not fit fails where it is pushed, as it fails when a
+handler returns an error for it. So the run fails with `error.TooManyKeys`
+or `error.TooManyItems`, or an error path before the operator takes the
+item and the stream goes on:
+
+```zig
+const unique = pipe(.{
+    recover(error{TooManyKeys}, .{forEach(reportUnseen)}),
+    distinct(1024, field(.id)),
+    forEach(report),
+});
+```
+
+What was kept stays as it was. After that, `distinct` still drops an item
+whose key it has seen and `foldBy` still folds into a key that has a state;
+every item that brings another key fails the same way. `sorted` fails every
+later item, and pushes the `n` it kept in order when the stream ends.
+
+The room is part of the operator's stage, and nothing is allocated for it.
+It is `n` items for `sorted` and `takeLast`; `n` items for `top`, each with
+an arrival number of two, four or eight bytes beside it; and for `distinct`
+and `foldBy` `n` keys (and states) and between `2n` and `4n` places of one,
+two or four bytes. It is there whole from the start of the run, used or
+not, and a run that fails leaves nothing of it behind.
+
+What that comes to in bytes depends on alignment and padding: an item of
+`top` and its number take the alignment of the larger, so `top(1_500_000,
+...)` over `u8` holds 12 MB where its items are 1.5 MB. Do not add it up;
+ask the compiler. A pipe's stage is a type, by the operator contract
+([Writing your own](#writing-your-own)), and its size is the room of its
+operators with their counters:
+
+```zig
+const ranking = pipe(.{top(1_500_000, ascending(itself))});
+
+// The tuple holds the types the handlers ask for: none here.
+const bytes = @sizeOf(@TypeOf(ranking).Stage(@Tuple(&.{}), u8));
+```
+
+The stages of a program are on the stack of the task that calls `run`, also
+those of a segment behind a `queue`: the tasks of the other segments work
+on them there. The sub-pipes of `branch` and `route` and the workers of
+`concurrent` have room of their own each, in the same place. Only a
+sub-pipe of `each` is constructed where its item is pushed, on the stack of
+the task that runs that segment.
+
+All of that room has to fit on that stack, and nothing checks that it
+does. Too much is not an error: the process usually ends with a fault where
+the stack is first touched beyond its end, and even that is not promised.
+Measured on macOS (aarch64), in Debug and in ReleaseFast, with
+`sorted(n, ...)` over `u64` items, as a plain program, behind a `queue`,
+inside `each`, and inside `each` behind a `queue`: room of 15 MiB ran in
+all eight, and room of 16 MiB faulted in seven. The eighth, ReleaseFast
+inside `each` behind a `queue`, ran to its end. 16 MiB is the stack Zig
+gives the main thread of an executable there, and the one
+`std.Io.Threaded` gives its threads
+(`std.Thread.SpawnConfig.default_stack_size`). So the room of all the
+operators of a program together stays well under the stack of the thread
+that calls `run`: the size of each operator's stage, once for every copy of
+it (every sub-pipe of a `branch` or `route` and every worker of
+`concurrent` that holds it), and for `sorted` 512 items more, which `std`'s
+sort keeps on the stack for itself while it sorts. For more, give the
+executable a larger stack (`stack_size` in `build.zig`) or the threads of
+the `Io` (`stack_size` in the options of `std.Io.Threaded`). Linux and
+Windows were not measured, nor an `Io` that runs tasks on stacks of another
+size.
+
+### Keys
+
+A key is kept after its item is gone and nothing is copied for it, so it is
+a value:
+
+- an integer, an enum, a `bool`, or a struct, array or optional of those,
+  told apart by all of its parts;
+- a value that reads its text with `text()`, such as a `Line`, told apart
+  by that text.
+
+A key with a pointer anywhere in it is a compile error, a `[]const u8`
+included: what it points at may be gone when the next item comes. Key a
+text by a value that holds it, `Line(64).from(text)`. A float is a compile
+error as well. `collections.itself` is the key of an item that is its own
+key: `distinct(1024, itself)`.
+
+For `distinct`, a key counts as seen whatever became of its item further
+down: if the item fails there and an error path takes it, a later item with
+that key is still a duplicate. For `foldBy`, an item whose reducer fails
+leaves no trace: its key keeps the state it had, and a key that had none
+takes no room, however often it comes and is rejected.
+
+When the keys are the tags of an enum, `fold` over a `std.EnumArray` does
+what `foldBy` does.
+
+### Orders
+
+An order is a handler of two items that answers whether the first comes
+before the second. It cannot fail: it is asked while items are put in
+order, where a failure has nowhere to go.
+
+```zig
+sorted(1024, ascending(field(.millis))), // by a key, smallest first
+sorted(1024, descending(itself)), // by the item, largest first
+sorted(1024, nearer), // fn (deps..., a: Item, b: Item) bool
+```
+
+`ascending(key)` and `descending(key)` order by a key that is an integer, a
+float, an enum (by the values of its tags) or text (byte by byte). Items of
+which neither comes before the other keep the order they arrived in, in
+`sorted` and in `top` alike.
+
+A float that is not a number comes after every number, in `ascending` and
+in `descending` alike: it is last both ways, not largest. Two of them keep
+the order they arrived in. An order of your own has to be as consistent: if
+neither of two items comes before the other, they have to stand at the same
+place towards every third. `a < b` on floats is not that when a NaN can
+come, and `sorted` and `top` then disagree.
+
+`top(n, before)` emits what `sorted(m, before)` followed by `take(n)` emits.
+It is there because it needs room for `n` items where that needs room for
+all of them.
+
+### What they cost
+
+These operators hold a real buffer, as `queue` does:
+
+- The room is as large as `n` says from the first item to the last. A
+  table marks its places empty when its stage is constructed, which inside
+  `each` is once for every item.
+- An item is kept as the value it is. One that points elsewhere, such as a
+  slice, is kept as that pointer, and what it points to has to live until
+  the stream has ended.
+- An order is a handler, so it is given its two items as values: for an
+  item that holds its bytes, such as a `Line(n)`, that is two copies for
+  each comparison.
+- `distinct` and `foldBy` hash a key and walk a table for every item.
+  `sorted` sorts once, at the end. `top` compares every item with the last
+  one it keeps, and sifts a heap of `n` when the item takes that one's
+  place.
+
+All five are held to a loop by hand by
+[`zig build zero-overhead`](#how-zero-overhead-is-checked): a loop with
+arrays of the same size on its stack and its counters in locals. `takeLast`
+is the same instructions. The other four are `lean`: `sorted` is one
+instruction apart, inside `std`'s sort; `top` is the shorter of the two;
+`distinct` and `foldBy` have their keys and places in one stack slot where
+the loop has an array for each.
+
 ## Lifetimes
 
 A run goes through these steps:
@@ -2666,10 +2859,11 @@ case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
 Every synchronous operator has a fixture, and so have `rescue`,
-`process.fail` and `process.status`. Forty-one are `same`; `take`,
+`process.fail` and `process.status`. Forty-two are `same`; `take`,
 `batch`, the handler combinators, `attempt`, a `recover` whose path has
-stages of its own, the text patterns and `abs` of [`ext.math`](#math) are
-`lean`, each with the reason next to it.
+stages of its own, the text patterns, `abs` of [`ext.math`](#math) and four
+of the [collections](#what-they-cost) are `lean`, each with the reason next
+to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the
@@ -2714,7 +2908,7 @@ chunked request bodies (answered 411 until `std` decodes them with checks;
 see [Answers](#answers)), configurable buffer sizes, TLS and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
 
 Present in the previous implementation and not ported: signals
-(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of
+(`hold`, `withLatestFrom`), `retryPipe`, `maxItems`, and one of
 the three standalone example applications. The
 [record processor](../examples/apps/record-processor/README.md) and the
 [HTTP benchmark](../examples/apps/http-bench/README.md) are ported, and

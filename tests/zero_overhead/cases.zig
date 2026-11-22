@@ -26,6 +26,14 @@ const otherwise = zrx.otherwise;
 const forEach = zrx.forEach;
 const drain = zrx.drain;
 
+comptime {
+    // An error is given its number when the compiler first meets it, and the
+    // two variants do not meet them in the same order. The optimizer picks
+    // between equivalent forms by such constants, so they are met here, in
+    // one order for both.
+    for (.{ error.TooSmall, error.Zero, error.TooLarge, error.TooManyItems, error.TooManyKeys }) |err| _ = @intFromError(err);
+}
+
 /// Which variant the exported functions are compiled as.
 const exported_with_zrx = @import("variant").with_zrx;
 
@@ -1724,4 +1732,247 @@ pub fn mathMeasured(comptime with_zrx: bool, items: []const u32, out: *Measured)
 
 export fn same_math_stats(ptr: [*]const u32, len: usize, out: *Measured) void {
     mathMeasured(exported_with_zrx, ptr[0..len], out);
+}
+
+// --- collections --------------------------------------------------------------------------------
+
+// The operators of `zrx.ext.collections` keep their items in room of a size
+// that is written with them, inside a stage. The loop by hand keeps them in
+// arrays of that size on its stack and its counters in locals. Where an
+// operator calls into `std` (the sort, the heap, the hash of a key), so does
+// the loop, and where it walks a table of its own, the loop walks one
+// written out here. With items this small the optimizer takes all of `std`'s
+// code into both, so nothing is called in either.
+
+const collections = zrx.ext.collections;
+
+fn addOrdered(sum: u64, value: u32) u64 {
+    return sum *% 31 +% value;
+}
+
+/// The last eight values, combined so that the order counts.
+pub fn lastSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ collections.takeLast(8), fold(@as(u64, 0), addOrdered), forEach(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        // In a struct, as the stage has it: the comparison reads the type a
+        // stack slot is declared with, and this is the same slot.
+        var last: struct { items: [8]u32 } = undefined;
+        var next: usize = 0;
+        var len: usize = 0;
+        for (items) |value| {
+            last.items[next] = value;
+            next = if (next + 1 == last.items.len) 0 else next + 1;
+            if (len != last.items.len) len += 1;
+        }
+        var sum: u64 = 0;
+        var index: usize = if (len == last.items.len) next else 0;
+        for (0..len) |_| {
+            sum = sum *% 31 +% last.items[index];
+            index = if (index + 1 == last.items.len) 0 else index + 1;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_take_last(ptr: [*]const u32, len: usize, out: *u64) void {
+    lastSum(exported_with_zrx, ptr[0..len], out);
+}
+
+fn smallerFirst(_: void, a: u32, b: u32) bool {
+    return a < b;
+}
+
+/// The values in ascending order, combined so that the order counts: of at
+/// most twelve of them, and it fails with one more.
+pub fn sortedSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{
+            collections.sorted(12, collections.ascending(collections.itself)),
+            fold(@as(u64, 0), addOrdered),
+            forEach(store),
+        });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var kept: [12]u32 = undefined;
+        var len: usize = 0;
+        for (items) |value| {
+            if (len == kept.len) return false;
+            kept[len] = value;
+            len += 1;
+        }
+        std.mem.sort(u32, kept[0..len], {}, smallerFirst);
+        var sum: u64 = 0;
+        for (kept[0..len]) |value| sum = sum *% 31 +% value;
+        out.* = sum;
+        return true;
+    }
+}
+
+/// `lean`, not `same`: one instruction apart, inside `std`'s sort, where the
+/// optimizer counts from zero in one variant and from one in the other.
+export fn lean_sorted(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return sortedSum(exported_with_zrx, ptr[0..len], out);
+}
+
+/// `top(4, ...)` numbers arrivals in a `u16` and numbers what it keeps again
+/// when the numbers run out; so does the loop.
+const Arrival = struct { item: u32, at: u16 };
+
+fn largerFirst(_: void, a: Arrival, b: Arrival) bool {
+    if (b.item < a.item) return true;
+    if (a.item < b.item) return false;
+    return a.at < b.at;
+}
+fn smallestAtRoot(_: void, a: Arrival, b: Arrival) std.math.Order {
+    return if (largerFirst({}, b, a)) .lt else .gt;
+}
+
+const TopHeap = std.PriorityQueue(Arrival, void, smallestAtRoot);
+
+fn inOrder(kept: []Arrival) void {
+    var heap: TopHeap = .{ .items = kept, .cap = 4, .context = {} };
+    while (heap.pop()) |entry| kept[heap.items.len] = entry;
+}
+
+/// The four largest values, largest first, combined so that the order counts.
+pub fn topSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            collections.top(4, collections.descending(collections.itself)),
+            fold(@as(u64, 0), addOrdered),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var kept: [4]Arrival = undefined;
+        var len: usize = 0;
+        var arrived: u16 = 0;
+        for (items) |value| {
+            if (arrived == std.math.maxInt(u16)) {
+                inOrder(kept[0..len]);
+                for (kept[0..len], 0..) |*entry, at| entry.at = @intCast(at);
+                std.mem.reverse(Arrival, kept[0..len]);
+                arrived = @intCast(len);
+            }
+            var heap: TopHeap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
+            const at = arrived;
+            arrived += 1;
+            if (len == kept.len) {
+                if (!(kept[0].item < value)) continue;
+                _ = heap.pop();
+            } else {
+                len += 1;
+            }
+            heap.push(.failing, .{ .item = value, .at = at }) catch unreachable;
+        }
+        inOrder(kept[0..len]);
+        var sum: u64 = 0;
+        for (kept[0..len]) |entry| sum = sum *% 31 +% entry.item;
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`: the optimizer lays out the sifting of `std`'s heap
+/// differently in the two, and the pipeline is the shorter one.
+export fn lean_top(ptr: [*]const u32, len: usize, out: *u64) void {
+    topSum(exported_with_zrx, ptr[0..len], out);
+}
+
+fn hashOf(value: u32) u32 {
+    return std.array_hash_map.AutoContext(u32).hash(.{}, value);
+}
+
+/// The sum of the values, each counted the first time it comes: of at most
+/// twelve different ones, and it fails with one more.
+pub fn distinctSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{ collections.distinct(12, collections.itself), fold(@as(u64, 0), add), forEach(store) });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var keys: [12]u32 = undefined;
+        var places: [32]u8 = @splat(0);
+        var len: usize = 0;
+        var sum: u64 = 0;
+        for (items) |value| {
+            var place: usize = hashOf(value) & (places.len - 1);
+            const seen = while (true) : (place = (place + 1) & (places.len - 1)) {
+                const number = places[place];
+                if (number == 0) break false;
+                if (keys[number - 1] == value) break true;
+            };
+            if (seen) continue;
+            if (len == keys.len) return false;
+            keys[len] = value;
+            places[place] = @intCast(len + 1);
+            len += 1;
+            sum +%= value;
+        }
+        out.* = sum;
+        return true;
+    }
+}
+
+/// `lean`, not `same`: the keys and the places of the stage are one stack
+/// slot, and two arrays by hand; the walk and what follows it are the same.
+export fn lean_distinct(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return distinctSum(exported_with_zrx, ptr[0..len], out);
+}
+
+fn lowBits(value: u32) u32 {
+    return value & 7;
+}
+fn weighGroup(group: zrx.Tagged(u32, u64)) u64 {
+    return group.item *% (group.source +% 1);
+}
+fn addWideOrdered(sum: u64, value: u64) u64 {
+    return sum *% 31 +% value;
+}
+
+/// The values summed by their low bits, and the sums combined in the order
+/// the groups were first seen: of at most six groups, and it fails with
+/// one more.
+pub fn groupedSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{
+            collections.foldBy(6, lowBits, @as(u64, 0), add),
+            map(weighGroup),
+            fold(@as(u64, 0), addWideOrdered),
+            forEach(store),
+        });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var keys: [6]u32 = undefined;
+        var sums: [6]u64 = undefined;
+        var places: [16]u8 = @splat(0);
+        var len: usize = 0;
+        for (items) |value| {
+            const key = value & 7;
+            var place: usize = hashOf(key) & (places.len - 1);
+            const found: ?usize = while (true) : (place = (place + 1) & (places.len - 1)) {
+                const number = places[place];
+                if (number == 0) break null;
+                if (keys[number - 1] == key) break number - 1;
+            };
+            if (found) |index| {
+                sums[index] +%= value;
+                continue;
+            }
+            if (len == keys.len) return false;
+            keys[len] = key;
+            sums[len] = value;
+            places[place] = @intCast(len + 1);
+            len += 1;
+        }
+        var sum: u64 = 0;
+        for (keys[0..len], sums[0..len]) |key, group| sum = sum *% 31 +% group *% (key +% 1);
+        out.* = sum;
+        return true;
+    }
+}
+
+/// `lean` for the same reason, with the states as a third array by hand.
+export fn lean_fold_by(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return groupedSum(exported_with_zrx, ptr[0..len], out);
 }

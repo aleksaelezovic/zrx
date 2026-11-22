@@ -503,6 +503,57 @@ to this file; edit `AGENTS.md`, not copies.
     error at acquisition.
   - Say what each window costs, and give stack use as a measurement.
   - There is no zero-overhead fixture: nothing here is in the item loop.
+- **Collections keep their items in room that is written with them.**
+  `src/ext/collections.zig` (`zrx.ext.collections`) is written against the
+  operator and handler contracts: `distinct`, `foldBy`, `sorted`, `top` and
+  `takeLast`. [docs/spec-collections.md](docs/spec-collections.md) is its
+  design record: the reasons, what was rejected, what was measured and
+  what is still open for decision. Read it before changing the extension.
+  The rules it gives:
+  - No allocator, as in the core. Every count is known at compile time
+    and the room is part of a stage. Do not bring back an arena or a
+    binding for memory, and do not let an operator hold a slice of the
+    caller's in place of a size: `concurrent` makes the stages of every
+    worker from one operator value, and they would share it.
+  - An item that does not fit fails in `push`, before anything is
+    written, with `error.TooManyItems` or `error.TooManyKeys`, so that a
+    `recover` before the operator can take it. `top` and `takeLast` are
+    never full.
+  - Look first, write last. `foldBy` looks the key up, looks whether
+    there is room, asks the reducer and only then writes: an item that is
+    rejected leaves the table exactly as it was. An earlier version took
+    a place first and gave it back on a failure, and did not give back
+    all of it.
+  - Every operator is two stages: `Room`, which is the arrays and
+    nothing else, and one that holds the counters and works through a
+    pointer `Room` hands on with each item. Do not put a counter beside
+    an array, and do not have a stage pushed to from two places when
+    what it does for an item is large: the spec has what each of those
+    measured.
+  - The table of `distinct` and `foldBy` is this extension's own, with
+    `std`'s hash and comparison: `std`'s maps cannot be sized without an
+    allocator. Nothing is ever taken out of it.
+  - One way to write each thing: a count per key is `foldBy` with a
+    reducer, so there is no `countBy`. An item that is its own key is
+    `itself`, so no operator has a second form without a key.
+  - `Keys` is the one place that reads a key's type. A key is a value: a
+    pointer anywhere in it, a `[]const u8` included, is a compile error
+    that says to key by a `Line(n)`. So is a float.
+  - `keyBefore` is the one place that compares two keys, for both
+    orders. A NaN comes after every number in `ascending` and in
+    `descending` alike. An order is a handler of two items that cannot
+    fail. `sorted` is stable, and `top` emits exactly what `sorted` and
+    `take` emit: keep the tests that hold them together, the one with
+    NaNs among them.
+  - All five have a fixture: `takeLast` is `same`, the other four are
+    `lean`, each with its reason beside it. The loop by hand keeps its
+    arrays on its stack and its counters in locals; do not give it the
+    shape of the stages to make a fixture pass.
+  - `tests/zero_overhead/cases.zig` names the errors of its fixtures in a
+    `comptime` block so that both variants number them alike. A fixture
+    that brings a new error adds it there.
+  - Not there, and back only by decision: `groupBy` with a sub-pipe per
+    key, room that grows, room on the heap.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
