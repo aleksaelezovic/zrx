@@ -271,42 +271,34 @@ to this file; edit `AGENTS.md`, not copies.
   wrapped to mark what they push; the scope knows nothing of it. Do not
   add a way to put operators on a source before a merge: operators live in
   the program's pipe.
-- **JSON is an extension named after its format.** `src/ext/json.zig`,
-  exported as `zrx.ext.json` and analyzed only when referenced, holds two
-  handlers. `map(json.encode(.{}))` returns `std.json.fmt(item, options)`,
-  which `print` or `write` formats with `{f}`. One spelling: `encode` is
-  always called with its options, and there is no sink that hides
-  `write(Role, "{f}\n")`. No general serialization layer for one format.
-  Decoding returned by decision, as `map(json.decode(T, options))`: an
-  item that is text, a `[]const u8` or a value that reads its text with
-  `text()`, is read as one whole document by
-  `std.json.parseFromSliceLeaky`, over `options.scratch` bytes of the
-  handler's own stack. What it returns is a value, and whether it is one
-  is read off `T`, as `as` reads it in the pattern extension: a `T` with
-  a pointer anywhere in it would point into the text or into the scratch,
-  both gone when the handler returns, and is refused where `decode` is
-  written. Text is a `Line(n)`, which has a `jsonParse` beside its
-  `jsonStringify`: that is `std.json`'s hook in `src/io.zig`, not the
-  extension's, and it is all the core has of this. A text too long for
-  its line is `error.ValueTooLong` and not `StreamTooLong`: a `jsonParse`
-  can return only what `std.json` already fails with. There is no `from`
-  contract for a `T` made of a parsed intermediate with slices, and no
-  shadow type built from `T`: either is the serialization layer. The
-  scratch is a size and not an allocator dependency, so that what one
-  item can use is bounded and running out is `error.OutOfMemory`, the
-  item's error like the rest. It has no default: `std`'s lists begin at a
-  cache line, so what a text needs differs by target and any number
-  written for the user is a guess. `DecodeError` is written out, the set
-  of `std.json` for a whole text without `BufferUnderrun`, so that a path
-  can name it and an error `std` adds does not compile. `decode` has no
-  zero-overhead fixture and the guide makes no such claim: the parser is
-  called, not inlined, and `tools/same_code.zig` compares functions that
-  were inlined whole. Measured once, the exported function of such a
-  fixture had 614 instructions with zrx and 614 by hand, and they
-  differed in the numbers of the error values and of the `std` functions
-  called, which are given per compilation. Do not widen the tool for it.
-  Not there: a decoder that reads as the text arrives, and a document
-  that spans items.
+- **JSON is an extension named after its format.** `src/ext/json.zig`
+  (`zrx.ext.json`) holds two handlers over `std.json`, `encode` and
+  `decode`, and is analyzed only when referenced.
+  [docs/spec-json.md](docs/spec-json.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - One spelling each: `map(json.encode(.{}))`, formatted with `{f}`, and
+    `map(json.decode(T, options))`. Both are always called with their
+    options. There is no sink that hides `write(Role, "{f}\n")`, and no
+    general serialization layer for one format.
+  - `decode` is put to text, a `[]const u8` or a value with `text()`, and
+    reads one whole document. Parsing stays `std.json`'s.
+  - What is decoded is a value. Whether a `T` is one is read off the
+    type: a pointer anywhere in it is refused where `decode` is written.
+    No `from` contract and no shadow type built from `T`.
+  - Text in a value is a `Line(n)`, which has a `jsonParse` beside its
+    `jsonStringify` in `src/io.zig`. That is `std.json`'s hook and all
+    the core has of this. A `jsonParse` can fail only with what
+    `std.json` already fails with.
+  - The scratch memory is a size in the options, on the handler's stack
+    and new for every item, not an allocator dependency. It has no
+    default: what a text needs differs by target.
+  - `DecodeError` is written out, so that an error `std` adds does not
+    compile.
+  - `decode` has no fixture and no claim of zero overhead: the parser is
+    called, not inlined. Do not widen `tools/same_code.zig` for it.
+  - Not there, and back only by decision: a decoder that reads as the
+    text arrives, and a document that spans items.
 - **A text pattern is a handler, and it does not go back.**
   `src/ext/pattern.zig` (`zrx.ext.pattern`) is written against the handler
   contract alone and has no operator.

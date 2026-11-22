@@ -1007,10 +1007,10 @@ The options are always given. `.scratch` has no default; `.parse` is
 `std.json.ParseOptions`, as in
 `json.decode(Record, .{ .scratch = 2048, .parse = .{ .ignore_unknown_fields = true } })`.
 
-**What is decoded is a value.** A handler is given a copy of its item and
-returns a value, so nothing in a `T` may point into the text, nor into the
-memory `std.json` read it with: both are gone when the handler returns. A
-`T` with a pointer anywhere in it does not compile. Write
+**What is decoded is a value.** An item goes from stage to stage as a
+value, so nothing in a `T` may point into the text, nor into the memory
+`std.json` read it with: both are gone when the handler returns. A `T`
+with a pointer anywhere in it does not compile. Write
 
 - text as a `zrx.Line(n)`, a copy of at most `n` bytes. `std.json` reads a
   line as it writes one, like a byte slice: from a string, or from an array
