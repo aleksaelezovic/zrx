@@ -229,13 +229,18 @@ the next of a list of times: `zrx.testing.Clock` counts in 64 bits itself.
 That a source waits with no end is seen through an `Io` that says when a
 wait without a timeout begins.
 
-Twenty-eight mutants of the extension were each caught by a test, thirteen
-of them mutants of what holds time to its range. Eleven are caught by a
+Thirty mutants of the extension were each caught by a test, thirteen of
+them mutants of what holds time to its range. Thirteen are caught by a
 hang and not by a failed expectation: a source that is not told to stop,
-that waits at another time than the test does, or that ends where it
-should wait, leaves the test waiting. That is how the `Stop` tests of
+that is not asked whether it was cancelled before a push it does not wait
+for, that waits at another time than the test does, that is told to stop
+on another `Io` than the one it waits on, or that ends where it should
+wait, leaves the test waiting. That is how the `Stop` tests of
 `tests/flow.zig` fail too. Three are caught by a panic of the Debug build,
-where a sum or a difference is checked again and does not fit.
+where a sum or a difference is checked again and does not fit. One mutant
+survives, and is equivalent: `Stop` waiting on the `Io` its signal was
+set through rather than the one it is given. The run sets the signal
+through the source's own `Io`, so the two are the same.
 
 ## Not there
 
