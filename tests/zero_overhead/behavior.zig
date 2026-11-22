@@ -610,3 +610,39 @@ test "collections: topSum, lastSum" {
         try std.testing.expectEqual(without, with);
     };
 }
+
+test "checksummed, digested" {
+    const texts = comptime textsOf(&.{
+        "",                                                                       "a",    "bc",
+        "a piece that is longer than one block of the hasher, which is 64 bytes", "\x00", "123456789",
+    });
+    for ([_][]const cases.Text{ &.{}, texts[0..1], texts[0..3], &texts }) |some| {
+        var with: u32 = 99;
+        var without: u32 = 98;
+        cases.checksummed(true, some, &with);
+        cases.checksummed(false, some, &without);
+        try std.testing.expectEqual(without, with);
+
+        var digest: [32]u8 = @splat(1);
+        var by_hand: [32]u8 = @splat(2);
+        cases.digested(true, some, &digest);
+        cases.digested(false, some, &by_hand);
+        try std.testing.expectEqual(by_hand, digest);
+    }
+}
+
+test "hexed, base64ed" {
+    const words = [_]cases.Word{
+        .{ .bytes = .{ 0, 0, 0, 0 } },
+        .{ .bytes = .{ 0xff, 0xfe, 0x10, 0x0f } },
+        .{ .bytes = "zrx!".* },
+        .{ .bytes = .{ 0xfb, 0xff, 0xbf, 0x3e } },
+    };
+    for ([_][]const cases.Word{ &.{}, words[0..1], &words }) |some| inline for (.{ cases.hexed, cases.base64ed }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, some, &with);
+        case(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    };
+}

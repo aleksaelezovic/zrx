@@ -117,6 +117,7 @@ pub const ext = struct {
     pub const text = @import("ext/text.zig");
     pub const time = @import("ext/time.zig");
     pub const collections = @import("ext/collections.zig");
+    pub const bytes = @import("ext/bytes.zig");
 };
 
 // For writing operators, sources and handlers of your own.
