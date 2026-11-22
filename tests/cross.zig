@@ -167,3 +167,18 @@ export fn zrx_cross_http(io: *const std.Io, port: u16) bool {
     if (!ran(server, .{io.*})) return false;
     return true;
 }
+
+export fn zrx_cross_process(io: *const std.Io) u8 {
+    const process = zrx.ext.process;
+    const echo = program(zrx.lines(process.Stdin, 256), .{
+        zrx.tap(process.status(1)),
+        zrx.print(process.Stdout, "{f}\n"),
+    }).provide(.{
+        process.stdin(process.Stdin, 257),
+        process.stdout(process.Stdout, 64),
+        zrx.rescue(process.fail(.{})).provide(.{process.stderr(process.Stderr, 64)}),
+    });
+    var exit: process.Exit = .{};
+    echo.run(.{ io.*, &exit });
+    return exit.code;
+}

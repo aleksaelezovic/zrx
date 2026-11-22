@@ -94,7 +94,7 @@ test "rescued" {
     }
 }
 
-test "exited, refused" {
+test "exited, judged, refused" {
     const too_large: []const u32 = &.{ 5, 4096, 7 };
     for (inputs ++ .{too_large}) |items| {
         var with: struct { u64, cases.Exit } = .{ 0, .{} };
@@ -102,6 +102,18 @@ test "exited, refused" {
         cases.exited(true, items, &with[0], &with[1]);
         cases.exited(false, items, &without[0], &without[1]);
         try std.testing.expectEqual(without, with);
+    }
+    // A status that is there already is raised, or left where it is higher.
+    for ([_]u8{ 0, 1, 9 }) |before| {
+        var with: struct { u64, cases.Exit } = .{ 0, .{ .code = before } };
+        var without: struct { u64, cases.Exit } = .{ 0, .{ .code = before } };
+        cases.judged(true, too_large, &with[0], &with[1]);
+        cases.judged(false, too_large, &without[0], &without[1]);
+        try std.testing.expectEqual(without, with);
+        try std.testing.expectEqual(@max(before, 3), with[1].code);
+        try std.testing.expectEqual(4108, with[0]);
+        cases.judged(true, too_large[0..1], &with[0], &with[1]);
+        try std.testing.expectEqual(@max(before, 3), with[1].code);
     }
     // Room for the line, room for a part of it, and none.
     for ([_]usize{ 64, 9, 0 }) |room| {
