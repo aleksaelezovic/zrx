@@ -732,6 +732,8 @@ statements and tests are in the [segments spec](spec-segments.md#guarantees).
 Declare `stop: zrx.Stop` among a `fromProducer` handler's dependencies.
 `run` supplies it to the source. Use `stop.requested()` between reads or
 wait on `stop.wait(io)` alongside the input, for example with `std.Io.Select`.
+Pass the `std.Io` the producer is given: `run` signals through that one,
+and a wait on another may not be woken.
 Once it signals, return normally so the program can finish. Continue to
 stop when `out.push` answers `.done`, and propagate cancellation and input
 errors. The signal applies to downstream completion across task boundaries.
@@ -903,14 +905,16 @@ them drift.
 - **It has no end of its own.** It ends when a push answers `.done`, as
   after `take(n)`. It also asks for [`zrx.Stop`](#stopping-a-producer-when-its-consumers-finish),
   so behind a task boundary it ends where it waits once its consumers are
-  done, without another tick. Cancelling the run interrupts the wait, and
+  done, without another tick. Cancelling the run interrupts the wait, or
+  the next push where every tick is due and there is no wait, and
   `error.Canceled` is all the source can fail with.
 - **It starts no task.** Without a boundary the program is one loop on the
   task that called `run`, and that task is the one that waits.
 
 Its wait is `stop.waitTimeout(io, timeout)`: `stop.wait` with an end,
 `error.Timeout` when the time is over or it was woken for nothing. A
-producer of your own that waits for a deadline can use it the same way.
+producer of your own that waits for a deadline can use it the same way,
+with the deadline read from the same `io`.
 
 ### stamp
 

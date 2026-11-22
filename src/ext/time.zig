@@ -52,7 +52,7 @@ fn reading(io: Io) Nanoseconds {
 fn span(comptime what: []const u8, comptime length: Io.Duration) Nanoseconds {
     if (length.nanoseconds <= 0) @compileError(what ++ " must be positive; pass e.g. `.fromSeconds(1)`");
     if (length.nanoseconds > limit) @compileError(std.fmt.comptimePrint(
-        "{s} of {d} ns is longer than time is counted here, 2^63 ns (about 292 years); pass a shorter one",
+        "{s} of {d} ns is longer than time is counted here, 2^63 - 1 ns (about 292 years); pass a shorter one",
         .{ what, length.nanoseconds },
     ));
     return @intCast(length.nanoseconds);
@@ -102,6 +102,10 @@ fn Ticks(comptime period: Io.Duration) type {
                         error.Canceled => return error.Canceled,
                     };
                 }
+                // A tick that is due when it is looked at is pushed without
+                // a wait. Where every one is, and the pipe never waits
+                // either, this is the only place a request to cancel is seen.
+                try io.checkCancel();
                 if (try down.push(tick) == .done) return;
                 // The next tick is the first whose time has not passed.
                 const late = reading(io) -| due;

@@ -38,6 +38,16 @@ wait with an end. `Stop.waitTimeout(io, timeout)` in `src/completion.zig`
 is `wait` with one: it waits on the run's signal where there is one, and on
 an event of its own where there is none, as `wait` does.
 
+Both wait on the `io` they are given, and the run sets its signal through
+the `std.Io` the source is given, which a source passes to them. The first
+draft waited on the `Io` of the first boundary, which the run had set the
+signal through. A boundary of one's own can run its task on another `Io`
+than the program's, and review found the deadline then read on one clock
+and waited for on another. An event is woken only through the backend it
+is waited on, so the wait and the wake moved together. The test "ticks
+waits on the clock it reads, and is told to stop there, when the first
+boundary runs on another Io" holds it.
+
 Rejected:
 
 - **Composing it from `stop.wait` and a sleep with `std.Io.Select`.** That
@@ -76,6 +86,12 @@ does not make them drift. A push returns when the pipe is through with the
 tick. A tick whose time has passed by then is not pushed, and its number is
 missing from the count: 0, 3, 4 says that two were skipped. A tick that is
 due exactly then is pushed at once.
+
+So a source can push without waiting, as long as every tick is due when it
+looks, and the pipe need not wait either. Review found such a run deaf to
+a request to cancel. The source looks for one before each push; the test
+"a request to cancel stops ticks whose every tick is due, behind a pipe
+that never waits" holds it, and hangs without the check.
 
 Rejected:
 
@@ -143,7 +159,7 @@ ends there.
 when the time is later than the limit. It then waits on `stop.wait`: until
 its consumers are done or the run is cancelled, as for any tick. The count
 needs no check: it is the number of periods between two times within the
-range, at most 2^63.
+range, at most 2^63 - 1.
 
 `.awake` does not go back. Should a clock do so, `throttle` passes the item
 and `ticks` takes the tick as on time; a test holds that neither is a

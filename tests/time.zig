@@ -234,6 +234,72 @@ test "a request to cancel interrupts ticks where it waits, and is all the source
     try std.testing.expectEqual(error.Canceled, left.err.?);
 }
 
+/// An `Io` whose `.awake` clock is a nanosecond further on each time it is
+/// read, so that a tick every nanosecond is due whenever it is looked at.
+/// One at a time: its state is global.
+const AlwaysDue = struct {
+    var vtable: Io.VTable = undefined;
+    var read: i96 = 0;
+    var pushed: Io.Event = .unset;
+
+    fn over(base: Io) Io {
+        vtable = base.vtable.*;
+        vtable.now = now;
+        read = 0;
+        pushed = .unset;
+        return .{ .userdata = base.userdata, .vtable = &vtable };
+    }
+
+    fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+        if (clock != .awake) return io.vtable.now(userdata, clock);
+        read += 1;
+        return .{ .nanoseconds = read };
+    }
+
+    /// Does nothing a request to cancel could interrupt.
+    fn note(_: u64) void {
+        pushed.set(io);
+    }
+};
+
+fn leftOfBusy(timed: Io) support.Left {
+    return support.runLeft(zrx.program(time.ticks(.{ .nanoseconds = 1 }), .{zrx.forEach(AlwaysDue.note)}), .{timed});
+}
+
+test "a request to cancel stops ticks whose every tick is due, behind a pipe that never waits" {
+    var run = try io.concurrent(leftOfBusy, .{AlwaysDue.over(io)});
+    // The source pushes without waiting, and will until it is cancelled.
+    try AlwaysDue.pushed.wait(io);
+    const left = run.cancel(io);
+    try std.testing.expectEqualStrings("Canceled ", left.names());
+    try std.testing.expectEqual(error.Canceled, left.err.?);
+}
+
+fn firstBehindTaskIo(timed: Io, seen: *Seen) !void {
+    try support.run(zrx.program(every_ten, .{
+        support.handoff(1),
+        zrx.take(1),
+        zrx.forEach(Seen.collect),
+    }), .{ timed, support.TaskIo{ .io = io }, seen });
+}
+
+test "ticks waits on the clock it reads, and is told to stop there, when the first boundary runs on another Io" {
+    var clock: Clock = .init(io);
+    var seen: Seen = .{};
+    seen.init();
+    var run = try io.concurrent(firstBehindTaskIo, .{ clock.io(), &seen });
+    defer _ = run.cancel(io) catch {};
+
+    // Tick 0 is waited for on the test's clock, not on the boundary's.
+    try clock.waitingAt(.fromSeconds(10));
+    clock.advanceTo(.fromSeconds(10));
+    // Tick 1 never comes: the run is over because the source was woken
+    // where it waits for it.
+    try run.await(io);
+    try seen.expect(0);
+    try seen.expectNone();
+}
+
 // --- stamp and throttle -------------------------------------------------------
 
 /// An item and the time the test has it arrive at, in milliseconds.

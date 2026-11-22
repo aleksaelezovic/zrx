@@ -4,6 +4,8 @@ const Io = std.Io;
 
 /// A producer dependency that reports when downstream needs no more input.
 /// Its lifetime is the producer's call. Caller cancellation is still an error.
+/// It waits on the `io` it is given, which is the producer's `std.Io`: so a
+/// deadline the producer read is on the clock it waits on.
 pub const Stop = struct {
     signal: ?*Signal = null,
 
@@ -12,7 +14,7 @@ pub const Stop = struct {
     }
 
     pub fn wait(stop: Stop, io: Io) Io.Cancelable!void {
-        if (stop.signal) |signal| return signal.event.wait(signal.io);
+        if (stop.signal) |signal| return signal.event.wait(io);
         var event: Io.Event = .unset;
         return event.wait(io);
     }
@@ -20,12 +22,14 @@ pub const Stop = struct {
     /// `wait` with an end: `error.Timeout` once `timeout` is over, and for
     /// a wake that is neither, as `std.Io.Event.waitTimeout` reports one.
     pub fn waitTimeout(stop: Stop, io: Io, timeout: Io.Timeout) Io.Event.WaitTimeoutError!void {
-        if (stop.signal) |signal| return signal.event.waitTimeout(signal.io, timeout);
+        if (stop.signal) |signal| return signal.event.waitTimeout(io, timeout);
         var event: Io.Event = .unset;
         return event.waitTimeout(io, timeout);
     }
 };
 
+/// Set through `io`, the `std.Io` its producer is given and waits on: an
+/// event is woken only through the backend it is waited on.
 pub const Signal = struct {
     io: Io,
     event: Io.Event = .unset,
