@@ -51,10 +51,10 @@ flowchart TD
 - `Rules` (amount ceiling, record cap) is an injected dependency.
 - The four destinations are roles: `Input`, `Accepted`, `Diagnostics`
   (`process.Stderr`) and `Console` (`process.Stdout`). The program provides
-  `stdout` and `stderr` as defaults; a production run adds a `fileReader` or
-  a `stdin` binding for the input and a `fileWriter` in `.create_new` mode
-  for the output. Tests pass
-  fixed readers and writers to the same program, which replace the defaults.
+  `stdout` and `stderr` as defaults; a production run binds the input it
+  opened as `Input` and adds a `fileWriter` in `.create_new` mode for the
+  output. Tests pass fixed readers and writers to the same program, which
+  replace the defaults.
 - The summary is written only after record output has been flushed successfully.
 
 `app.zig` is the boundary around it: it parses the command and runs the
@@ -80,7 +80,10 @@ writes the `fatal:` line and sets status 2. `main.zig` returns the status.
   number and the first broken rule, never the record's content.
 - `--output NEW_PATH` is required and is created exclusively: an existing file,
   including the input, is never overwritten. Input defaults to stdin;
-  `--input PATH` reads a file and `--input -` selects stdin.
+  `--input PATH` reads a file and `--input -` selects stdin. Either is read
+  on from where its descriptor stands: `--input /dev/fd/0` continues what
+  read the same input before, where the system shares that position
+  (macOS; on Linux the path opens the file anew).
 - Exit **0**: all accepted (including empty input). **1**: finished, with
   rejected records. **2**: invalid usage, or a fatal I/O or limit error, which
   prints `fatal: ErrorName` to stderr and no summary.
@@ -129,13 +132,21 @@ and `recover` takes the item out of the pipe), the `.create_new` mode of `fileWr
 are acquired in the order they are written, so the input is opened before
 the output is created and a missing input leaves no file behind.
 
+The input no longer comes from `fileReader`, though. `app.zig` opens it
+itself, before the run, and binds a streaming reader as `Input`, because
+`fileReader` reads by position from the start of the file. A path that
+names a descriptor already partly read, `/dev/fd/0` on macOS, was then read
+from its start: an earlier version of this app used `fileReader` and wrote
+both records where the input stood at the second. Whether `fileReader`
+should read on from where its descriptor stands is a question for the
+library, recorded here and not decided.
+
 What is still plain Zig here:
 
 1. **Choosing a program.** Help, invalid usage and processing are a `switch`
-   in `app.zig`. "This file, or stdin" is no longer a choice of program: it
-   is one program over `lines(Input, n)` and an `if` around two runs, one
-   with a `fileReader` and one with `process.stdin`. A binding is a type, so
-   the two cannot be one value.
+   in `app.zig`. "This file, or stdin" is not a choice of program: it is
+   one program over `lines(Input, n)`, given a reader of whichever file
+   `app.zig` opened.
 2. **`print` ends a pipe.** Writing records and then aggregating is a
    `branch` with a `filter` per destination.
 3. **Taking a line apart.** `validation.parseFields` splits a line into its

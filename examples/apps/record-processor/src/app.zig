@@ -43,28 +43,24 @@ pub fn execute(io: Io, args: []const []const u8, exit: *Exit) void {
 }
 
 /// Processes the input `config` names, a file or standard input, into a new
-/// output file. Which it reads is the binding the one program is run with.
-/// A rejected record leaves status 1, unless the run itself failed.
+/// output file. The input is opened first: a missing input leaves no output
+/// file behind. It is read on from where its descriptor stands, so a path
+/// such as `/dev/fd/0` continues what read it before. The output is created
+/// exclusively: an existing file is never overwritten. A rejected record
+/// leaves status 1, unless the run itself failed.
 pub fn process(io: Io, config: commands.Config, rules: records.Rules, exit: *Exit) void {
     // A line of the maximum length and its LF must fit.
-    const room = records.max_line_bytes + 1;
-    if (config.readsStdin()) {
-        processFrom(streams.stdin(composition.Input, room), io, config, rules, exit);
-    } else {
-        processFrom(zrx.ext.fs.fileReader(composition.Input, config.input, room), io, config, rules, exit);
-    }
-}
+    var buffer: [records.max_line_bytes + 1]u8 = undefined;
+    const file = if (config.readsStdin()) Io.File.stdin() else Io.Dir.cwd().openFile(io, config.input, .{}) catch |err| return refuse(io, exit, err);
+    defer if (!config.readsStdin()) file.close(io);
+    var input = file.readerStreaming(io, &buffer);
 
-/// The input comes before the output among the bindings, so it is opened
-/// first: a missing input leaves no output file behind. The output is
-/// created exclusively: an existing file is never overwritten.
-fn processFrom(input: anytype, io: Io, config: commands.Config, rules: records.Rules, exit: *Exit) void {
     composition.processing.run(.{
         io,
         rules,
         exit,
         zrx.rescue(fatal).provide(.{streams.stderr(Diagnostics, 256)}),
-        input,
+        composition.Input{ .reader = &input.interface },
         zrx.ext.fs.fileWriter(composition.Accepted, config.output, 4096, .{ .mode = .create_new }),
     });
 }

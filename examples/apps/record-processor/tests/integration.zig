@@ -1,5 +1,6 @@
 //! The production composition with injected I/O, then the real executable.
 const std = @import("std");
+const builtin = @import("builtin");
 const app = @import("app");
 const zrx = @import("zrx");
 const options = @import("options");
@@ -145,8 +146,16 @@ fn waitAndSignal(child: *std.process.Child, done: *std.Io.Event) std.process.Chi
 /// stderr redirected to files, so nothing can block on a pipe. The whole wait
 /// is bounded; the child is killed and reaped on every failure path.
 fn simulate(dir: std.Io.Dir, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
+    return simulateFrom(dir, 0, args, expected_exit, stdout, stderr);
+}
+
+/// `simulate`, with stdin already moved to `start` bytes into the input, as
+/// a process that read the part before it would leave it.
+fn simulateFrom(dir: std.Io.Dir, start: u64, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
     const input = try dir.openFile(io, "input", .{});
     defer input.close(io);
+    var positioned = input.readerStreaming(io, &.{});
+    try positioned.seekTo(start);
     const out = try dir.createFile(io, "stdout", .{});
     defer out.close(io);
     const err = try dir.createFile(io, "stderr", .{});
@@ -239,6 +248,19 @@ test "executable reports every rejection in order and keeps going" {
         "record 8: MalformedFields\n" ++
         "record 9: InvalidAmount\n");
     try expectFile(temp.dir, "output", "A,Ada,7\nC,Cat,0\n");
+}
+
+test "an input named by its descriptor is read on from where it stands" {
+    // On macOS `/dev/fd/N` duplicates the descriptor and shares its
+    // position. Elsewhere it may open the file anew, at its start, whatever
+    // reads it (Linux), or depend on how `/dev/fd` is mounted (FreeBSD).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const first = "a,Ada,1\n";
+    try temp.dir.writeFile(io, .{ .sub_path = "input", .data = first ++ "b,Bob,2\n" });
+    try simulateFrom(temp.dir, first.len, &.{ "--input", "/dev/fd/0", "--output", "output" }, 0, "summary: accepted=1 rejected=0 amount_cents=2\n", "");
+    try expectFile(temp.dir, "output", "B,Bob,2\n");
 }
 
 test "executable rejects malformed-only input rather than failing" {
