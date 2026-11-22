@@ -1,8 +1,18 @@
 # Spec: bytes
 
-Status: implemented as `zrx.ext.bytes` (`src/ext/bytes.zig`). Three of its
-choices are proposals that the owner has not yet decided; they are marked
-as such below.
+Status: implemented as `zrx.ext.bytes` (`src/ext/bytes.zig`). Four of its
+choices are proposals that the owner has not yet decided. Each is listed
+here as the decision asked for, and marked "(a proposal)" where its reasons
+are given below:
+
+1. `digest` takes a started hasher, `digest(Sha256.init(.{}))`, and not a
+   type, `digest(Sha256)`.
+2. `hex` and `base64` of an item whose length is known only at run time
+   stay, though `{x}`, `{X}` and `{b64}` write a `[]const u8` too.
+3. A digest is folded with `fold`, and a hasher that holds a block pays
+   two copies of its state per piece; no operator feeds a hasher in place.
+4. Decoding is there, `fromHex(n)` and `fromBase64(codecs, n)`, to a
+   length that is written only.
 
 This file is the design record of the extension: why it is the way it is,
 what was tried and rejected, and what was measured. The
@@ -74,6 +84,24 @@ and a `final` of one of two kinds:
 That is how the two families are told apart: nothing asks which module a
 hasher is from. A hasher of a caller's own with either shape is taken.
 
+**The output is one of two types, compared as types.** The first check
+took a pointer to any array of bytes and a slice of bytes, and looked only
+at `const`. A review found that a `*[n:0]u8` passed: the digest was then
+returned as an array whose sentinel nobody had written. A `[:0]u8`, a
+`[]align(16) u8` or a `*align(16) [n]u8` passed as well and failed at the
+call, where a plain array cannot be handed to them. `Filled` now asks
+whether the output is `*[n]u8` or `[]u8`, as types, so that a sentinel, an
+alignment, `const`, `volatile` or an address space of its own is refused
+at `digest`, with one message that names the type found and the two that
+are taken. An output that points to no bytes at all is no hasher, and
+gets the message for that.
+
+`digest_length` is read where it is needed and checked where it is read
+(`length`): it is an integer, it is not negative, and where `final` fills
+a `*[n]u8` and the hasher declares one too, it is `n`. A `final` that
+fills a `[]u8` with no `digest_length` beside it has nothing to say how
+long its digest is, and is refused.
+
 **What a digest is, is said exactly.** The first check took any `final`
 of one parameter that returned something, and told the two families apart
 by that alone. A review found that a `final` returning `bool` passed as
@@ -104,11 +132,23 @@ what is missing:
 - `std.hash.Adler32` has `update` and no `final`; its checksum is a field.
 - `Murmur` and `CityHash` hash one text and are not fed in pieces.
 - `AsconXof128` and `AsconCxof128` have no length of their own for their
-  output.
+  output: they `squeeze` and have no `final`.
+- `sha3.KMac128` and `KMac256` fill a `[]u8` of any length and call their
+  length `mac_length`. That is not read as a `digest_length`: one name is
+  read, and a second would be a list of names.
 
 A keyed hasher of `std` (`SipHash`, a `Blake3` started with a key) has the
 shape and is taken. The key is `std`'s and the caller's: nothing here reads
 one, stores one or compares a result.
+
+Of `sha3`, every other hasher has the shape: `Sha3_224` to `Sha3_512`,
+`Keccak256`, `Keccak512`, `Shake`, `TurboShake`, `CShake`, `TupleHash`
+and `KT128` and `KT256`. A `TupleHash` hashes a tuple, each `update` one
+element of it, so its digest is of the pieces as they came and not of
+their bytes alone. It is taken, since that is what its `update` is, and
+the guide says so. The guide names each hasher of `std.crypto.hash` that
+is taken, and the test "the digest is what the hasher's own final
+returns" holds every one of them.
 
 ### What the state costs
 
@@ -131,6 +171,7 @@ That is paid per piece, not per byte. The sizes of some states, measured
 on aarch64: `Sha256` 112 bytes, `Sha512` 224, `Sha3_256` 352, `XxHash3`
 544, `Blake3` 1920, `KT128` 82560.
 
+**No operator feeds a hasher in place (a proposal).**
 It is the reducer contract's cost, not this extension's: anything that
 folds a state with a buffer in it pays it. An operator that feeds a hasher
 in place would have no copies. It has been neither written nor measured,

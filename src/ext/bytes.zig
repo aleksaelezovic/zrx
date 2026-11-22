@@ -63,7 +63,7 @@ const Finish = struct {
         /// `final(*H) T` or `final(H) T`, where `T` is an unsigned integer:
         /// `std.hash`.
         value,
-        /// `final(*H, out)`, where `out` is an array to fill, or a slice
+        /// `final(*H, out)`, where `out` is a `*[n]u8` to fill, or a `[]u8`
         /// that is given `digest_length` bytes: `std.crypto.hash`.
         filled,
     },
@@ -91,8 +91,9 @@ const Finish = struct {
     /// How the `final` of an `H` hands out the digest, or null where it is
     /// neither of the two ways. What is a digest is said here and nowhere
     /// else: an unsigned integer that is returned, or an array of bytes that
-    /// is filled. A `bool`, a signed number, an optional and an error union
-    /// are none, and neither is a `final` that both fills and returns.
+    /// is filled (`Filled` says which outputs). A `bool`, a signed number,
+    /// an optional and an error union are none, and neither is a `final`
+    /// that both fills and returns.
     fn finished(comptime H: type) ?Finish {
         const info = method(H, "final") orelse return null;
         if (info.param_types.len == 0 or !receives(H, info.param_types[0])) return null;
@@ -132,22 +133,59 @@ const Finish = struct {
         };
     }
 
-    /// The array a `final(*H, out)` fills: what `out` points to, or
-    /// `digest_length` bytes where it is a slice of any length.
+    /// The array a `final(*H, out)` fills: `[n]u8` where `out` is a
+    /// `*[n]u8`, and `[H.digest_length]u8` where it is a `[]u8`. Those two
+    /// types exactly, compared as types: a sentinel, an alignment or a
+    /// qualifier of its own makes another type, which either cannot be
+    /// handed a plain array or leaves the digest out of its type's rules.
+    /// Null where `out` points to no bytes at all; a compile error where it
+    /// points to bytes in another form, or `digest_length` does not say
+    /// how many.
     fn Filled(comptime H: type, comptime Out: ?type) ?type {
-        const pointer = switch (@typeInfo(Out orelse return null)) {
+        const P = Out orelse return null;
+        const pointer = switch (@typeInfo(P)) {
             .pointer => |pointer| pointer,
             else => return null,
         };
-        if (pointer.attrs.@"const") return null;
-        switch (pointer.size) {
-            .one => return if (isBytes(pointer.child)) pointer.child else null,
-            .slice => {
-                if (pointer.child != u8 or !@hasDecl(H, "digest_length")) return null;
-                return [H.digest_length]u8;
-            },
-            else => return null,
+        const n: ?comptime_int = switch (@typeInfo(pointer.child)) {
+            .array => |array| if (array.child == u8) array.len else return null,
+            else => if (pointer.child == u8) null else return null,
+        };
+        if (n) |len| {
+            if (P == *[len]u8) return [length(H, P, len)]u8;
+        } else if (P == []u8) return [length(H, P, null)]u8;
+        @compileError(
+            "bytes.digest: the `final` of `" ++ @typeName(H) ++ "` fills a `" ++ @typeName(P) ++
+                "`; a digest is filled into a `*[n]u8`, or into a `[]u8` that is given `digest_length` bytes, " ++
+                "with no sentinel, alignment or qualifier of its own: declare its output as one of those two",
+        );
+    }
+
+    /// The number of bytes a `final` that fills an `Out` is given: `n` for
+    /// a `*[n]u8`, `H.digest_length` for a `[]u8`. Where both are there
+    /// they are one number.
+    fn length(comptime H: type, comptime Out: type, comptime n: ?comptime_int) comptime_int {
+        const fills = "bytes.digest: the `final` of `" ++ @typeName(H) ++ "` fills a `" ++ @typeName(Out) ++ "`";
+        if (!@hasDecl(H, "digest_length")) return n orelse @compileError(
+            fills ++ " of any length, and it declares no `digest_length` to say how many bytes; " ++
+                "declare `pub const digest_length`, or fill a `*[n]u8`",
+        );
+        const Length = @TypeOf(H.digest_length);
+        const number = "the number of bytes `final` fills, such as `pub const digest_length = 32`";
+        switch (@typeInfo(Length)) {
+            .int, .comptime_int => {},
+            else => @compileError("bytes.digest: `digest_length` of `" ++ @typeName(H) ++ "` is a `" ++ @typeName(Length) ++ "`; it is " ++ number),
         }
+        const declared: comptime_int = H.digest_length;
+        if (declared < 0) @compileError(std.fmt.comptimePrint(
+            "bytes.digest: `digest_length` of `{s}` is {d}, which is no number of bytes; it is {s}",
+            .{ @typeName(H), declared, number },
+        ));
+        if (n) |len| if (len != declared) @compileError(std.fmt.comptimePrint(
+            "{s}, and its `digest_length` is {d}; make them the same number of bytes",
+            .{ fills, declared },
+        ));
+        return declared;
     }
 
     fn method(comptime H: type, comptime name: []const u8) ?std.builtin.Type.Fn {
@@ -155,13 +193,6 @@ const Finish = struct {
         return switch (@typeInfo(@TypeOf(@field(H, name)))) {
             .@"fn" => |info| info,
             else => null,
-        };
-    }
-
-    fn isBytes(comptime T: ?type) bool {
-        return switch (@typeInfo(T orelse return false)) {
-            .array => |array| array.child == u8,
-            else => false,
         };
     }
 };

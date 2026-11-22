@@ -1378,16 +1378,25 @@ it returns is a struct with one field, `hasher`, that begins as `start`.
 
 - **A hasher is told by its shape**, not by a list of names: it has
   `update(*H, []const u8)`, and a `final` that returns the digest, an
-  unsigned integer, or fills an array of bytes with it (a slice is given
-  `digest_length` bytes). Nothing else is a digest: a `final` that returns
-  a `bool` or a signed number, or one that can fail, is refused, and so is
-  an `update` that returns something. That is `Md5`,
-  `Sha1`, `sha2`, `sha3`, `blake2`, `Blake3` and `AsconHash256` of
-  `std.crypto.hash`, and the CRCs, `Fnv1a`, `Wyhash` and the three `XxHash`
-  of `std.hash`; a hasher of your own with that shape is taken too.
+  unsigned integer, or fills it into a `*[n]u8`, or into a `[]u8` that is
+  given `digest_length` bytes. Nothing else is a digest: a `final` that
+  returns a `bool` or a signed number, or one that can fail, is refused, and
+  so is an `update` that returns something, and an output with a sentinel,
+  an alignment or a qualifier of its own. That is, of `std.crypto.hash`:
+  `Md5`, `Sha1`, the hashers of `sha2` and `blake2`, `Blake3`,
+  `AsconHash256`, and of `sha3` `Sha3_224` to `Sha3_512`, `Keccak256`,
+  `Keccak512`, `Shake128`, `Shake256`, `TurboShake128`, `TurboShake256`,
+  `CShake128`, `CShake256`, `TupleHash128`, `TupleHash256`, `KT128` and
+  `KT256`; and of `std.hash` the CRCs, `Fnv1a`, `Wyhash` and the three
+  `XxHash`. A hasher of your own with that shape is taken too.
+- **A `TupleHash` hashes a tuple**: every piece is one element of it, so its
+  digest is of the pieces as they came, and not of their bytes alone.
 - **Not a hasher here**: `std.hash.Adler32`, which has no `final`;
   `Murmur` and `CityHash`, which hash one text and are not fed in pieces;
-  `AsconXof128`, which has no length of its own for its output.
+  `AsconXof128`, which squeezes an output of any length and has no
+  `final`; and
+  `sha3.KMac128` and `KMac256`, whose length is a `mac_length` and not a
+  `digest_length`.
 - **The digest is what the hasher's own `final` returns or fills**: an
   array of bytes for those of `std.crypto.hash`, an unsigned integer for
   those of `std.hash`. An

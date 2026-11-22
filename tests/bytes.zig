@@ -124,9 +124,29 @@ test "a hasher that fills an output is finished into its digest_length bytes" {
     var shake: [Shake128.digest_length]u8 = undefined;
     Shake128.hash(text, &shake, .{});
     try std.testing.expectEqual(shake, try digested(Shake128.init(.{}), &digits));
+
+    const Sha3_256 = std.crypto.hash.sha3.Sha3_256;
+    var sha3: [Sha3_256.digest_length]u8 = undefined;
+    Sha3_256.hash(text, &sha3, .{});
+    try std.testing.expectEqual(sha3, try digested(Sha3_256.init(.{}), &digits));
+}
+
+test "a TupleHash is taken, and its digest is of the pieces and not of their bytes" {
+    // A TupleHash is started by absorbing its name, at compile time here.
+    @setEvalBranchQuota(100_000);
+    const TupleHash128 = std.crypto.hash.sha3.TupleHash128;
+    var tuple = TupleHash128.init();
+    for (digits) |piece| tuple.update(piece);
+    var expected: [TupleHash128.digest_length]u8 = undefined;
+    tuple.final(&expected);
+    const pieces = try digested(TupleHash128.init(), &digits);
+    try std.testing.expectEqual(expected, pieces);
+    try std.testing.expect(!std.mem.eql(u8, &pieces, &try digested(TupleHash128.init(), &.{"123456789"})));
 }
 
 test "the digest is what the hasher's own final returns" {
+    // A TupleHash is started by absorbing its name, at compile time here.
+    @setEvalBranchQuota(100_000);
     const hash = std.crypto.hash;
     const expect = struct {
         fn result(comptime Result: type, comptime start: anytype) !void {
@@ -139,10 +159,36 @@ test "the digest is what the hasher's own final returns" {
     try expect([32]u8, hash.sha2.Sha256.init(.{}));
     try expect([48]u8, hash.sha2.Sha384.init(.{}));
     try expect([64]u8, hash.sha2.Sha512.init(.{}));
+    try expect([24]u8, hash.sha2.Sha256T192.init(.{}));
+    try expect([28]u8, hash.sha2.Sha512T224.init(.{}));
+    try expect([32]u8, hash.sha2.Sha512T256.init(.{}));
+    try expect([28]u8, hash.sha2.Sha512_224.init(.{}));
+    try expect([32]u8, hash.sha2.Sha512_256.init(.{}));
+    // Every hasher of `std.crypto.hash.sha3` that the guide names.
+    try expect([28]u8, hash.sha3.Sha3_224.init(.{}));
     try expect([32]u8, hash.sha3.Sha3_256.init(.{}));
+    try expect([48]u8, hash.sha3.Sha3_384.init(.{}));
+    try expect([64]u8, hash.sha3.Sha3_512.init(.{}));
     try expect([32]u8, hash.sha3.Keccak256.init(.{}));
+    try expect([64]u8, hash.sha3.Keccak512.init(.{}));
+    try expect([32]u8, hash.sha3.Shake128.init(.{}));
     try expect([64]u8, hash.sha3.Shake256.init(.{}));
+    try expect([32]u8, hash.sha3.TurboShake128(null).init(.{}));
+    try expect([64]u8, hash.sha3.TurboShake256(null).init(.{}));
+    try expect([32]u8, hash.sha3.CShake128.init(.{}));
+    try expect([64]u8, hash.sha3.CShake256.init(.{}));
+    try expect([32]u8, hash.sha3.TupleHash128.init());
+    try expect([64]u8, hash.sha3.TupleHash256.init());
+    try expect([32]u8, hash.sha3.KT128.init(.{}));
+    try expect([64]u8, hash.sha3.KT256.init(.{}));
+    try expect([16]u8, hash.blake2.Blake2s128.init(.{}));
+    try expect([20]u8, hash.blake2.Blake2s160.init(.{}));
+    try expect([28]u8, hash.blake2.Blake2s224.init(.{}));
     try expect([32]u8, hash.blake2.Blake2s256.init(.{}));
+    try expect([16]u8, hash.blake2.Blake2b128.init(.{}));
+    try expect([20]u8, hash.blake2.Blake2b160.init(.{}));
+    try expect([32]u8, hash.blake2.Blake2b256.init(.{}));
+    try expect([48]u8, hash.blake2.Blake2b384.init(.{}));
     try expect([64]u8, hash.blake2.Blake2b512.init(.{}));
     try expect([32]u8, hash.Blake3.init(.{}));
     try expect([32]u8, hash.ascon.AsconHash256.init(.{}));
