@@ -85,7 +85,8 @@ An unknown, duplicate or missing field fails the run, as does anything after
 the object. The archive holds `id`, `ts_ms`, `action` and `resource` in that
 order, one object per line, in input order.
 
-Parsing is `std.json` into a plain struct, which is looser than the table: it
+Parsing is `std.json`'s, through `json.decode` into a plain struct, which is
+looser than the table: it
 also takes a number written as a string (`"7"`) or with a zero fraction
 (`2.0`), an action by its position (`3` is `delete`), and text as an array of
 byte values (`[120,45,49]`). An empty `actor` is accepted. A unit test pins
@@ -140,37 +141,9 @@ One thing changed with it. A resource over 96 bytes is found by `std.json`
 while it fills the field, so it is reported as `LengthMismatch` and no
 longer as `StreamTooLong`.
 
-## Checks
-
-```sh
-zig build
-zig build test
-zig build test -Doptimize=ReleaseFast
-zig build check
-```
-
-`test` runs the record unit tests, the program on a reader and a writer in
-memory, the executable on temporary files, and the production pipe against a
-writer that stalls. That last test waits for the event that the source is
-suspended in a push, checks how many records it had handed over and that
-nothing was written, releases the writer and compares the whole archive.
-
-## What it leaves out
-
-- The CLI is `INPUT OUTPUT`: no `--help`, no stdin, and a wrong argument
-  count prints `fatal: InvalidArguments` without a usage line.
-- No stricter JSON than `std.json` (see [Format](#format)), and no check
-  that `actor` is not empty.
-- No benchmark and no plain-Zig baseline to compare against.
-
-## What this app needed from zrx
-
-One thing is worked around, with a handler:
-
-1. **JSON can be written but not read.** `zrx.ext.json` encodes only, and
-   `Line(n)` is written by `std.json` as a string but cannot be parsed from
-   one. `decode` therefore calls `std.json` itself, into a struct of slices
-   that borrow from the line, and copies `resource` with `Line(96).from`.
-   That struct cannot leave the handler, so parsing and building the record
-   are one handler instead of two stages, and it holds a scratch buffer for
-   unescaped text.
+One thing is heavier than it has to be. `actor` and `detail` must be there
+and are not kept, and a decoded type holds no slice, so `Entry` reads each
+into a `Line(1024)` that `allowed` then drops: up to a kibibyte copied per
+field for a check that it is a string. A type that reads a string and keeps
+nothing would do; zrx does not have one, as
+[its design record](../../../docs/spec-json.md) says.
