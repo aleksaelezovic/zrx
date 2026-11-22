@@ -964,6 +964,27 @@ test "by Windows rules a path of more UTF-16 units than std converts is refused,
     try std.testing.expect(units.len > wide_room);
     var more: zrx.Line(n) = try .from("C:");
     try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &more, 2, &wide));
+    // "\u{10000}" is four bytes and two units.
+    var pairs: [4 * ((wide_room - 1) / 2)]u8 = undefined;
+    for (0..pairs.len / 4) |i| pairs[4 * i ..][0..4].* = "\u{10000}".*;
+    var paired: zrx.Line(n) = try .from("C:");
+    try fs.joinAs(.windows, n, &paired, 2, pairs[0 .. pairs.len - 4]);
+    var unpaired: zrx.Line(n) = try .from("C:");
+    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &unpaired, 2, pairs[0 .. pairs.len - 4] ++ "\u{10000}"));
+}
+
+test "by Windows rules a path cut inside a character is counted, not read past its end" {
+    // The directory a source is given is the caller's, and need not be text
+    // at all. `std` would refuse it on open; it must not be read past first.
+    const wide_room = std.os.windows.PATH_MAX_WIDE;
+    const n = 2 * wide_room;
+    var wide: [2 * (wide_room - 2)]u8 = undefined;
+    for (0..wide_room - 2) |i| wide[2 * i ..][0..2].* = "é".*;
+    // The first byte of a three-byte character, and nothing after it.
+    var cut: zrx.Line(n) = try .from("C:");
+    try fs.joinAs(.windows, n, &cut, 2, wide[0 .. wide.len - 2] ++ "\xe2");
+    var over: zrx.Line(n) = try .from("C:");
+    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &over, 2, wide ++ "\xe2"));
 }
 
 // ---------------------------------------------------------------------------
