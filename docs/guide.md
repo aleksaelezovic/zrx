@@ -1018,12 +1018,20 @@ Reading:
 - Every member of a gzip stream is read, one after another, as `gzip -d`
   does, and every frame of a Zstandard stream: both are read to the end of
   their input.
-- A zlib stream is one stream, and what follows it is not read. In a reader
-  of your own it is still there when the run has returned, if that reader
-  has a buffer of 4 bytes or more. One with less is read 4 KiB at a time,
-  and what was read past the end of the stream is gone.
-- The checksum and the length a gzip member declares, and the checksum of a
-  zlib stream, are compared with what was read.
+- A zlib stream is one stream, and what follows it is not read. Once the
+  stream has been read to its end, what follows is still in a reader of
+  your own if that reader has a buffer of 4 bytes or more. One with less is
+  read 4 KiB at a time, and what was read past the end of the stream is
+  gone.
+- A header is checked before anything after it is decoded. A gzip header
+  with a reserved flag set, and a zlib header whose check bits are wrong or
+  that asks for a preset dictionary, fail the read.
+- Once a gzip member or a zlib stream has been read to its end, the
+  checksum, and for gzip the length, that it declares are compared with
+  what was read.
+- A pipe that is done before its input ends, after `take(1)` say, reads no
+  further. What it did not read is not checked, and where the reader of
+  the compressed bytes then stands is not said.
 - A stream that is cut short, is corrupt, does not match its checksum, or
   (gzip) is followed by bytes that are no member fails the read, and with it
   the run, with `error.ReadFailed`: the error of any reader given to
@@ -1068,9 +1076,13 @@ Writing:
   binding wraps has returned without an error, and `Into` is then flushed.
   Writing it can fail, so it is part of the run and not of a release: the
   run fails with `error.WriteFailed`.
-- A run that failed leaves the stream without its end, and reading it back
-  fails. Under a `fileWriter` in `.publish` mode the end is written before
-  the file is given its name, and a failed run names no file.
+- When what the binding wraps fails, the stream is left without its end,
+  and reading it back fails. A failure after that, in writing the end or in
+  another binding, may leave the whole stream behind.
+- Under a `fileWriter` in `.publish` mode the end is written before the
+  file is given its name, so a file that was named holds the whole stream.
+  Publication is atomic per file, not per run, as for any
+  [published file](#input-and-output).
 - Use `write`, not `print`. A flush of the compressed role ends a block and
   does not reach `Into`, so flushing every item costs compression and shows
   nobody the item.

@@ -15,9 +15,10 @@
 //! Nothing here is known to the core, and nothing of it is in a pipe: each
 //! of these is a resource that needs one role and provides another, and the
 //! order of acquisition follows from that. The codecs are `std`'s; what is
-//! added is a buffer in front of a decoder, the check of a checksum `std`
-//! reads and does not compare, and the end of a compressed stream once the
-//! run has succeeded.
+//! added is a buffer in front of a decoder, the checks of a header that
+//! `std` reads past, the check of a checksum `std` reads and does not
+//! compare, and the end of a compressed stream once what the binding wraps
+//! has succeeded.
 const std = @import("std");
 const Io = std.Io;
 const di = @import("../di.zig");
@@ -80,8 +81,9 @@ fn roleOf(comptime side: Side, comptime Role: type, interface: *side.Interface) 
 /// is then a gzip file by this binding alone. `buffer_size` is what it is
 /// for `fileReader`: with `lines`, at least the line limit plus one.
 ///
-/// Every member of the stream is read, one after another, and each one's
-/// checksum and length are compared with what it declares. A stream that is
+/// Every member of the stream is read, one after another. Each one's header
+/// is checked before it is decoded, and its checksum and length are compared
+/// with what it declares once it has been read to its end. A stream that is
 /// cut short, corrupt, or followed by bytes that are no member fails the
 /// read, and with it the run, with `error.ReadFailed`.
 ///
@@ -92,12 +94,14 @@ pub fn gzipReader(comptime Role: type, comptime From: type, comptime buffer_size
     return .{};
 }
 
-/// `gzipReader` for a zlib stream (RFC 1950). Its checksum is compared.
+/// `gzipReader` for a zlib stream (RFC 1950). Its header is checked, and
+/// one that asks for a preset dictionary fails the read: there is none to
+/// give. Its checksum is compared once it has been read to its end.
 ///
-/// There is one stream, and what follows it is not read: it is still in the
-/// reader keyed by `From` when the run has returned, if that reader has a
-/// buffer of 4 bytes or more. One with less is read 4 KiB at a time, and
-/// what was read past the end of the stream is gone.
+/// There is one stream, and what follows it is not read. Once the stream has
+/// been read to its end, what follows is still in the reader keyed by `From`
+/// if that reader has a buffer of 4 bytes or more. One with less is read 4
+/// KiB at a time, and what was read past the end of the stream is gone.
 pub fn zlibReader(comptime Role: type, comptime From: type, comptime buffer_size: usize) FlateReader(.zlib, Role, From, buffer_size) {
     return .{};
 }
@@ -110,7 +114,7 @@ const held_bytes = 4096;
 
 /// The most `std`'s flate decoder asks its input to hold: it looks at four
 /// bytes and takes what it used of them. A header is read into memory of
-/// the decoder's own.
+/// the decoder's own, and `begin` looks at no more than four bytes of it.
 const flate_ahead = 4;
 
 fn FlateReader(comptime container: flate.Container, comptime Role: type, comptime From: type, comptime buffer_size: usize) type {
@@ -199,8 +203,9 @@ fn ZstdReader(comptime Role: type, comptime From: type, comptime buffer_size: us
 /// plain bytes, from the window to the buffer.
 ///
 /// Every byte handed on passes through here, which is where a codec counts
-/// them (`passed`), and where it says what the end of the decoder's stream
-/// means (`ended`): the end, a failure, or more to come.
+/// them (`passed`), where it checks what `std` does not of a header before
+/// the decoder takes it (`begin`), and where it says what the end of the
+/// decoder's stream means (`ended`): the end, a failure, or more to come.
 fn Plain(comptime Codec: type) type {
     return struct {
         codec: Codec,
@@ -231,6 +236,7 @@ fn Plain(comptime Codec: type) type {
                 return n;
             }
             if (self.failed) return error.ReadFailed;
+            self.codec.begin() catch return self.fail();
             // Nothing is buffered, so this asks the decoder for room for one
             // byte, which its window always has.
             decoded.fillMore() catch |err| switch (err) {
@@ -260,6 +266,30 @@ fn Inflate(comptime container: flate.Container) type {
 
         fn passed(self: *@This(), bytes: []const u8) void {
             self.sum.update(bytes);
+        }
+
+        /// `std` checks the magic number and the method of a header, and
+        /// reads the rest as it comes. What the RFCs say a decoder must
+        /// refuse besides is refused here, while the decoder has taken none
+        /// of it: a reserved gzip flag, which may mean a field `std` would
+        /// read as data (RFC 1952), and a zlib header whose check bits are
+        /// wrong, or that asks for a preset dictionary (RFC 1950).
+        fn begin(self: *@This()) Io.Reader.Error!void {
+            if (self.decoder.state != .protocol_header) return;
+            const in = self.decoder.input;
+            switch (container) {
+                .gzip => {
+                    const reserved: u8 = 0b1110_0000;
+                    if ((try in.peekArray(4))[3] & reserved != 0) return error.ReadFailed;
+                },
+                .zlib => {
+                    const header = try in.peekArray(2);
+                    const dictionary: u8 = 0b0010_0000;
+                    if (std.mem.readInt(u16, header, .big) % 31 != 0) return error.ReadFailed;
+                    if (header[1] & dictionary != 0) return error.ReadFailed;
+                },
+                .raw => comptime unreachable,
+            }
         }
 
         /// The decoder has read a whole stream and its trailer. `std` keeps
@@ -293,6 +323,8 @@ const Unzstd = struct {
 
     fn passed(_: *Unzstd, _: []const u8) void {}
 
+    fn begin(_: *Unzstd) Io.Reader.Error!void {}
+
     /// `std` goes from frame to frame itself: its end is the end.
     fn ended(_: *Unzstd) Io.Reader.Error!void {
         return error.EndOfStream;
@@ -316,9 +348,11 @@ pub const WriterOptions = struct {
 /// The stream is given its end, with checksum and length, once everything
 /// the binding wraps has returned without an error, and `Into` is flushed
 /// then. That can fail, which a release cannot, so it is part of the run:
-/// the run fails with `error.WriteFailed`. A run that failed leaves the
-/// stream without its end, and reading it back fails. Under a `fileWriter`
-/// in `.publish` mode the end is written before the file is named.
+/// the run fails with `error.WriteFailed`. When what the binding wraps
+/// fails, the stream is left without its end, and reading it back fails. A
+/// failure after that, in writing the end or in another binding, may leave
+/// the whole stream behind. Under a `fileWriter` in `.publish` mode the end
+/// is written before the file is named.
 ///
 /// A flush of `Role` ends a block and does not reach `Into`, so `print`,
 /// which flushes every item, costs compression and shows nobody the item:

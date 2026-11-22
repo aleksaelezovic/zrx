@@ -364,14 +364,20 @@ to this file; edit `AGENTS.md`, not copies.
     can hold what the decoder asks for. Do not put a buffer of the
     binding's between them: it takes from the caller's reader what
     follows a zlib stream.
-  - `std` compares no gzip or zlib checksum and reads one gzip member.
-    The extension does both. A decoder that failed is not asked again.
+  - `std` compares no gzip or zlib checksum, checks only part of a
+    header, and reads one gzip member. The extension does all three. A
+    decoder that failed is not asked again.
+  - A checksum is compared, and what follows a zlib stream is left, only
+    once the stream is read to its end: a pipe that is done early reads
+    no further.
   - A corrupt or truncated input is `error.ReadFailed` and nothing more
     specific, so a rescue written for the plain program still fits.
   - The end of a compressed stream is written in the binding after
     everything it wraps has returned without an error, as `.publish`
-    names its file, and the writer below is flushed there. A failed run
-    leaves the stream without its end on purpose.
+    names its file, and the writer below is flushed there. A failure of
+    what the binding wraps leaves the stream without its end on purpose;
+    nothing more is said of a failed run, and publication is atomic per
+    file.
   - Do not wrap `std` writers. What cannot be said at compile time, a
     writer below or a Zstandard slice that `std` would assert on, is an
     error at acquisition.

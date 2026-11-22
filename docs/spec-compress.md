@@ -164,6 +164,38 @@ Bytes that are no member fail the read: zero padding after a member is
 refused, where `gzip` warns and goes on. A zlib stream is one stream, and
 what follows it is not read.
 
+The checksums are compared where a stream ends, so only a stream that is
+read to its end is checked. A pipe that is done before that, after
+`take(1)` say, reads no further, and a wrong checksum it never reached is
+not its failure (`a pipe that is done does not read to the end, ...`). Nor
+is anything said of where the reader of the compressed bytes then stands:
+what follows a zlib stream is in it only once the stream was read to its
+end. A review of PR 65 found the guide promising both without that
+condition.
+
+### Headers
+
+`std` checks the magic number and the method of a gzip header, and the
+method and window size of a zlib header, and reads past the rest. RFC 1950
+says a decoder must check the whole of `CMF` and `FLG`, and `std` ignores
+`FCHECK`: a zlib header with wrong check bits decoded, and its checksum
+matched. It ignores `FDICT` too, and reads the four bytes that name the
+dictionary as deflate data. RFC 1952 says a decoder must refuse a gzip
+header with a reserved flag set, since the flag may mean a field that would
+be read as data; `std` does not look.
+
+`Inflate.begin` checks those before the decoder takes the header, while
+the decoder is in its `protocol_header` state. It looks at the first two
+bytes of a zlib header and the first four of a gzip header, and the reader
+the decoder reads from holds four (`flate_ahead`). For gzip that is every
+member, since the decoder is started again for each one. Each of these
+fails the read like a corrupt stream. A preset dictionary is refused rather
+than read: there is no way to give one, and a stream that needs one cannot
+be decoded without it.
+
+The header CRC of a gzip header (`FHCRC`) is skipped, as `std` skips it:
+RFC 1952 does not require a decoder to compare it.
+
 **The checksum of a Zstandard frame is not compared.** `std` reads it and
 drops it, and its `verify_checksum` option panics. It cannot be compared
 from outside `std` without parsing frames a second time. Of 381
@@ -184,8 +216,9 @@ has and then fails.
 
 ## What a failure is
 
-A stream that is cut short, corrupt, does not match its checksum, or (gzip)
-is followed by bytes that are no member fails the read with
+A stream that is cut short, corrupt, has a header a decoder must refuse,
+does not match its checksum, or (gzip) is followed by bytes that are no
+member fails the read with
 `error.ReadFailed`, and nothing more specific. That is what any reader
 given to `lines` fails with, so a gzip or zlib input adds no error to a
 run, and a rescue written for the plain program still fits. `fileReader`
@@ -212,10 +245,21 @@ The writer below is flushed there as well. Nobody else does it: a
 `fileWriter` that replaces a file leaves the flush to the sink of the pipe,
 and the sink flushes its own role, which is the compressing writer.
 
-A run that failed leaves the stream without its end, on purpose: reading it
-back fails, which is how a reader learns the writer did not finish. Under a
-`fileWriter` in `.publish` mode the end is written before the file is
-named, because release order is the reverse of acquisition.
+When what the binding wraps fails, the stream is left without its end, on
+purpose: reading it back fails, which is how a reader learns the writer did
+not finish. That is all that is said of a failed run. The end is written
+before `Into` is flushed, and that flush can fail with the end in place, in
+part or whole, and a binding outside this one can fail after it returned.
+The first wording said that any failed run left the stream without its
+end; a review of PR 65 showed both.
+
+Under a `fileWriter` in `.publish` mode the end is written before the file
+is named, because the compressing binding needs the file's role and is
+acquired inside it. So a file that was named holds a whole stream.
+Publication is atomic per file, not per run: of two published files, one
+can be named before naming the other fails, and the guide says so where it
+describes `.publish`. The first wording here, "a failed run names no file",
+did not hold for that run.
 
 `std` writers are not wrapped. A flush of the compressing writer ends a
 block and does not reach the writer below, so `print`, which flushes every
@@ -294,5 +338,6 @@ above.
 - xz, raw deflate, lzma, Zstandard compression, archives: see above.
 - The cause of a failed read.
 - Comparing the checksum of a Zstandard frame.
-- A dictionary for Zstandard: `std` refuses such a frame.
+- A dictionary for Zstandard: `std` refuses such a frame. A preset
+  dictionary for zlib: such a stream fails the read.
 - Reading on past zero padding after a gzip member.

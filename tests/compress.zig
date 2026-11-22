@@ -230,6 +230,31 @@ test "content that does not match its checksum or its length fails the read" {
     try std.testing.expectError(error.ReadFailed, reading(.gzip, words_gz ++ wrong_sum));
 }
 
+/// Python's `zlib.compressobj(9, zdict=words)` of `words`: a stream that
+/// asks for a preset dictionary and names it.
+const words_zdict = "\x78\xf9\x36\x87\x05\xc4\x4b\x44\x17\x00\x00\x36\x87\x05\xc4";
+
+test "a header that a decoder must refuse fails the read, although what follows it decodes" {
+    // `std` checks the magic number and the method and reads past the rest.
+    // Each of these decoded and matched its checksum without the check.
+    try reading(.zlib, words_zlib);
+    // The check bits of a zlib header (RFC 1950): the two bytes, read as a
+    // number, are a multiple of 31.
+    try std.testing.expectError(error.ReadFailed, reading(.zlib, &with(words_zlib, 1, words_zlib[1] ^ 1)));
+    // A preset dictionary, which nobody can give: the flag with right check
+    // bits and the stream of `words` after it, and a stream that has one.
+    try std.testing.expectError(error.ReadFailed, reading(.zlib, "\x78\xf9" ++ words_zlib[2..]));
+    try std.testing.expectError(error.ReadFailed, reading(.zlib, words_zdict));
+
+    // A gzip flag that is reserved (RFC 1952) may mean a field `std` would
+    // read as data. The header of `words_gz` has a name, and its flags are
+    // the fourth byte.
+    const reserved = with(words_gz, 3, words_gz[3] | 0x20);
+    try std.testing.expectError(error.ReadFailed, reading(.gzip, &reserved));
+    // A second member is checked like the first.
+    try std.testing.expectError(error.ReadFailed, reading(.gzip, words_gz ++ reserved));
+}
+
 test "bytes after a gzip member or a zstd frame that are neither fail the read" {
     // Both are read to the end of their input, so a read that succeeded
     // has left nothing in the reader it read from.
@@ -267,7 +292,7 @@ test "the lines before a failure have been delivered" {
     try std.testing.expectEqualStrings("alpha,beta,gamma,", log.buffered());
 }
 
-test "a pipe that is done does not read to the end, and a bad end it never reached is not its failure" {
+test "a pipe that is done does not read to the end, and a checksum it never reached is not compared" {
     var buffer: [64]u8 = undefined;
     var log: std.Io.Writer = .fixed(&buffer);
     const wrong_sum = with(words_gz, words_gz.len - 8, words_gz[words_gz.len - 8] ^ 1);
@@ -522,7 +547,7 @@ fn refuseTwo(n: u32) error{Two}!u32 {
     return if (n == 2) error.Two else n;
 }
 
-test "a run that failed leaves the stream without its end, and reading it back fails" {
+test "when what the binding wraps fails, the stream is left without its end, and reading it back fails" {
     var storage: [128]u8 = undefined;
     var archive: std.Io.Writer = .fixed(&storage);
     const failing = program(range(u32, 0, 5), .{ map(refuseTwo), print(Output, "{d}\n") });
@@ -557,7 +582,7 @@ test "a writer below with too small a buffer fails the run before anything is wr
     try std.testing.expectEqual(@as(usize, 0), archive.end);
 }
 
-test "compressed output goes through a published file's rules: the end is there before the name is" {
+test "a published file holds the whole stream, and a failure of what the binding wraps names none" {
     const io = std.testing.io;
     const path = ".zig-cache/tmp/zrx-compress-published.gz";
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
@@ -578,7 +603,8 @@ test "compressed output goes through a published file's rules: the end is there 
         compress.gzipReader(Input, File, 9),
     }));
 
-    // A failed run names no file.
+    // The failure is inside the binding, so the stream has no end and the
+    // file no name.
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
     const failing = program(range(u32, 0, 5), .{ map(refuseTwo), write(Output, "{d}\n") });
     const result = support.run(failing, .{
