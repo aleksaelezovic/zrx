@@ -369,32 +369,26 @@ to this file; edit `AGENTS.md`, not copies.
   `error.Canceled` without one. The rescue is given the cancellation and
   the choice is its handler's.
 - **The exit status is an extension, and nothing in it ends the process.**
-  `src/ext/cli.zig`, exported as `zrx.ext.cli` and analyzed only when
-  referenced, holds a type and one handler. `Exit` is
-  `struct { code: u8 = 0 }`, the dependency a dozen examples and apps each
-  defined. `fail(options)` is a composite handler of one error: it sets
-  the status, then writes `prefix: Name` to `zrx.Stderr` and flushes, best
-  effort. One spelling: it is always called with its options, and the
-  silent form is `.prefix = null`, not a second handler; what it requires
-  is read off the options, so the silent form asks for no `Stderr`. The
-  defaults are what Zig does with an error returned from `main`
-  (`error: Name`, status 1). It is a handler and not a binding:
-  `rescue(cli.fail(.{})).provide(.{stderr(256)})` stays the one way to bind
-  a rescue, and what `fail` asks for is checked by the errors `rescue`
-  already has. Being a handler of one error it also ends a pipe whose item
-  is one, `forEach(cli.fail(...))`, which is how the apps say the same of
-  what failed before there was a run; so there is no `refuse`. It refuses
-  anything but one error, also where the types would fit (a fallback of
-  `orElse` in a `tap`): the line names a failed run, not an item. It is
-  given `error.Canceled` like any failure and writes it; it calls neither
-  `std.process.exit` nor `io.recancel()`. Not there, and back only by
-  decision: an arguments source (`fromSlice(args[1..])` and
-  `fromIterator(&iterator)` are that already, pinned in `tests/cli.zig`),
-  choosing a program (a `switch` before `run`), a usage text and option
-  parsing (one app has them). The fixture of the line takes its error as a
-  parameter: errors are numbered per compilation, the two variants are
-  two, and a rescue fixture with the line differed from the function
-  handler in those numbers alone (145 instructions otherwise the same).
+  `src/ext/cli.zig` (`zrx.ext.cli`) holds a type and one handler, written
+  against the handler contract alone.
+  [docs/spec-cli.md](docs/spec-cli.md) is its design record: the reasons,
+  what was rejected and what was measured. Read it before changing the
+  extension. The rules it gives:
+  - `Exit` is a dependency and `fail(options)` a handler of one error. It
+    is not a binding: `rescue(cli.fail(.{})).provide(.{stderr(256)})` stays
+    the one way to bind a rescue, and what `fail` asks for is checked by
+    the errors `rescue` already has.
+  - One spelling: `fail` is always called with its options, and the silent
+    form is `.prefix = null`, not a second handler.
+  - The status is set first. The line is best effort.
+  - `fail` takes exactly one error and refuses anything else, also where
+    the types would fit: the line names a failed run, not an item.
+  - It is given `error.Canceled` like any failure. Nothing here calls
+    `std.process.exit` or `io.recancel()`.
+  - A fixture in which an error's name is written takes the error as a
+    parameter: errors are numbered per compilation.
+  - Not there, and back only by decision: an arguments source, choosing a
+    program, a usage text, option parsing, a `refuse`.
 
 ## Zero overhead
 

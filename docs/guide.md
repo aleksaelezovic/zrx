@@ -1842,10 +1842,10 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
-`same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
-whose path has stages of its own and the text patterns are `lean`, each with
-the reason next to it.
+Every synchronous operator has a fixture, and so have `rescue` and
+`cli.fail`. Twenty-six are `same`; `take`, `batch`, the handler
+combinators, `attempt`, a `recover` whose path has stages of its own and
+the text patterns are `lean`, each with the reason next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the
