@@ -943,48 +943,50 @@ test "a joined path that does not fit is refused, the separator counted" {
     try std.testing.expectError(error.PathTooLong, fs.joinAs(.posix, 3, &full, 3, ""));
 }
 
+/// The units of UTF-16 that Windows converts a path into without checking.
+const wide_room = std.os.windows.PATH_MAX_WIDE;
+
+/// `count` times `piece`, in `buffer`.
+fn repeated(buffer: []u8, piece: []const u8, count: usize) []u8 {
+    for (0..count) |i| @memcpy(buffer[i * piece.len ..][0..piece.len], piece);
+    return buffer[0 .. count * piece.len];
+}
+
+/// Joins `name` to the drive-relative directory `C:` by Windows rules.
+fn joinedToDrive(name: []const u8) !zrx.Line(4 * wide_room) {
+    var path: zrx.Line(4 * wide_room) = try .from("C:");
+    try fs.joinAs(.windows, 4 * wide_room, &path, 2, name);
+    return path;
+}
+
 test "by Windows rules a path of more UTF-16 units than std converts is refused, however few bytes over it is" {
     // `std` converts a path to UTF-16 in a buffer of `PATH_MAX_WIDE` units
     // and does not check first: a longer one would overrun it on open.
-    const wide_room = std.os.windows.PATH_MAX_WIDE;
-    const n = 2 * wide_room;
+    var buffer: [4 * wide_room]u8 = undefined;
     // After "C:", a name of one byte for each unit that is left, and one more.
-    const ascii: [wide_room - 1]u8 = @splat('a');
-    var fits: zrx.Line(n) = try .from("C:");
-    try fs.joinAs(.windows, n, &fits, 2, ascii[0 .. wide_room - 2]);
-    try std.testing.expectEqual(wide_room, fits.len);
-    var over: zrx.Line(n) = try .from("C:");
-    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &over, 2, &ascii));
+    try std.testing.expectEqual(wide_room, (try joinedToDrive(repeated(&buffer, "a", wide_room - 2))).len);
+    try std.testing.expectError(error.NameTooLong, joinedToDrive(repeated(&buffer, "a", wide_room - 1)));
     // "é" is two bytes and one unit: twice the bytes, and it is the units
     // that are counted.
-    var wide: [2 * (wide_room - 1)]u8 = undefined;
-    for (0..wide_room - 1) |i| wide[2 * i ..][0..2].* = "é".*;
-    var units: zrx.Line(n) = try .from("C:");
-    try fs.joinAs(.windows, n, &units, 2, wide[0 .. 2 * (wide_room - 2)]);
-    try std.testing.expect(units.len > wide_room);
-    var more: zrx.Line(n) = try .from("C:");
-    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &more, 2, &wide));
+    try std.testing.expect((try joinedToDrive(repeated(&buffer, "é", wide_room - 2))).len > wide_room);
+    try std.testing.expectError(error.NameTooLong, joinedToDrive(repeated(&buffer, "é", wide_room - 1)));
     // "\u{10000}" is four bytes and two units.
-    var pairs: [4 * ((wide_room - 1) / 2)]u8 = undefined;
-    for (0..pairs.len / 4) |i| pairs[4 * i ..][0..4].* = "\u{10000}".*;
-    var paired: zrx.Line(n) = try .from("C:");
-    try fs.joinAs(.windows, n, &paired, 2, pairs[0 .. pairs.len - 4]);
-    var unpaired: zrx.Line(n) = try .from("C:");
-    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &unpaired, 2, pairs[0 .. pairs.len - 4] ++ "\u{10000}"));
+    _ = try joinedToDrive(repeated(&buffer, "\u{10000}", (wide_room - 3) / 2));
+    try std.testing.expectError(error.NameTooLong, joinedToDrive(repeated(&buffer, "\u{10000}", (wide_room - 1) / 2)));
 }
 
 test "by Windows rules a path cut inside a character is counted, not read past its end" {
     // The directory a source is given is the caller's, and need not be text
     // at all. `std` would refuse it on open; it must not be read past first.
-    const wide_room = std.os.windows.PATH_MAX_WIDE;
-    const n = 2 * wide_room;
-    var wide: [2 * (wide_room - 2)]u8 = undefined;
-    for (0..wide_room - 2) |i| wide[2 * i ..][0..2].* = "é".*;
-    // The first byte of a three-byte character, and nothing after it.
-    var cut: zrx.Line(n) = try .from("C:");
-    try fs.joinAs(.windows, n, &cut, 2, wide[0 .. wide.len - 2] ++ "\xe2");
-    var over: zrx.Line(n) = try .from("C:");
-    try std.testing.expectError(error.NameTooLong, fs.joinAs(.windows, n, &over, 2, wide ++ "\xe2"));
+    var buffer: [4 * wide_room]u8 = undefined;
+    // "é" until one unit is left, then the first byte of a three-byte
+    // character and nothing after it.
+    const cut = repeated(&buffer, "é", wide_room - 3);
+    buffer[cut.len] = 0xe2;
+    _ = try joinedToDrive(buffer[0 .. cut.len + 1]);
+    const over = repeated(&buffer, "é", wide_room - 2);
+    buffer[over.len] = 0xe2;
+    try std.testing.expectError(error.NameTooLong, joinedToDrive(buffer[0 .. over.len + 1]));
 }
 
 // ---------------------------------------------------------------------------
