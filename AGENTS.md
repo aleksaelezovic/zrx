@@ -186,6 +186,32 @@ to this file; edit `AGENTS.md`, not copies.
   `branch` is terminal direct fan-out and
   `route` is exclusive direct dispatch; either becomes concurrent only through
   a boundary in a sub-pipe. A rejoining route case cannot contain a boundary.
+- **Time is an extension without a task.** `src/ext/time.zig`
+  (`zrx.ext.time`) holds a source (`ticks`), a handler (`stamp`) and a
+  synchronous operator (`throttle`), each written against its public
+  contract. [docs/spec-time.md](docs/spec-time.md) is its design record:
+  the reasons, what was rejected and what was measured, and the choices
+  that are proposals until the owner decides. Read it before changing the
+  extension. The rules it gives:
+  - Nothing here keeps an item or starts a task. An operator that has to
+    emit while its input is silent is a boundary and belongs with
+    `debounce` and `batchWithin`.
+  - `ticks` pushes the count; the time is `map(time.stamp(clock))`. A
+    late tick is skipped, not caught up.
+  - `ticks` waits on `Stop.waitTimeout`, the one addition outside the
+    extension, and not with `sleep`. A wake is not the deadline: look at
+    the stop and the clock again.
+  - `stamp` is always called with its clock.
+  - Keep a stage's state in integers the size of a register: `throttle`
+    keeps 64 bits of nanoseconds, not the 96 of `std.Io`.
+  - Time is counted in 63 bits. A clock comes in through `reading` and a
+    period or window through `span`; `after` is the one place that adds
+    two times, and it says when the sum does not fit. `throttle` keeps
+    when an item passed, not when its window ends. A time past the limit
+    never comes: it is not an error and not a panic.
+  - Not there, and back only with stopping from outside or by decision:
+    `timeout`, `delay`, `sample`, a throttle that emits the last item.
+    The stage contract does not grow for them.
 - **Concurrent worker pipes are synchronous.** `concurrent(n, sub)` gives
   each worker its own pipe state and serializes pushes into the continuation.
   The boundary registers workers through `Tasks` and `tasks` in the existing

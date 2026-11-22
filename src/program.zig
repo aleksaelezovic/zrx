@@ -106,7 +106,9 @@ pub fn Program(comptime S: type, comptime P: type, comptime Bindings: type) type
                             break :tracked Frame.at.collectTasks(refs, Closed{}, .{ .owner = &root, .nodes = &slots });
                         } else Frame.at.tasks(refs, Closed{});
                         const io = segments[0].io();
-                        if (tracks_demand) signal = .{ .io = io };
+                        // The source waits on its own `std.Io`, which need
+                        // not be the first boundary's: it is set through that.
+                        if (tracks_demand) signal = .{ .io = if (comptime di.has(Env, Io)) di.get(body.env, Io) else io };
                         const source_env = if (wants_stop) di.extend(body.env, completion.Stop{ .signal = &signal }) else body.env;
                         const feed: Feed(S, SourceEnv, Frame) = .{ .source = &body.program.source, .env = source_env, .refs = refs, .on = io };
                         var scope: tasks.Scope = .{};
