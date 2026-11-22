@@ -249,6 +249,49 @@ export fn same_flatten(ptr: [*]const [4]u32, len: usize, out: *u64) void {
     flattened(exported_with_zrx, ptr[0..len], out);
 }
 
+// --- checked arithmetic (zrx.ext.math) ------------------------------------------------------------
+
+/// The checked forms: the first result that does not fit ends the run, and
+/// whether it came to its end is the result.
+///
+/// This fixture stands before the first one that names an error, on
+/// purpose. It brings `error.Overflow` into the file, and the integer
+/// behind an error is given out as the compiler comes to it, the fixtures
+/// at the end of the file first: after them, this one shifted the errors of
+/// `same_recover_fail`, `same_rescue` and `same_require`, and with them the
+/// form the optimizer gives their comparisons (see `required`).
+pub fn mathChecked(comptime with_zrx: bool, items: []const u32, out: *u32) bool {
+    if (with_zrx) {
+        const total = pipe(.{
+            map(zrx.ext.math.checked.mul(3)),
+            map(zrx.ext.math.checked.add(7)),
+            map(zrx.ext.math.checked.pow(2)),
+            fold(0, zrx.ext.math.checked.sum),
+            forEach(storeNarrow),
+        });
+        return ran(program(fromSlice(items), total), .{Narrow{ .out = out }});
+    } else {
+        var sum: u32 = 0;
+        for (items) |value| {
+            const tripled = std.math.mul(u32, value, 3) catch return false;
+            const raised = std.math.add(u32, tripled, 7) catch return false;
+            const squared = std.math.mul(u32, raised, raised) catch return false;
+            sum = std.math.add(u32, sum, squared) catch return false;
+        }
+        out.* = sum;
+        return true;
+    }
+}
+
+const Narrow = struct { out: *u32 };
+fn storeNarrow(result: Narrow, value: u32) void {
+    result.out.* = value;
+}
+
+export fn same_math_checked(ptr: [*]const u32, len: usize, out: *u32) bool {
+    return mathChecked(exported_with_zrx, ptr[0..len], out);
+}
+
 // --- recover --------------------------------------------------------------------------
 
 const Rejected = struct { count: *u32 };
@@ -1155,4 +1198,226 @@ pub fn attemptedCapped(comptime with_zrx: bool, items: []const u32, out: *u64) b
 /// `lean` for the same reason, with the comparison of `capped` on both paths.
 export fn lean_attempt_failing(ptr: [*]const u32, len: usize, out: *u64) bool {
     return attemptedCapped(exported_with_zrx, ptr[0..len], out);
+}
+
+// --- arithmetic (zrx.ext.math) --------------------------------------------------------------------
+
+const math = zrx.ext.math;
+
+/// Every transform of an unsigned item in turn, and the total in a wider type.
+pub fn mathChanged(comptime with_zrx: bool, items: []const u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            map(math.clamp(100, 100_000)),
+            map(math.mod(100)),
+            map(math.add(3)),
+            map(math.pow(3)),
+            map(math.mul(5)),
+            map(math.sub(7)),
+            map(math.div(2)),
+            fold(@as(u64, 0), math.sum),
+            forEach(store),
+        });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| {
+            const base = std.math.clamp(value, 100, 100_000) % 100 + 3;
+            sum += (base * base * base * 5 - 7) / 2;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_math_transforms(ptr: [*]const u32, len: usize, out: *u64) void {
+    mathChanged(exported_with_zrx, ptr[0..len], out);
+}
+
+const SignedResult = struct { out: *i64 };
+fn storeSigned(result: SignedResult, value: i64) void {
+    result.out.* = value;
+}
+
+/// The transforms that mean something else for a signed item: a division
+/// that rounds toward zero, a remainder that is never negative, and `neg`.
+pub fn mathSigned(comptime with_zrx: bool, items: []const i32, out: *i64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            map(math.div(3)),
+            map(math.mod(7)),
+            map(math.neg),
+            map(math.sub(3)),
+            fold(@as(i64, 0), math.sum),
+            forEach(storeSigned),
+        });
+        run(program(fromSlice(items), total), .{SignedResult{ .out = out }});
+    } else {
+        var sum: i64 = 0;
+        for (items) |value| sum += -@mod(@divTrunc(value, 3), 7) - 3;
+        out.* = sum;
+    }
+}
+
+export fn same_math_signed(ptr: [*]const i32, len: usize, out: *i64) void {
+    mathSigned(exported_with_zrx, ptr[0..len], out);
+}
+
+/// How far the items are from zero, added up: `abs` hands on the unsigned type.
+pub fn mathDistance(comptime with_zrx: bool, items: []const i32, out: *u64) void {
+    if (with_zrx) {
+        run(program(fromSlice(items), .{ map(math.abs), fold(@as(u64, 0), math.sum), forEach(store) }), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (items) |value| sum += @abs(value);
+        out.* = sum;
+    }
+}
+
+/// `lean`, not `same`, though the instructions are the same: the handler
+/// was a function of its own before it was inlined, and the optimizer
+/// wrote the range of what it returns on the call of `llvm.abs`. The loop
+/// has that call without the note, and the comparison does not look past
+/// one.
+export fn lean_math_abs(ptr: [*]const i32, len: usize, out: *u64) void {
+    mathDistance(exported_with_zrx, ptr[0..len], out);
+}
+
+const FloatResult = struct { out: *f64 };
+fn storeFloat(result: FloatResult, value: f64) void {
+    result.out.* = value;
+}
+
+/// The transforms of a float: here `div` divides and rounds nothing.
+pub fn mathFloats(comptime with_zrx: bool, items: []const f64, out: *f64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            map(math.neg),
+            map(math.sub(0.5)),
+            map(math.div(4)),
+            map(math.pow(3)),
+            map(math.abs),
+            map(math.clamp(0.5, 100)),
+            fold(0, math.sum),
+            forEach(storeFloat),
+        });
+        run(program(fromSlice(items), total), .{FloatResult{ .out = out }});
+    } else {
+        var sum: f64 = 0;
+        for (items) |value| {
+            const quarter = (-value - 0.5) / 4;
+            sum += std.math.clamp(@abs(quarter * quarter * quarter), 0.5, 100);
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_math_floats(ptr: [*]const f64, len: usize, out: *f64) void {
+    mathFloats(exported_with_zrx, ptr[0..len], out);
+}
+
+const Extent = struct { count: *usize, low: *u32, high: *u32 };
+
+fn storeSeen(extent: Extent, value: usize) void {
+    extent.count.* = value;
+}
+fn storeLeast(extent: Extent, value: u32) void {
+    extent.low.* = value;
+}
+fn storeMost(extent: Extent, value: u32) void {
+    extent.high.* = value;
+}
+
+/// The five reducers, each as the end of a stream: how many items, the
+/// smallest, the largest, and the product and the total in a wider type.
+pub fn mathReduced(comptime with_zrx: bool, items: []const u32, count: *usize, low: *u32, high: *u32, product: *u64, out: *u64) void {
+    if (with_zrx) {
+        const all = branch(.{
+            .{ fold(0, math.count), forEach(storeSeen) },
+            .{ fold(std.math.maxInt(u32), math.min), forEach(storeLeast) },
+            .{ fold(0, math.max), forEach(storeMost) },
+            .{ fold(@as(u64, 1), math.product), forEach(storeSecond) },
+            .{ fold(@as(u64, 0), math.sum), forEach(store) },
+        });
+        run(program(fromSlice(items), .{all}), .{ Extent{ .count = count, .low = low, .high = high }, Second{ .out = product }, Result{ .out = out } });
+    } else {
+        var seen: usize = 0;
+        var least: u32 = std.math.maxInt(u32);
+        var most: u32 = 0;
+        var multiplied: u64 = 1;
+        var sum: u64 = 0;
+        for (items) |value| {
+            seen += 1;
+            least = @min(least, value);
+            most = @max(most, value);
+            multiplied *= value;
+            sum += value;
+        }
+        count.* = seen;
+        low.* = least;
+        high.* = most;
+        product.* = multiplied;
+        out.* = sum;
+    }
+}
+
+export fn same_math_reducers(ptr: [*]const u32, len: usize, count: *usize, low: *u32, high: *u32, product: *u64, out: *u64) void {
+    mathReduced(exported_with_zrx, ptr[0..len], count, low, high, product, out);
+}
+
+/// One reducer in its three places: the largest value of every row
+/// (`reduce`), the running total of those (`scan`), and the total of the
+/// running totals (`fold`).
+pub fn mathPlaced(comptime with_zrx: bool, rows: []const [4]u32, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            map(zrx.reduce(0, math.max)),
+            zrx.scan(@as(u64, 0), math.sum),
+            fold(0, math.sum),
+            forEach(store),
+        });
+        run(program(fromSlice(rows), total), .{Result{ .out = out }});
+    } else {
+        var prefix: u64 = 0;
+        var sum: u64 = 0;
+        for (rows) |row| {
+            var most: u32 = 0;
+            for (row) |value| most = @max(most, value);
+            prefix += most;
+            sum += prefix;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_math_places(ptr: [*]const [4]u32, len: usize, out: *u64) void {
+    mathPlaced(exported_with_zrx, ptr[0..len], out);
+}
+
+pub const Measured = math.Stats(u32);
+const Measure = struct { out: *Measured };
+fn storeStats(measure: Measure, stats: Measured) void {
+    measure.out.* = stats;
+}
+
+/// `Stats` as the state of a `fold`: four values kept as the items pass.
+pub fn mathMeasured(comptime with_zrx: bool, items: []const u32, out: *Measured) void {
+    if (with_zrx) {
+        run(program(fromSlice(items), .{ fold(Measured{}, Measured.add), forEach(storeStats) }), .{Measure{ .out = out }});
+    } else {
+        var seen: usize = 0;
+        var least: u32 = std.math.maxInt(u32);
+        var most: u32 = 0;
+        var mean: f64 = 0;
+        for (items) |value| {
+            seen += 1;
+            least = @min(least, value);
+            most = @max(most, value);
+            mean += (@as(f64, @floatFromInt(value)) - mean) / @as(f64, @floatFromInt(seen));
+        }
+        out.* = .{ .count = seen, .min = least, .max = most, .mean = mean };
+    }
+}
+
+export fn same_math_stats(ptr: [*]const u32, len: usize, out: *Measured) void {
+    mathMeasured(exported_with_zrx, ptr[0..len], out);
 }

@@ -10,6 +10,7 @@
 - [Stopping early](#stopping-early)
 - [Concurrency and backpressure](#concurrency-and-backpressure)
 - [Input and output](#input-and-output)
+- [Math](#math)
 - [HTTP](#http)
 - [Lifetimes](#lifetimes)
 - [Writing your own](#writing-your-own)
@@ -243,7 +244,8 @@ Where the reducer declares none (an `anytype` parameter, a composite
 handler), the state has the type of the seed: `fold(@as(u64, 0), total)`
 accumulates in a `u64`. A number written without a type, `0`, has none to
 give. A composite reducer can say what it accumulates the items in (see
-[Writing your own](#writing-your-own)), and `0` is then a value of that;
+[Writing your own](#writing-your-own)), as those of [`ext.math`](#math)
+do, and `0` is then a value of that;
 with any other reducer it is a compile error that says to write
 `@as(T, seed)`. `reduce` reads its seed the same way.
 
@@ -1338,6 +1340,160 @@ const long = repeat(shout, .{ .min = 1, .max = 1 });
 Either way, bound the length of a text that comes from outside before a
 pattern is put to it.
 
+## Math
+
+`zrx.ext.math` is arithmetic on the items of a pipe. It is an extension:
+handlers over `std.math`, written against the public contract and compiled
+only when a program uses them. It has no operator.
+
+```zig
+const math = zrx.ext.math;
+
+/// Latencies in milliseconds: the total of the seconds, none over an hour.
+const report = pipe(.{
+    map(math.div(1000)),
+    map(math.clamp(0, 3600)),
+    fold(0, math.sum),
+    print(zrx.Stdout, "{d}\n"),
+});
+```
+
+Items are integers or floats. For a number inside a struct, take it out
+first: `compose(.{ field(.cents), math.div(100) })`.
+
+### Transforms
+
+A transform changes one item. Its operand is known at compile time, as the
+value of `gt(80)` is, and has to be a value of the items' type: nothing is
+converted.
+
+| | |
+|---|---|
+| `add(n)`, `sub(n)`, `mul(n)` | `item + n`, `item - n`, `item * n`. |
+| `div(n)` | The item divided by `n`. Between integers the result is rounded toward zero (`@divTrunc`), which is what `/` does where Zig takes it. |
+| `mod(n)` | `@mod(item, n)`: what is left over a multiple of `n`, never negative. `n` is greater than 0. |
+| `pow(n)` | The item multiplied by itself `n` times over. `n` is a whole number that is not negative; `pow(0)` is 1. |
+| `clamp(lo, hi)` | The item, or the bound it is beyond. |
+| `abs` | `@abs(item)`: of a signed integer, the unsigned integer of its size, so the smallest value has a result. |
+| `neg` | `-item`, for signed integers and floats. |
+
+`div` and `mod` are not a pair for a negative item: `-7` divided by 2 is
+`-3`, and `-7` modulo 2 is `1`.
+
+An operand that can never work does not compile: `div(0)`, `mod(0)`, a
+bound of `clamp` above the other, `add(-1)` for unsigned items.
+
+These are the plain operators, and an overflow is what it is for `+`: a bug
+that a safe build stops at and a fast one does not look for. Where an
+overflow is a possibility of the data, use the [checked](#checked) forms.
+
+### Reducers
+
+A reducer takes the state and an item and returns the state. One reducer
+serves three places:
+
+```zig
+fold(0, math.sum)          // one total, at the end of the stream
+scan(0, math.sum)          // the running total, after every item
+map(reduce(0, math.sum))   // the total of each array, slice or batch
+```
+
+That is why there is no operator that adds up a stream: it would be a
+second way to write the first line, and none for the other two.
+
+| | |
+|---|---|
+| `sum`, `product` | The items added up, or multiplied: `fold(0, sum)`, `fold(1, product)`. |
+| `min`, `max` | The smallest and the largest. |
+| `count` | How many items there were, whatever they are. |
+
+The state has the type of the seed. A seed written without a type takes
+the reducer's: the type of the items, and a `usize` for `count`. To
+accumulate in a wider type, give the seed one. It has to hold every item:
+
+```zig
+fold(@as(u64, 0), math.sum)   // u32 items, a u64 total
+```
+
+**The seed takes part like an item, and it is what a stream without items
+comes to.** For `sum` and `product` that is unremarkable: 0 and 1 change
+nothing. For `min` and `max` it decides the answer:
+
+```zig
+fold(0, math.max)                        // right for items that are not negative
+fold(std.math.maxInt(u32), math.min)     // the largest value changes no minimum
+fold(0, math.min)                        // always 0: the seed is the smallest
+fold(@as(?u32, null), math.min)          // null until there is an item
+```
+
+With a state that is an optional, `min` and `max` have no value before the
+first item, and a stream without items comes to null. That optional is a
+value like any other (see [route](#route)): nothing is dropped, `scan` emits
+every state, and what comes after decides what null means.
+
+### Checked
+
+`math.checked` holds the forms that can overflow, returning
+`error.Overflow` where the plain form would overflow: `add(n)`, `sub(n)`,
+`mul(n)`, `pow(n)`, `neg`, `sum` and `product`. Their items are integers. The error is the item's, so
+everything in [Errors](#errors) applies to it:
+
+```zig
+const checked = math.checked;
+
+fn largest(_: error{Overflow}, _: u32) u32 {
+    return std.math.maxInt(u32);
+}
+
+map(orElse(checked.mul(1000), largest))   // kept, as the largest value
+
+pipe(.{
+    recover(error{Overflow}, rejections), // or sent down a path, with the item
+    map(checked.mul(1000)),
+    fold(0, checked.sum),
+    print(zrx.Stdout, "{d}\n"),
+})
+```
+
+Nothing else is there, because nothing else can fail. A division by zero
+does not compile, `abs` returns a type that holds every result, and the
+one division that overflows, the smallest value of a signed type by -1, is
+`checked.neg`.
+
+### Stats
+
+`Stats(T)` keeps four values as items of type `T` pass: `count`, `min`,
+`max` and `mean`. It is a state with a reducer of its own, used like any:
+
+```zig
+const Latency = math.Stats(u32);
+
+const summary = pipe(.{
+    fold(Latency{}, Latency.add),
+    map(json.encode(.{})),
+    print(zrx.Stdout, "{f}\n"),
+});
+```
+
+`mean` is a float (`f64` for integer items) and is the running mean, which
+no number of items overflows. Before the first item `count` is 0, `mean` is
+0, and `min` and `max` are the values every item replaces: the largest and
+the smallest value of `T`, infinity for a float. Ask `count` whether there
+was an item.
+
+### What it costs
+
+The plain transforms, the reducers in all three places, the checked forms
+and `Stats` have fixtures that are the same instructions as the loop by
+hand; see [How zero overhead is checked](#how-zero-overhead-is-checked).
+`abs` is `lean`: the same instructions, with a note about the range of its
+result that the loop does not carry.
+
+Not there: forms that wrap or saturate, a power that is not a whole
+number, conversion between integers and floats, and vectors. A handler of
+your own over `std.math` is a few lines; these return when something needs
+them.
+
 ## HTTP
 
 `zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a
@@ -1771,10 +1927,10 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
+Every synchronous operator has a fixture, and so has `rescue`. Thirty-one are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
-whose path has stages of its own and the text patterns are `lean`, each with
-the reason next to it.
+whose path has stages of its own, the text patterns and `abs` of
+[`ext.math`](#math) are `lean`, each with the reason next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the
