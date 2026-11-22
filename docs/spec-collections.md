@@ -1,8 +1,11 @@
 # Spec: collections
 
 Status: implemented as `zrx.ext.collections` (`src/ext/collections.zig`), in
-a first version. Several of its choices are proposals that the owner has not
-decided on; they are listed under [Open for decision](#open-for-decision).
+its second version. The first kept its items in an arena that a binding
+held. The owner decided against that: the library preallocates, and an
+extension follows the rule of the core. Some choices of this version are
+proposals the owner has not decided on; they are listed under
+[Open for decision](#open-for-decision).
 
 This file is the design record of the extension: why it is the way it is,
 what was considered and left out, and what was measured. The
@@ -12,133 +15,197 @@ before editing it and points here for the reasons.
 
 ## What it is
 
-Five synchronous operators that keep items in a `std` container:
-`distinct`, `foldBy`, `sorted`, `top` and `takeLast`. With them come the
-binding that gives them memory (`memory()`, `Memory`), two handlers that
-make an order from a key (`ascending`, `descending`) and one that is the
-item itself (`itself`).
+Five synchronous operators that keep items: `distinct`, `foldBy`, `sorted`,
+`top` and `takeLast`. With them come two handlers that make an order from a
+key (`ascending`, `descending`) and one that is the item itself (`itself`).
 
-It is an extension and not core because every one of them needs an
-allocator. It is written against the operator, handler and resource
-contracts and is analyzed only when it is referenced. None of the operators
-is a task boundary, and none adds to the stage contract.
+It is written against the operator and handler contracts and is analyzed
+only when it is referenced. None of the operators is a task boundary, none
+adds to the stage contract, and none asks for a dependency.
 
-## Memory is a binding
+## Room, and no allocator
 
-The brief for this extension asked for the allocator as an ordinary
-dependency and for memory that is released on every way out, a failed run
-included. The stage contract does not allow both in the stage:
+The core and the extensions merged before this one use no allocator.
+`queue(n)`, `Batch(T, n)`, `Line(n)` and `stdout(n)` take a size that is
+known at compile time and keep the buffer in the stage or the binding. This
+extension does the same:
 
-- `finish` runs only at a normal end of the stream. When the run fails, is
-  cancelled, or fails upstream of the stage, no hook of the stage is called
-  (`tests/extending.zig`, "a failed synchronous run skips finish").
-- A stage that declares `deinit` is a compile error in `src/pipe.zig`: "bind
-  and release resources with `Program.provide`".
-- `init` returns nothing, so a stage cannot allocate there either. The
-  operators allocate at their first item.
+- The size is written where the operator is written: `sorted(1024, order)`.
+  A size of 0 is a compile error.
+- The room is part of a stage. Nothing is allocated and nothing is freed, so
+  a run that fails has nothing to give back. A stage has no hook for that
+  (`finish` is skipped on a failed run, a `deinit` is a compile error in
+  `src/pipe.zig`), which is what the first version needed a binding for.
+- Running out is an error with a name, for the one item that does not fit.
 
-So what has to be given back on every way out is owned by a binding, whose
-release runs after a failed run too. `memory()` is a resource that needs
-`std.mem.Allocator`, keeps a `std.heap.ArenaAllocator` in the frame of its
-`bind`, and provides `Memory`, a pointer to it. The operators ask for
-`Memory`, and a missing one is a compile error that says what to bind. As
-`Stdout` can be given as a value in place of `stdout(n)`, a `Memory` over an
-arena of the caller's own can be given in place of `memory()`.
+`takeLast` and `top` are never full: one drops its oldest item, the other
+the last of its order. `sorted`, `distinct` and `foldBy` can be.
 
-`Memory` is a type of its own and not `*std.heap.ArenaAllocator`: a handler
-of the caller's that resets its arena for every item would otherwise share
-it with the operators.
+### What full means
 
-### What was considered instead
+The failure happens in `push`, for the item that does not fit, before
+anything is written. So it is an item error like a handler's: the run fails
+with it, or a `recover` before the operator takes the item as a
+`Failed(error{TooManyItems}, Item)` and the stream goes on. What was kept
+stays as it was:
 
-- **The operators over the plain allocator, freeing in `finish`.** The
-  simplest, exact in what it holds, and it leaks on a failed run unless the
-  caller passes an arena. It is what the brief ruled out.
-- **A registry of live containers that the binding frees.** Needs a lock,
-  since stages behind a `queue` run on other tasks, and 0.17 has no lock
-  without a `std.Io` (`std.Thread.Mutex` is gone). It would also put the
-  container on the heap behind a pointer, away from the stage's own local.
-- **An allocator of our own that tracks what is live** and frees the rest at
-  the end. It would give exact memory and no leak, and it is a wrapper
-  around a `std` facility of the kind that was tried once for a writer and
-  taken out. Not built.
-- **A teardown hook in the stage contract.** That is a change to the core
-  and not this extension's to make.
+- `sorted` fails every later item with `error.TooManyItems`, and still
+  pushes the items it kept, in order, when the stream ends.
+- `distinct` fails an item whose key is one more than it has room for with
+  `error.TooManyKeys`. An item whose key it has seen is dropped as before.
+- `foldBy` fails such an item with `error.TooManyKeys` and does not ask its
+  reducer. An item whose key has a state is folded into it as before.
 
-`std.heap.ArenaAllocator` says its `Allocator` is thread-safe when its child
-is, which is what lets stages on several tasks share one.
+There are two names so that an error path can say which it takes, and two
+and not five because the name says what there was too much of. A pipe with
+two tables cannot tell them apart by the error; where that matters, each
+has a `recover` of its own before it.
 
-### What the arena costs
+### Two stages for each operator
 
-`sorted`, `top` and `takeLast` hold one buffer and give it back at the end
-of their stream (`clearAndFree`, `deinit`). The arena frees only its most
-recent allocation, so that room is used again only where nothing was taken
-since. One test pins the case that matters: inside `each`, a sub-pipe with
-one of the three uses the same room for every item (400 items of 500
-numbers held under 100 000 bytes, where all of them at once are 800 000).
-With a second operator of this extension in the sub-pipe, what the first
-held stays until the run is over.
+`AGENTS.md` says a stage that indexes into an array it owns cannot be kept
+in registers, and to give the buffer a stage of its own. Every operator
+here is two stages, spliced as `batch` is:
 
-`distinct` and `foldBy` give nothing back before the run is over. Their map
-is several allocations, of which the arena could free one, and a first
-version that called `clearAndFree` in `finish` measured the same as without
-it: over the same 400 items `distinct` took 4.0 MB from its allocator and
-`foldBy` 6.3 MB, where one item takes 25 kB and 44 kB. So inside `each`
-these two grow with the number of items. A resource acquired for one item,
-which the guide lists as not here yet, would make that an arena per item.
+- `Room` is the first: the arrays and nothing else. It hands each item on
+  with a pointer to them.
+- The second holds the counters and the bound handlers, and does all the
+  work through that pointer. It keeps the pointer for the end of the
+  stream, where it is used only if something was kept.
 
-A container that grows leaves its smaller self behind. Measured in
-ReleaseFast for a million `u32` items, as the peak of what the arena had
-taken from its child against the peak of the same container over that
-allocator directly:
+The optimizer then keeps every counter in a register, and the fixtures hold
+that: no operator has a load, a store or a stack slot more than its loop by
+hand. Three other shapes were built first and measured on aarch64-linux:
 
-| Operator | In the arena | Container alone | Ratio |
-|---|---|---|---|
-| `sorted` | 17.1 MB | 7.4 MB | 2.3 |
-| `distinct` | 61.4 MB | 28.1 MB | 2.2 |
-| `foldBy`, `u32` state | 128.3 MB | 31.7 MB | 4.1 |
-| `top`, 100 000 kept | 2.4 MB | 1.6 MB | 1.5 |
-| `takeLast`, 100 000 kept | 0.6 MB | 0.4 MB | 1.5 |
+- **One stage with the array and its counters.** Every counter was read
+  from memory and written back for each item.
+- **Counters first, then the array, told what to do in steps** (keep this
+  item at this index; at the end, push so many on), as `batch` does. The
+  stage with the array is then pushed to from two places, once for an item
+  and once for the end. For `takeLast` the optimizer inlined both. For
+  `sorted` it took `std`'s sort into that `push` first and then inlined the
+  `push` in neither place: 102 instructions against 1889 by hand, because
+  every item was a call. `top` did the same.
+- **The same, with the end of the stream done in the array stage's own
+  `finish`**, which has one caller. Everything was inlined, and the count
+  was stored into the array's stage at the end and read back: one store
+  more than by hand for `sorted`, four for `takeLast`.
 
-`top` and `takeLast` allocate once, exactly, at their first item; the half
-more is the arena's own. `foldBy` is the worst because its map keeps keys
-and states in two arrays and an index, and each of the three grows. These
-numbers are the reason to look at the alternatives above again.
+A pointer from one stage into another is safe here because stages are
+constructed in place and stay there until the stream has ended. It is given
+with every item and not once, since `init` has nothing to give it from; it
+is the same every time, and the optimizer takes it out of the loop.
+
+### The table
+
+`distinct` and `foldBy` find a key by its hash. `std`'s hash maps cannot be
+used over a buffer in the stage: they take their room from an allocator,
+and how many bytes a capacity comes to is private to them (the header of
+`std.array_hash_map`'s index, the capacities it rounds to), so a buffer for
+a `std.heap.FixedBufferAllocator` could only be sized by a guess that the
+next `std` may make wrong, as an `error.OutOfMemory` at run time.
+
+So the table is this extension's own, and it is small. The hash and the
+comparison are `std`'s (`std.array_hash_map.AutoContext` for a value,
+`hashString` and `std.mem.eql` for a text). The keys are in an array in the
+order they were first kept, which is the order `foldBy` emits in. Beside it
+is an array of places, at least twice as many as keys and a power of two; a
+place holds zero, or one more than the index of its key, in the smallest of
+`u8`, `u16`, `u32` that fits. A key is looked for from the place its hash
+names, one place after the other, until it or an empty place is found.
+Nothing is ever taken out, so there are no markers for that.
+
+How many keys are kept is not in the table: the stage after it counts, and
+says which index a new key gets.
+
+`top` does use a `std` container over its room: `std.PriorityQueue`, whose
+fields are public, set over the kept entries for each call. Its `push`
+takes an allocator for when it has to grow. Here it never has to, and it is
+given `std.mem.Allocator.failing`.
+
+### What was rejected
+
+- **The arena of the first version.** A binding `memory()` held a
+  `std.heap.ArenaAllocator` for the run and the operators asked for it.
+  Measured for a million `u32` items, the arena held 1.5 to 4.1 times what
+  the container alone holds, `distinct` and `foldBy` gave nothing back
+  before the run was over, and a review found that `foldBy` kept the copy
+  of a key whose item its reducer had rejected, until a fixed arena was
+  used up. It also made these the only operators that need an allocator.
+- **A slice of the caller's in place of a size.** An operator is one value,
+  and `concurrent(n, sub)` gives each worker stages of its own made from
+  that one value: the workers would share the buffer. A test runs `sorted`
+  and `foldBy` in three workers.
+- **Growing when full.** That is an allocator again.
+- **A teardown hook in the stage contract**, so that a stage could own
+  memory. A change to the core, and not needed without an allocator.
+
+## The stack
+
+The stages of a program are locals of `run`, so the room is on the stack of
+the task that calls `run`. That holds for a segment behind a `queue` too:
+its task works on stages that `run` constructed. The sub-pipes of `branch`
+and `route` and the workers of `concurrent` are values inside such a stage.
+A sub-pipe of `each` is constructed inside the `push` of its item, on the
+stack of the task that runs that segment.
+
+Measured on macOS (aarch64) with `sorted(n, descending(itself))` over `u64`
+items, every place of the room written, in Debug and in ReleaseFast, as a
+plain program, behind a `queue(4)`, inside `each`, and inside `each` behind
+a `queue(4)`:
+
+| Room | Result |
+|---|---|
+| 1 MiB to 15 MiB | ran, in all eight |
+| 16 MiB less 64 KiB (16 320 KiB) | ran (measured for the first and the last shape, in both modes) |
+| 16 MiB | faulted in seven; ran to its end in ReleaseFast inside `each` behind a `queue` |
+| 32 MiB | faulted (measured in Debug only) |
+
+16 MiB is the stack of the main thread of a Zig executable there and of the
+threads of `std.Io.Threaded` (`std.Thread.SpawnConfig.default_stack_size`).
+So what fits is the stack less what the calls need, which was under 64 KiB
+here, and Debug needs no second copy of the room. Too much is not an error
+and nothing checks. In Debug the process faults at the start of the run,
+where an undefined stage is filled. Optimized, it faults where the stack is
+first touched beyond its end, if that place is not mapped: the one run that
+did not fault wrote 16 MiB from a stack of 16 MiB, so some of it was
+written to memory that was not the stack's. That is why the guide does not
+promise a fault.
+
+`sorted` needs more than its room while it sorts: `std.sort.block`, which
+is `std.mem.sort`, has a `[512]T` of its own on the stack. For the `u64`
+items of the measurement that is 4 KiB; for an item of 4 KiB it is 2 MiB.
+
+Not measured: Linux, where the main thread's stack is raised to what the
+linker wrote, and Windows; an `Io` whose tasks have stacks of another size;
+a system of programs, whose members each run on a task.
 
 ## The candidates
 
 Each was checked against what `batch`, `fold`, `scan` and `reduce` can
 already write.
 
-- **`distinct(key)`: built.** Nothing in the core writes it. A `filter` with
-  a handler that keeps a set of its own does, and then nobody frees the set.
-- **`countBy(key)`: not built.** It is `foldBy(key, @as(u64, 0), count)`,
+- **`distinct(n, key)`: built.** Nothing in the core writes it.
+- **`countBy(key)`: not built.** It is `foldBy(n, key, @as(u64, 0), count)`,
   where `count` is one line. With `foldBy` there it would be a second
   spelling.
-- **`foldBy(key, seed, reducer)`: built**, in the place of `countBy`. It is
-  what counting, summing and a minimum per key have in common. `fold` cannot
-  write it: its state would be a map, which it emits as one item that
-  `flatten` does not take apart, and which nobody frees. For keys that are
-  the tags of an enum `fold` over a `std.EnumArray` does write it, without
-  memory, and the guide says so.
+- **`foldBy(n, key, seed, reducer)`: built**, in the place of `countBy`. It
+  is what counting, summing and a minimum per key have in common. For keys
+  that are the tags of an enum `fold` over a `std.EnumArray` writes it, and
+  the guide says so.
 - **`groupBy(key, sub)`: not built.** It would run a sub-pipe of its own for
-  every key, as `each` runs one for every item, and `foldBy` would be
-  `groupBy(key, .{fold(...)})`. Two things stand in the way. The stages of a
-  group either live in the map and move when it grows, which the contract's
-  construction in place does not allow for a stage that keeps a pointer to
-  itself, or each group is allocated apart, and then counting costs a
-  pointer and an allocation per key that the loop by hand does not have.
-- **`sorted(before)`: built.** `fold` into a list, `map` to its items and
-  `flatten` writes it, with two handlers of the caller's and a list nobody
-  frees.
-- **`top(n, before)`: built**, although `sorted(before)` followed by
-  `take(n)` emits the same. It keeps `n` items where that keeps the stream,
-  and that difference is the operator. A test holds the two to the same
-  output for every count, with ties.
+  every key, and `foldBy` would be `groupBy(key, .{fold(...)})`. With room
+  written out it is `n` times the stages of the sub-pipe, which is possible
+  now, and it is a larger operator than the five together. It comes by
+  decision.
+- **`sorted(n, before)`: built.**
+- **`top(n, before)`: built**, although `sorted(m, before)` followed by
+  `take(n)` emits the same. It needs room for `n` items where that needs
+  room for the stream, and that difference is the operator. Two tests hold
+  the two to the same output for every count, with ties and with keys that
+  are not numbers.
 - **`takeLast(n)`: built.** It was in the previous implementation; the owner
-  agreed that it returns here. `n` is a runtime count, as for `take`, and
-  the ring is allocated. A ring inline for a comptime `n`, as `batch` has
-  its buffer, would need no memory and is not what was built.
+  agreed that it returns here. It is a ring of `n` items.
 
 ### What each pushes at the end of the stream
 
@@ -146,29 +213,29 @@ already write.
 pushes a `Tagged(Key, State)` for every key, `.source` the key and `.item`
 the state, in the order the keys were first seen. `sorted` pushes every
 item in order, `top` its `n` in order, `takeLast` its `n` as they came. All
-of them stop pushing when a push is answered `.done`. The three that give
-their buffer back do so whether the pushes ended, were refused or failed.
+of them stop pushing when a push is answered `.done`.
 
 `foldBy` reuses `Tagged` because it is how the library pairs a value with
 what it belongs to. Its field names, `source` and `item`, were chosen for a
 source and read less well for a key and a state.
 
+`top` puts its heap in order by taking the root off again and again, each
+into the place the heap gave up for it. No second sort is needed.
+
 ## Keys
 
-`Keys` is the one place that reads what a key handler returns. There are
-three kinds:
+`Keys` is the one place that reads what a key handler returns. A key is
+kept after its item is gone and nothing is copied for it, so it is a value:
 
-- a value with nothing in it that points elsewhere and no float, hashed and
-  compared by its parts (`std.array_hash_map.Auto`);
-- a `[]const u8`, hashed by its bytes. The first of each is copied into the
-  arena: a slice an item carries may point into a buffer the source fills
-  again. `tests/collections.zig` has a source that does that;
-- a value that reads its text with `text()`, such as a `Line`, hashed by
-  that text and kept as the value. It is told by that name, as the pattern
-  extension tells it.
-
-The maps are array hash maps, which keep the order keys were first seen in.
-That order is what `foldBy` emits in.
+- A type with a pointer anywhere in it is a compile error that says to
+  return a value, for text a `Line(n)`. The type is read as the pattern
+  extension reads it (`holdsPointer`); the function is written out here,
+  since one extension does not import another. The first version copied a
+  `[]const u8` key into the arena.
+- A value with no float in it is hashed and compared by its parts.
+- A value that reads its text with `text()`, such as a `Line`, is hashed
+  and compared by that text: the bytes behind the text are not part of it.
+  A test fills them differently for every line.
 
 `itself` is the identity handler. Without it `distinct`, `foldBy` and the
 orders would each need a second form for an item that is its own key. It is
@@ -187,86 +254,94 @@ error that says to do what can fail in a `map` before.
 
 `sorted` uses `std.mem.sort`, which is stable. `top` keeps an arrival number
 with each item and orders ties by it, so that it emits exactly what
-`sorted` and `take` emit. Its heap is `std.PriorityQueue` with the last of
-the kept items at the root, and its context is the bound order by value:
-a pointer to the stage's own field would be a stage that points to itself.
+`sorted` and `take` emit.
+
+### A float that is not a number
+
+A review found that for `3, NaN, 1` `sorted` followed by `take(1)` emitted
+`3` and `top(1)` emitted `1`. The order compared keys with `<`, and a NaN is
+neither smaller nor larger than anything. So it tied with `3` and with `1`,
+which do not tie with each other, and that is not an order: a stable sort
+left the three as they came, and the heap dropped the `3`.
+
+`keyBefore` is now the one place that compares two keys, for both orders.
+A NaN comes after every number, in `ascending` and in `descending` alike,
+and no NaN before another. It is last both ways and not "largest", so that
+`top(n, descending(key))` is the `n` largest numbers and not the NaNs.
+
+An order of the caller's own is not checked, and cannot be: the guide says
+what it has to hold to.
 
 ## Failures
 
-- `error.OutOfMemory` fails the run like a handler error. A test refuses the
-  first allocation, then the second, and so on for each operator, and every
-  such run fails with that and leaks nothing.
+- An item that does not fit: see [What full means](#what-full-means).
 - `distinct` counts a key as seen before it pushes the item on. If the item
   fails further down and an error path takes it, a later item with that key
   is still a duplicate.
-- `foldBy` leaves no trace of an item whose reducer fails: the state of its
-  key is as it was, and a key that came with that item is removed again.
+- `foldBy` leaves no trace of an item whose reducer fails. The first
+  version took a place for the key, copied it, then asked the reducer, and
+  on a failure took the place back but not the copy; a review found the
+  copies. This version has nothing to take back: it looks the key up, then
+  looks whether there is room, then asks the reducer, and only then writes.
+  A test rejects one key six times with room for two keys, and two keys
+  that come after it fit.
+- An item whose key handler fails has not been looked up at all.
 
 ## Zero overhead
 
-`same_take_last` holds `takeLast` to the loop over a `std.Deque` in an
-arena: the same instructions.
+All five have a fixture in `tests/zero_overhead/cases.zig`. The loop by
+hand has arrays of the same size on its stack and its counters in locals;
+it calls `std`'s sort, heap and hash where the operator does, and walks a
+table written out there where the operator walks its own. With the small
+items of the fixtures the optimizer takes all of `std`'s code into both
+variants, so neither calls anything. On aarch64-linux and x86_64-linux:
 
-The other four have both variants in `tests/zero_overhead/cases.zig`, and
-`behavior.zig` requires equal results of them, but they are not exported
-for the comparison. `tools/same_code.zig` cannot compare them as it is:
+| Fixture | With zrx | By hand |
+|---|---|---|
+| `same_take_last` | 41, 103 | the same |
+| `lean_sorted` | 1890, 3295 | 1889, 3294 |
+| `lean_top` | 207, 251 | 227, 271 |
+| `lean_distinct` | 75, 75 | 74, 74 |
+| `lean_fold_by` | 98, 131 | 100, 133 |
 
-- a `lean_*` fixture may call nothing, and these call the allocator and
-  `std`'s containers;
-- a `same_*` fixture compares the names of what is called, and the compiler
-  numbers some of them per compilation: `sort.block.block__func_93` for an
-  instance of `std`'s sort that stays out of line, and
-  `switch.table...1560` for a table LLVM makes in the array hash map. The
-  tool erases such numbers for anonymous constants (`__anon_`) only.
+- `takeLast`: the same instructions. The loop keeps its array in a struct
+  of one field, because the comparison reads the type a stack slot is
+  declared with and the stage's is a struct.
+- `sorted`: what differs is inside `std`'s sort, where the optimizer counts
+  from zero in one variant and from one in the other.
+- `top`: the optimizer lays out the sifting of the heap differently, and
+  the pipeline is the shorter one.
+- `distinct` and `foldBy`: the keys and the places of the stage are one
+  stack slot, and an array each by hand.
 
-Measured once on aarch64-linux with those numbers erased from both files,
-outside the build: `top` is the same 317 instructions, `sorted` 3354 against
-3353 by hand, `distinct` 910 against 947 and `foldBy` 971 against 1002.
-Each of the four has as many loads, stores and stack slots as by hand;
-`sorted` and `top` call as often, `distinct` and `foldBy` four times fewer.
-What differs is how the optimizer laid out the inlined sort and map. This
-is a measurement and not a check: nothing in the build repeats it.
+A `lean` fixture has no call, and no more loads, stores or stack slots than
+its loop. These fixtures can fail with `error.TooManyItems` and
+`error.TooManyKeys`, which are named in the `comptime` block at the top of
+`cases.zig` so that both variants number them alike.
 
-The loop by hand is written over the same container in the same arena.
-Where the operator gives its buffer back before the arena is freed, so does
-the loop. One would not write that step by hand; it is on both sides so
-that what is compared is the operator.
-
-Two things were found on the way:
-
-- `Arena.bind` writes its arena in place. `.init(gpa)` left a copy of the
-  arena on the stack that the optimizer did not take out.
-- Adding these fixtures made six fixtures of the core fail, with a
-  comparison turned into its negation. An error is given its number when
-  the compiler first meets it, the two variants met `error.OutOfMemory` at
-  different points, and the optimizer chooses between equivalent forms by
-  such constants. `cases.zig` now names the errors of the fixtures in a
-  `comptime` block at its top, so that both variants number them alike.
+In a program with larger items or a larger room `std`'s sort may stay out
+of line. Nothing here says what the optimizer does then.
 
 ## Open for decision
 
 These are proposals of the session that wrote the extension.
 
-- **The arena.** It is what makes a failed run leak nothing without a change
-  to the core, and it costs what the table above shows. The alternatives
-  are a teardown hook for a stage, or operators over the plain allocator
-  that leave a failed run to the caller's arena.
+- **The names of the two errors**, `TooManyItems` and `TooManyKeys`, and
+  that there are two.
+- **Where a NaN sorts**: last in both orders.
+- **A table of this extension's own**, since `std`'s cannot be sized
+  without an allocator.
+- **`std.PriorityQueue` given `Allocator.failing`** for `top`, in place of a
+  heap written out here.
 - **`foldBy` in the place of `countBy`**, and no `groupBy`.
 - **Orders as handlers of two items**, with `ascending` and `descending`,
   and not a key alone.
 - **`itself`** here and not in `src/handlers.zig`.
 - **`top`**, although `sorted` and `take` emit the same.
-- **`takeLast(n)` with a runtime count** and an allocated ring.
-- **The comparison tool.** Erasing the numbers of `__func_N` and of
-  `switch.table` names, as it erases those of `__anon_`, would let `top` be
-  held as `same`. Letting a `lean` fixture call no more than its loop by
-  hand, where it now may call nothing, would cover the other three.
-  `AGENTS.md` says not to widen the tool to make a fixture pass, so neither
-  was done.
 
 ## Not there
 
 `countBy` and `groupBy`, for the reasons above. An order by several keys
 other than as a function of the caller's. `distinct` for adjacent items
-only, which needs no memory and would belong in the core. A limit on what
-`sorted` or `distinct` may hold. Sorting on disk.
+only, which needs no room and would belong in the core. Room that grows,
+room on the heap, sorting on disk. A text key that is not a value.

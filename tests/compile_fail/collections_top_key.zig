@@ -13,12 +13,9 @@ const orders = [_]Order{.{ .id = 1, .cents = 250, .heat = 0.5, .name = "a" }};
 
 fn ignore(_: anyerror) void {}
 
-/// Runs with everything the operators here ask for, so that the one thing
-/// wrong is what the case is about.
+/// Runs with a rescue, so that the one thing wrong is what the case is about.
 fn run(runnable: anytype) void {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    runnable.run(.{ collections.Memory{ .arena = &arena }, zrx.rescue(ignore) });
+    runnable.run(.{zrx.rescue(ignore)});
 }
 
 test {

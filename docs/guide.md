@@ -1642,8 +1642,8 @@ with a server written against `std` alone and records what was measured.
 
 `zrx.ext.collections` holds the operators that have to keep items: the keys
 seen so far, a state for every key, the whole stream to put it in order.
-They keep them in `std` containers, so they need memory, which is what sets
-them apart from the operators of the core.
+Each keeps them in room whose size is written with it, as `queue(n)` and
+`batch(n)` have theirs. None of them uses an allocator.
 
 ```zig
 const collections = zrx.ext.collections;
@@ -1659,65 +1659,106 @@ fn count(total: u64, _: Request) u64 {
 
 /// The three services with the most requests, the busiest first.
 const busiest = pipe(.{
-    foldBy(field(.service), @as(u64, 0), count),
+    foldBy(64, field(.service), @as(u64, 0), count),
     top(3, descending(field(.item))),
     forEach(report),
 });
 
-program(requests, busiest).run(.{ gpa, collections.memory(), rescue(fatal) });
+program(requests, busiest).run(.{rescue(fatal)});
 ```
 
-| Operator | Effect | Holds |
-|---|---|---|
-| `distinct(key)` | Passes an item the first time its key is seen. | Every key seen. |
-| `foldBy(key, seed, f)` | `fold`, once for every key. When the stream ends, each key goes on with its state as a `Tagged(Key, State)`, in the order the keys were first seen. | One key and one state for every key. |
-| `sorted(before)` | When the stream ends, every item, in order. | Every item. |
-| `top(n, before)` | When the stream ends, the first `n` items of the order, in order. | `n` items, and an arrival number with each. |
-| `takeLast(n)` | When the stream ends, the last `n` items, as they came. | `n` items. |
+| Operator | Effect | Holds room for | When it is used up |
+|---|---|---|---|
+| `distinct(n, key)` | Passes an item the first time its key is seen. | `n` keys. | An item with one key more fails with `error.TooManyKeys`. |
+| `foldBy(n, key, seed, f)` | `fold`, once for every key. When the stream ends, each key goes on with its state as a `Tagged(Key, State)`, in the order the keys were first seen. | `n` keys and a state for each. | An item with one key more fails with `error.TooManyKeys`. |
+| `sorted(n, before)` | When the stream ends, every item, in order. | `n` items. | One item more fails with `error.TooManyItems`. |
+| `top(n, before)` | When the stream ends, the first `n` items of the order, in order. | `n` items, and an arrival number with each. | Never: an item that comes before the last one kept takes its place. |
+| `takeLast(n)` | When the stream ends, the last `n` items, as they came. | `n` items. | Never: an item takes the place of the oldest. |
 
-`key` is a handler `fn (deps..., item) Key`, `before` one that says which of
-two items comes first, and `f` a reducer as `fold` takes one. None of the
-five is a task boundary. `distinct` passes items on as they come; the other
-four push nothing before the stream has ended, so the source runs to its
-end whatever follows them, and a `take` after them stops what they push.
-`top(0, ...)` and `takeLast(0)` stop the source at once.
+`n` is known at compile time and is at least 1. `key` is a handler
+`fn (deps..., item) Key`, `before` one that says which of two items comes
+first, and `f` a reducer as `fold` takes one. None of the five is a task
+boundary. `distinct` passes items on as they come; the other four push
+nothing before the stream has ended, so the source runs to its end whatever
+follows them, and a `take` after them stops what they push.
 
-### Memory
+### Room
 
-A stage is not told when a run fails, so it cannot own what has to be given
-back then. The memory is a binding instead. `collections.memory()` makes a
-`std.heap.ArenaAllocator` from the `std.mem.Allocator` among the bindings
-and provides it as `collections.Memory`, which the five operators ask for.
-When the run is over the arena is freed, whether the run ended or failed.
-To use an arena of your own, pass `collections.Memory{ .arena = &arena }` in
-its place.
+An item that does not fit fails where it is pushed, as it fails when a
+handler returns an error for it. So the run fails with `error.TooManyKeys`
+or `error.TooManyItems`, or an error path before the operator takes the
+item and the stream goes on:
 
-Running out of memory fails the run with `error.OutOfMemory`, which an
-error path or the rescue takes like any other error.
+```zig
+const unique = pipe(.{
+    recover(error{TooManyKeys}, .{forEach(reportUnseen)}),
+    distinct(1024, field(.id)),
+    forEach(report),
+});
+```
+
+What was kept stays as it was. After that, `distinct` still drops an item
+whose key it has seen and `foldBy` still folds into a key that has a state;
+every item that brings another key fails the same way. `sorted` fails every
+later item, and pushes the `n` it kept in order when the stream ends.
+
+The room is part of the operator's stage, and nothing is allocated for it.
+It is `n` items for `sorted` and `takeLast`, `n` items with a `usize` each
+for `top`, and for `distinct` and `foldBy` `n` keys (and states) and
+between `2n` and `4n` places of one, two or four bytes. It is there whole
+from the start of the run, used or not, and a run that fails leaves nothing
+of it behind.
+
+The stages of a program are on the stack of the task that calls `run`, also
+those of a segment behind a `queue`: the tasks of the other segments work
+on them there. The sub-pipes of `branch` and `route` and the workers of
+`concurrent` have room of their own each, in the same place. Only a
+sub-pipe of `each` is constructed where its item is pushed, on the stack of
+the task that runs that segment.
+
+All of that room has to fit on that stack, and nothing checks that it
+does. Too much is not an error: the process usually ends with a fault where
+the stack is first touched beyond its end, and even that is not promised.
+Measured on macOS (aarch64), in Debug and in ReleaseFast, with
+`sorted(n, ...)` over `u64` items, as a plain program, behind a `queue`,
+inside `each`, and inside `each` behind a `queue`: room of 15 MiB ran in
+all eight, and room of 16 MiB faulted in seven. The eighth, ReleaseFast
+inside `each` behind a `queue`, ran to its end. 16 MiB is the stack Zig
+gives the main thread of an executable there, and the one
+`std.Io.Threaded` gives its threads
+(`std.Thread.SpawnConfig.default_stack_size`). So the room of all the
+operators of a program together, `n` times the size of an item for each,
+stays well under the stack of the thread that calls `run`; for more, give
+the executable a larger stack (`stack_size` in `build.zig`) or the threads
+of the `Io` (`stack_size` in the options of `std.Io.Threaded`). Linux and
+Windows were not measured, nor an `Io` that runs tasks on stacks of
+another size. While it sorts, `sorted` needs 512 items more than its `n`:
+`std`'s sort keeps that many on the stack for itself.
 
 ### Keys
 
-A key is kept, so it has to be a value:
+A key is kept after its item is gone and nothing is copied for it, so it is
+a value:
 
 - an integer, an enum, a `bool`, or a struct, array or optional of those,
   told apart by all of its parts;
-- a `[]const u8`, told apart by its bytes. The first of each is copied into
-  the arena, so the text may be gone after the push;
 - a value that reads its text with `text()`, such as a `Line`, told apart
   by that text.
 
-A float, and anything else with a pointer in it, is a compile error.
-`collections.itself` is the key of an item that is its own key:
-`distinct(itself)`.
+A key with a pointer anywhere in it is a compile error, a `[]const u8`
+included: what it points at may be gone when the next item comes. Key a
+text by a value that holds it, `Line(64).from(text)`. A float is a compile
+error as well. `collections.itself` is the key of an item that is its own
+key: `distinct(1024, itself)`.
 
 For `distinct`, a key counts as seen whatever became of its item further
 down: if the item fails there and an error path takes it, a later item with
 that key is still a duplicate. For `foldBy`, an item whose reducer fails
-leaves no trace: its key keeps the state it had, and a key that had none is
-forgotten.
+leaves no trace: its key keeps the state it had, and a key that had none
+takes no room, however often it comes and is rejected.
 
 When the keys are the tags of an enum, `fold` over a `std.EnumArray` does
-what `foldBy` does and needs no memory.
+what `foldBy` does.
 
 ### Orders
 
@@ -1726,9 +1767,9 @@ before the second. It cannot fail: it is asked while items are put in
 order, where a failure has nowhere to go.
 
 ```zig
-sorted(ascending(field(.millis))), // by a key, smallest first
-sorted(descending(itself)), // by the item, largest first
-sorted(nearer), // fn (deps..., a: Item, b: Item) bool
+sorted(1024, ascending(field(.millis))), // by a key, smallest first
+sorted(1024, descending(itself)), // by the item, largest first
+sorted(1024, nearer), // fn (deps..., a: Item, b: Item) bool
 ```
 
 `ascending(key)` and `descending(key)` order by a key that is an integer, a
@@ -1736,39 +1777,42 @@ float, an enum (by the values of its tags) or text (byte by byte). Items of
 which neither comes before the other keep the order they arrived in, in
 `sorted` and in `top` alike.
 
-`top(n, before)` emits what `sorted(before)` followed by `take(n)` emits. It
-is there because it keeps `n` items where that keeps all of them.
+A float that is not a number comes after every number, in `ascending` and
+in `descending` alike: it is last both ways, not largest. Two of them keep
+the order they arrived in. An order of your own has to be as consistent: if
+neither of two items comes before the other, they have to stand at the same
+place towards every third. `a < b` on floats is not that when a NaN can
+come, and `sorted` and `top` then disagree.
+
+`top(n, before)` emits what `sorted(m, before)` followed by `take(n)` emits.
+It is there because it needs room for `n` items where that needs room for
+all of them.
 
 ### What they cost
 
-These operators hold a real buffer, as `queue` does, and they hold it in an
-arena:
+These operators hold a real buffer, as `queue` does:
 
-- `sorted`, `top` and `takeLast` hold one buffer and give it back when
-  their stream ends. The arena can use that room again only if nothing was
-  taken from it since: inside `each`, a sub-pipe with one of the three uses
-  the same room for every item. `distinct` and `foldBy` give nothing back
-  before the run is over, so inside `each` what they hold grows with the
-  number of items.
-- A container that grows leaves its smaller self behind in the arena.
-  Measured for a million `u32` items, against the container alone over the
-  same allocator: `sorted` held 2.3 times as much at its peak, `distinct`
-  2.2 times, `foldBy` with a `u32` state 4.1 times. `top` and `takeLast`
-  take their room once, for `n` items, when the first item comes, and held
-  1.5 times as much.
+- The room is as large as `n` says from the first item to the last. A
+  table marks its places empty when its stage is constructed, which inside
+  `each` is once for every item.
 - An item is kept as the value it is. One that points elsewhere, such as a
   slice, is kept as that pointer, and what it points to has to live until
   the stream has ended.
 - An order is a handler, so it is given its two items as values: for an
   item that holds its bytes, such as a `Line(n)`, that is two copies for
   each comparison.
+- `distinct` and `foldBy` hash a key and walk a table for every item.
+  `sorted` sorts once, at the end. `top` compares every item with the last
+  one it keeps, and sifts a heap of `n` when the item takes that one's
+  place.
 
-Of the five, only `takeLast` is held to its loop by hand by
-[`zig build zero-overhead`](#how-zero-overhead-is-checked) (`same`). The
-other four are run both ways for their results and not compared: the check
-keeps the names the compiler numbers, and `std`'s sort and hash map leave
-such names behind. [The design record](spec-collections.md#zero-overhead)
-has what was measured without them.
+All five are held to a loop by hand by
+[`zig build zero-overhead`](#how-zero-overhead-is-checked): a loop with
+arrays of the same size on its stack and its counters in locals. `takeLast`
+is the same instructions. The other four are `lean`: `sorted` is one
+instruction apart, inside `std`'s sort; `top` is the shorter of the two;
+`distinct` and `foldBy` have their keys and places in one stack slot where
+the loop has an array for each.
 
 ## Lifetimes
 
@@ -1891,11 +1935,11 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator of the core has a fixture, and so has `rescue`.
-Of the [collections](#what-they-cost), `takeLast` has one. Twenty-five are
+Every synchronous operator of the core has a fixture, and so has `rescue`,
+and so have the five [collections](#what-they-cost). Twenty-five are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
-whose path has stages of its own and the text patterns are `lean`, each with
-the reason next to it.
+whose path has stages of its own, the text patterns and four of the
+collections are `lean`, each with the reason next to it.
 
 The fixtures carry small items. An item goes from stage to stage as a
 value, and for one that holds its bytes, such as a `Line(n)`, the

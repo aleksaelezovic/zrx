@@ -371,24 +371,28 @@ test "attemptedCapped" {
     try std.testing.expectEqual(@as(u64, 99), untouched);
 }
 
-test "collections: distinctSum, groupedSum, sortedSum" {
-    const gpa = std.testing.allocator;
-    for (inputs) |items| inline for (.{ cases.distinctSum, cases.groupedSum, cases.sortedSum }) |case| {
-        var with: u64 = 99;
-        var without: u64 = 98;
-        try std.testing.expect(case(true, items, gpa, &with));
-        try std.testing.expect(case(false, items, gpa, &without));
-        try std.testing.expectEqual(without, with);
-    };
+test "collections: sortedSum, distinctSum, groupedSum" {
+    // The third input has one item, one value and two groups too many, and
+    // both variants fail there and leave the result as it was.
+    inline for (.{ cases.sortedSum, cases.distinctSum, cases.groupedSum }) |case| {
+        for (inputs, 0..) |items, i| {
+            var with: u64 = 99;
+            var without: u64 = 99;
+            const passed = case(false, items, &without);
+            try std.testing.expectEqual(i != 2, passed);
+            try std.testing.expectEqual(passed, case(true, items, &with));
+            try std.testing.expectEqual(without, with);
+            if (!passed) try std.testing.expectEqual(@as(u64, 99), with);
+        }
+    }
 }
 
 test "collections: topSum, lastSum" {
-    const gpa = std.testing.allocator;
-    for (inputs) |items| for ([_]usize{ 0, 1, 3, 12, 100 }) |limit| inline for (.{ cases.topSum, cases.lastSum }) |case| {
+    for (inputs) |items| inline for (.{ cases.topSum, cases.lastSum }) |case| {
         var with: u64 = 99;
         var without: u64 = 98;
-        try std.testing.expect(case(true, items, limit, gpa, &with));
-        try std.testing.expect(case(false, items, limit, gpa, &without));
+        case(true, items, &with);
+        case(false, items, &without);
         try std.testing.expectEqual(without, with);
     };
 }

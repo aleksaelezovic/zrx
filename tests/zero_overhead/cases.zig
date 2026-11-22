@@ -31,7 +31,7 @@ comptime {
     // two variants do not meet them in the same order. The optimizer picks
     // between equivalent forms by such constants, so they are met here, in
     // one order for both.
-    for (.{ error.TooSmall, error.Zero, error.TooLarge, error.OutOfMemory }) |err| _ = @intFromError(err);
+    for (.{ error.TooSmall, error.Zero, error.TooLarge, error.TooManyItems, error.TooManyKeys }) |err| _ = @intFromError(err);
 }
 
 /// Which variant the exported functions are compiled as.
@@ -1167,20 +1167,13 @@ export fn lean_attempt_failing(ptr: [*]const u32, len: usize, out: *u64) bool {
 
 // --- collections --------------------------------------------------------------------------------
 
-// The operators of `zrx.ext.collections` keep their items in a std
-// container, in an arena that the `memory()` binding holds for the run. The
-// loop by hand is written over the same container in the same arena. Where
-// the operator gives its one buffer back at the end of its stream (`sorted`,
-// `top`, `takeLast`), so does the loop: one would not write that step by
-// hand before freeing the arena, and it is on both sides so that what is
-// compared is the operator. What the arena itself costs is in the guide.
-//
-// Only `takeLast` is exported for the comparison. The other four are run by
-// `behavior.zig` and not compared: `tools/same_code.zig` keeps the names the
-// compiler numbers (`block__func_93` for an instance of std's sort that stays
-// out of line, `switch.table...1560` in the hash map), and those differ
-// between the two variants. `docs/spec-collections.md` has what was measured
-// with such names erased.
+// The operators of `zrx.ext.collections` keep their items in room of a size
+// that is written with them, inside a stage. The loop by hand keeps them in
+// arrays of that size on its stack and its counters in locals. Where an
+// operator calls into `std` (the sort, the heap, the hash of a key), so does
+// the loop, and where it walks a table of its own, the loop walks one
+// written out here. With items this small the optimizer takes all of `std`'s
+// code into both, so nothing is called in either.
 
 const collections = zrx.ext.collections;
 
@@ -1188,94 +1181,70 @@ fn addOrdered(sum: u64, value: u32) u64 {
     return sum *% 31 +% value;
 }
 
-/// The sum of the values, each counted the first time it comes.
-pub fn distinctSum(comptime with_zrx: bool, items: []const u32, gpa: std.mem.Allocator, out: *u64) bool {
+/// The last eight values, combined so that the order counts.
+pub fn lastSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
-        const total = pipe(.{ collections.distinct(collections.itself), fold(@as(u64, 0), add), forEach(store) });
-        return ran(program(fromSlice(items), total), .{ gpa, collections.memory(), Result{ .out = out } });
+        const total = pipe(.{ collections.takeLast(8), fold(@as(u64, 0), addOrdered), forEach(store) });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
-        var arena: std.heap.ArenaAllocator = .{ .child_allocator = gpa, .state = .init };
-        defer arena.deinit();
-        var seen: std.array_hash_map.Auto(u32, void) = .empty;
-        var sum: u64 = 0;
-        const ok = for (items) |value| {
-            const found = seen.getOrPut(arena.allocator(), value) catch break false;
-            if (!found.found_existing) sum +%= value;
-        } else true;
-        if (ok) out.* = sum;
-        return ok;
-    }
-}
-
-fn parity(value: u32) u32 {
-    return value & 7;
-}
-fn weighGroup(group: zrx.Tagged(u32, u64)) u64 {
-    return group.item *% (group.source +% 1);
-}
-
-/// The values summed by their low bits, and the sums combined in the order
-/// the groups were first seen.
-pub fn groupedSum(comptime with_zrx: bool, items: []const u32, gpa: std.mem.Allocator, out: *u64) bool {
-    if (with_zrx) {
-        const total = pipe(.{
-            collections.foldBy(parity, @as(u64, 0), add),
-            map(weighGroup),
-            fold(@as(u64, 0), addWideOrdered),
-            forEach(store),
-        });
-        return ran(program(fromSlice(items), total), .{ gpa, collections.memory(), Result{ .out = out } });
-    } else {
-        var arena: std.heap.ArenaAllocator = .{ .child_allocator = gpa, .state = .init };
-        defer arena.deinit();
-        var sums: std.array_hash_map.Auto(u32, u64) = .empty;
-        const ok = for (items) |value| {
-            const found = sums.getOrPut(arena.allocator(), value & 7) catch break false;
-            if (!found.found_existing) found.value_ptr.* = 0;
-            found.value_ptr.* +%= value;
-        } else true;
-        if (ok) {
-            var sum: u64 = 0;
-            for (sums.keys(), sums.values()) |key, group| sum = sum *% 31 +% group *% (key +% 1);
-            out.* = sum;
+        // In a struct, as the stage has it: the comparison reads the type a
+        // stack slot is declared with, and this is the same slot.
+        var last: struct { items: [8]u32 } = undefined;
+        var next: usize = 0;
+        var len: usize = 0;
+        for (items) |value| {
+            last.items[next] = value;
+            next = if (next + 1 == last.items.len) 0 else next + 1;
+            if (len != last.items.len) len += 1;
         }
-        return ok;
+        var sum: u64 = 0;
+        var index: usize = if (len == last.items.len) next else 0;
+        for (0..len) |_| {
+            sum = sum *% 31 +% last.items[index];
+            index = if (index + 1 == last.items.len) 0 else index + 1;
+        }
+        out.* = sum;
     }
 }
 
-fn addWideOrdered(sum: u64, value: u64) u64 {
-    return sum *% 31 +% value;
+export fn same_take_last(ptr: [*]const u32, len: usize, out: *u64) void {
+    lastSum(exported_with_zrx, ptr[0..len], out);
 }
 
 fn smallerFirst(_: void, a: u32, b: u32) bool {
     return a < b;
 }
 
-/// The values in ascending order, combined so that the order counts.
-pub fn sortedSum(comptime with_zrx: bool, items: []const u32, gpa: std.mem.Allocator, out: *u64) bool {
+/// The values in ascending order, combined so that the order counts: of at
+/// most twelve of them, and it fails with one more.
+pub fn sortedSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
     if (with_zrx) {
         const total = pipe(.{
-            collections.sorted(collections.ascending(collections.itself)),
+            collections.sorted(12, collections.ascending(collections.itself)),
             fold(@as(u64, 0), addOrdered),
             forEach(store),
         });
-        return ran(program(fromSlice(items), total), .{ gpa, collections.memory(), Result{ .out = out } });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
-        var arena: std.heap.ArenaAllocator = .{ .child_allocator = gpa, .state = .init };
-        defer arena.deinit();
-        var list: std.ArrayList(u32) = .empty;
-        const ok = for (items) |value| {
-            list.append(arena.allocator(), value) catch break false;
-        } else true;
-        if (ok) {
-            std.mem.sort(u32, list.items, {}, smallerFirst);
-            var sum: u64 = 0;
-            for (list.items) |value| sum = sum *% 31 +% value;
-            list.clearAndFree(arena.allocator());
-            out.* = sum;
+        var kept: [12]u32 = undefined;
+        var len: usize = 0;
+        for (items) |value| {
+            if (len == kept.len) return false;
+            kept[len] = value;
+            len += 1;
         }
-        return ok;
+        std.mem.sort(u32, kept[0..len], {}, smallerFirst);
+        var sum: u64 = 0;
+        for (kept[0..len]) |value| sum = sum *% 31 +% value;
+        out.* = sum;
+        return true;
     }
+}
+
+/// `lean`, not `same`: one instruction apart, inside `std`'s sort, where the
+/// optimizer counts from zero in one variant and from one in the other.
+export fn lean_sorted(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return sortedSum(exported_with_zrx, ptr[0..len], out);
 }
 
 const Arrival = struct { item: u32, at: usize };
@@ -1289,72 +1258,139 @@ fn smallestAtRoot(_: void, a: Arrival, b: Arrival) std.math.Order {
     return if (largerFirst({}, b, a)) .lt else .gt;
 }
 
-/// The `limit` largest values, largest first, combined so that the order counts.
-pub fn topSum(comptime with_zrx: bool, items: []const u32, limit: usize, gpa: std.mem.Allocator, out: *u64) bool {
+/// The four largest values, largest first, combined so that the order counts.
+pub fn topSum(comptime with_zrx: bool, items: []const u32, out: *u64) void {
     if (with_zrx) {
         const total = pipe(.{
-            collections.top(limit, collections.descending(collections.itself)),
+            collections.top(4, collections.descending(collections.itself)),
             fold(@as(u64, 0), addOrdered),
             forEach(store),
         });
-        return ran(program(fromSlice(items), total), .{ gpa, collections.memory(), Result{ .out = out } });
+        run(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
-        var arena: std.heap.ArenaAllocator = .{ .child_allocator = gpa, .state = .init };
-        defer arena.deinit();
-        var kept: std.PriorityQueue(Arrival, void, smallestAtRoot) = .initContext({});
+        const Heap = std.PriorityQueue(Arrival, void, smallestAtRoot);
+        var kept: [4]Arrival = undefined;
+        var len: usize = 0;
         var arrived: usize = 0;
-        const ok = for (items) |value| {
-            if (limit == 0) break true;
-            const entry: Arrival = .{ .item = value, .at = arrived };
+        for (items) |value| {
+            var heap: Heap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
+            const at = arrived;
             arrived += 1;
-            if (kept.count() == limit) {
-                if (!(kept.items[0].item < value)) continue;
-                _ = kept.pop();
+            if (len == kept.len) {
+                if (!(kept[0].item < value)) continue;
+                _ = heap.pop();
             } else {
-                kept.ensureTotalCapacityPrecise(arena.allocator(), limit) catch break false;
+                len += 1;
             }
-            kept.push(arena.allocator(), entry) catch break false;
-        } else true;
-        if (ok) {
-            std.mem.sort(Arrival, kept.items, {}, largerFirst);
-            var sum: u64 = 0;
-            for (kept.items) |entry| sum = sum *% 31 +% entry.item;
-            kept.clearAndFree(arena.allocator());
-            out.* = sum;
+            heap.push(.failing, .{ .item = value, .at = at }) catch unreachable;
         }
-        return ok;
+        var heap: Heap = .{ .items = kept[0..len], .cap = kept.len, .context = {} };
+        while (heap.pop()) |entry| kept[heap.items.len] = entry;
+        var sum: u64 = 0;
+        for (kept[0..len]) |entry| sum = sum *% 31 +% entry.item;
+        out.* = sum;
     }
 }
 
-/// The last `limit` values, combined so that the order counts.
-pub fn lastSum(comptime with_zrx: bool, items: []const u32, limit: usize, gpa: std.mem.Allocator, out: *u64) bool {
+/// `lean`, not `same`: the optimizer lays out the sifting of `std`'s heap
+/// differently in the two, and the pipeline is the shorter one.
+export fn lean_top(ptr: [*]const u32, len: usize, out: *u64) void {
+    topSum(exported_with_zrx, ptr[0..len], out);
+}
+
+fn hashOf(value: u32) u32 {
+    return std.array_hash_map.AutoContext(u32).hash(.{}, value);
+}
+
+/// The sum of the values, each counted the first time it comes: of at most
+/// twelve different ones, and it fails with one more.
+pub fn distinctSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
     if (with_zrx) {
-        const total = pipe(.{ collections.takeLast(limit), fold(@as(u64, 0), addOrdered), forEach(store) });
-        return ran(program(fromSlice(items), total), .{ gpa, collections.memory(), Result{ .out = out } });
+        const total = pipe(.{ collections.distinct(12, collections.itself), fold(@as(u64, 0), add), forEach(store) });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
     } else {
-        var arena: std.heap.ArenaAllocator = .{ .child_allocator = gpa, .state = .init };
-        defer arena.deinit();
-        var last: std.Deque(u32) = .empty;
-        const ok = for (items) |value| {
-            if (limit == 0) break true;
-            if (last.len == limit) {
-                _ = last.popFront();
-            } else {
-                last.ensureTotalCapacityPrecise(arena.allocator(), limit) catch break false;
-            }
-            last.pushBackAssumeCapacity(value);
-        } else true;
-        if (ok) {
-            var sum: u64 = 0;
-            var values = last.iterator();
-            while (values.next()) |value| sum = sum *% 31 +% value;
-            last.deinit(arena.allocator());
-            out.* = sum;
+        var keys: [12]u32 = undefined;
+        var places: [32]u8 = @splat(0);
+        var len: usize = 0;
+        var sum: u64 = 0;
+        for (items) |value| {
+            var place: usize = hashOf(value) & (places.len - 1);
+            const seen = while (true) : (place = (place + 1) & (places.len - 1)) {
+                const number = places[place];
+                if (number == 0) break false;
+                if (keys[number - 1] == value) break true;
+            };
+            if (seen) continue;
+            if (len == keys.len) return false;
+            keys[len] = value;
+            places[place] = @intCast(len + 1);
+            len += 1;
+            sum +%= value;
         }
-        return ok;
+        out.* = sum;
+        return true;
     }
 }
 
-export fn same_take_last(ptr: [*]const u32, len: usize, limit: usize, gpa: *const std.mem.Allocator, out: *u64) bool {
-    return lastSum(exported_with_zrx, ptr[0..len], limit, gpa.*, out);
+/// `lean`, not `same`: the keys and the places of the stage are one stack
+/// slot, and two arrays by hand; the walk and what follows it are the same.
+export fn lean_distinct(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return distinctSum(exported_with_zrx, ptr[0..len], out);
+}
+
+fn lowBits(value: u32) u32 {
+    return value & 7;
+}
+fn weighGroup(group: zrx.Tagged(u32, u64)) u64 {
+    return group.item *% (group.source +% 1);
+}
+fn addWideOrdered(sum: u64, value: u64) u64 {
+    return sum *% 31 +% value;
+}
+
+/// The values summed by their low bits, and the sums combined in the order
+/// the groups were first seen: of at most six groups, and it fails with
+/// one more.
+pub fn groupedSum(comptime with_zrx: bool, items: []const u32, out: *u64) bool {
+    if (with_zrx) {
+        const total = pipe(.{
+            collections.foldBy(6, lowBits, @as(u64, 0), add),
+            map(weighGroup),
+            fold(@as(u64, 0), addWideOrdered),
+            forEach(store),
+        });
+        return ran(program(fromSlice(items), total), .{Result{ .out = out }});
+    } else {
+        var keys: [6]u32 = undefined;
+        var sums: [6]u64 = undefined;
+        var places: [16]u8 = @splat(0);
+        var len: usize = 0;
+        for (items) |value| {
+            const key = value & 7;
+            var place: usize = hashOf(key) & (places.len - 1);
+            const found: ?usize = while (true) : (place = (place + 1) & (places.len - 1)) {
+                const number = places[place];
+                if (number == 0) break null;
+                if (keys[number - 1] == key) break number - 1;
+            };
+            if (found) |index| {
+                sums[index] +%= value;
+                continue;
+            }
+            if (len == keys.len) return false;
+            keys[len] = key;
+            sums[len] = value;
+            places[place] = @intCast(len + 1);
+            len += 1;
+        }
+        var sum: u64 = 0;
+        for (keys[0..len], sums[0..len]) |key, group| sum = sum *% 31 +% group *% (key +% 1);
+        out.* = sum;
+        return true;
+    }
+}
+
+/// `lean` for the same reason, with the states as a third array by hand.
+export fn lean_fold_by(ptr: [*]const u32, len: usize, out: *u64) bool {
+    return groupedSum(exported_with_zrx, ptr[0..len], out);
 }
