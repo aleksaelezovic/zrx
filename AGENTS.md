@@ -373,6 +373,35 @@ to this file; edit `AGENTS.md`, not copies.
   - Not there, and back only by decision: forms that wrap or saturate, a
     power that is not a whole number, conversion between integers and
     floats, vectors, `fold(null, min)`.
+
+- **A text handler answers what the bytes allow.** `src/ext/text.zig`
+  (`zrx.ext.text`) is handlers and one source over `std.mem` and
+  `std.ascii`, written against the handler and source contracts, with no
+  operator. [docs/spec-text.md](docs/spec-text.md) is its design record:
+  the reasons, what was rejected, what was measured, and which of its
+  choices are proposals still to be decided. Read it before changing the
+  extension. The rules it gives:
+  - `trim`, `trimStart` and `trimEnd` put to a `[]const u8` answer a
+    slice of the same bytes; put to a `Line(n)` they answer a `Line(n)`.
+    What is made of a value is a value, as for a pattern.
+  - `toUpper` and `toLower` are put to a line. Put to a `[]const u8`
+    they are a compile error that says to copy first; do not add a
+    second spelling for `compose(.{ Line(32).from, text.toUpper })`.
+  - The bytes to strip are always named. There is no bare `trim`.
+  - The one value made here is a `Line(n)`, told by identity. What only
+    reads a text takes what a pattern takes.
+  - `split` and `tokenize` are handlers that answer a source, for `each`.
+    The source keeps the item and reads its text in `run`: a slice taken
+    in the handler would live no longer than that call.
+  - A piece of a line lives no longer than the push of that line. That
+    is not checked and cannot be from an extension; say so, as for
+    `fileBytes`, and do not promise more.
+  - Bytes only: ASCII classes and case, no Unicode.
+  - Give the copies of a line as measurements of the fixtures, not as a
+    rule (see "Zero overhead").
+  - Not there, and back only by decision: predicates. A text that is, or
+    starts with, some text is a pattern. `endsWith` is not one and is
+    left out with `contains`; do not add either in passing.
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
