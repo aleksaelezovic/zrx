@@ -1377,8 +1377,11 @@ are started in different ways: `Sha256.init(.{})` takes options,
 it returns is a struct with one field, `hasher`, that begins as `start`.
 
 - **A hasher is told by its shape**, not by a list of names: it has
-  `update(*H, []const u8)`, and a `final` that returns the digest or fills
-  an array with it (a slice is given `digest_length` bytes). That is `Md5`,
+  `update(*H, []const u8)`, and a `final` that returns the digest, an
+  unsigned integer, or fills an array of bytes with it (a slice is given
+  `digest_length` bytes). Nothing else is a digest: a `final` that returns
+  a `bool` or a signed number, or one that can fail, is refused, and so is
+  an `update` that returns something. That is `Md5`,
   `Sha1`, `sha2`, `sha3`, `blake2`, `Blake3` and `AsconHash256` of
   `std.crypto.hash`, and the CRCs, `Fnv1a`, `Wyhash` and the three `XxHash`
   of `std.hash`; a hasher of your own with that shape is taken too.
@@ -1386,8 +1389,8 @@ it returns is a struct with one field, `hasher`, that begins as `start`.
   `Murmur` and `CityHash`, which hash one text and are not fed in pieces;
   `AsconXof128`, which has no length of its own for its output.
 - **The digest is what the hasher's own `final` returns or fills**: an
-  array of bytes for those of `std.crypto.hash`, an integer for those of
-  `std.hash`. An
+  array of bytes for those of `std.crypto.hash`, an unsigned integer for
+  those of `std.hash`. An
   integer is written in hexadecimal by its format, not by `hex`:
 
   ```zig

@@ -25,8 +25,8 @@ const di = @import("../di.zig");
 /// `start` is the hasher as its own `init` starts it, with whatever that
 /// takes: options, a seed, nothing. A hasher is told by its shape, the
 /// `update` and `final` that those of `std.crypto.hash` and `std.hash` have,
-/// and `final` returns what the hasher's own returns or fills: an integer or
-/// an array of bytes.
+/// and `final` returns what the hasher's own returns or fills: an unsigned
+/// integer or an array of bytes.
 pub fn digest(comptime start: anytype) type {
     const H = @TypeOf(start);
     const finish = comptime Finish.of(H);
@@ -60,7 +60,8 @@ pub fn digest(comptime start: anytype) type {
 /// How a hasher of type `H` hands out its digest, read off its shape.
 const Finish = struct {
     how: enum {
-        /// `final(*H) T` or `final(H) T`: `std.hash`.
+        /// `final(*H) T` or `final(H) T`, where `T` is an unsigned integer:
+        /// `std.hash`.
         value,
         /// `final(*H, out)`, where `out` is an array to fill, or a slice
         /// that is given `digest_length` bytes: `std.crypto.hash`.
@@ -79,27 +80,56 @@ const Finish = struct {
             else => false,
         };
         if (shaped) {
-            if (method(H, "final")) |info| {
-                const Returned = info.return_type orelse void;
-                if (info.param_types.len == 1 and Returned != void) return .{ .how = .value, .Result = Returned };
-                if (info.param_types.len == 2 and Returned == void) {
-                    if (Filled(H, info.param_types[1])) |Result| return .{ .how = .filled, .Result = Result };
-                }
-            }
+            if (finished(H)) |finish| return finish;
         }
         @compileError(
-            "bytes.digest: `" ++ @typeName(H) ++ "` is not a hasher that is fed and then finished: it needs `update(*H, []const u8)` and a `final` " ++
-                "that returns the digest or fills an array with it, as the hashers of `std.crypto.hash` and `std.hash` have",
+            "bytes.digest: `" ++ @typeName(H) ++ "` is not a hasher that is fed and then finished: it needs `update(*H, []const u8) void` and a `final` " ++
+                "that returns the digest, an unsigned integer, or fills an array of bytes with it, as the hashers of `std.hash` and `std.crypto.hash` have",
         );
     }
 
-    /// Whether an `H` takes bytes with `update(*H, bytes)`.
+    /// How the `final` of an `H` hands out the digest, or null where it is
+    /// neither of the two ways. What is a digest is said here and nowhere
+    /// else: an unsigned integer that is returned, or an array of bytes that
+    /// is filled. A `bool`, a signed number, an optional and an error union
+    /// are none, and neither is a `final` that both fills and returns.
+    fn finished(comptime H: type) ?Finish {
+        const info = method(H, "final") orelse return null;
+        if (info.param_types.len == 0 or !receives(H, info.param_types[0])) return null;
+        const Returned = info.return_type orelse return null;
+        switch (info.param_types.len) {
+            1 => if (isUnsigned(Returned)) return .{ .how = .value, .Result = Returned },
+            2 => if (Returned == void) {
+                if (Filled(H, info.param_types[1])) |Result| return .{ .how = .filled, .Result = Result };
+            },
+            else => {},
+        }
+        return null;
+    }
+
+    /// Whether an `H` takes bytes with `update(*H, bytes)` and returns
+    /// nothing: the reducer has nowhere to put an answer or a failure.
     fn fed(comptime H: type) bool {
         const info = method(H, "update") orelse return false;
         if (info.param_types.len != 2 or info.param_types[0] != *H) return false;
+        if ((info.return_type orelse return false) != void) return false;
         // `anytype` where the hasher takes any list of bytes, as xxHash does.
         const Piece = info.param_types[1] orelse return true;
         return Piece == []const u8;
+    }
+
+    /// Whether `final` is a method of `H`: its first parameter is the hasher
+    /// or a pointer to it.
+    fn receives(comptime H: type, comptime Receiver: ?type) bool {
+        const R = Receiver orelse return false;
+        return R == H or R == *H or R == *const H;
+    }
+
+    fn isUnsigned(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .int => |int| int.signedness == .unsigned,
+            else => false,
+        };
     }
 
     /// The array a `final(*H, out)` fills: what `out` points to, or

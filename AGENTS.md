@@ -329,8 +329,10 @@ to this file; edit `AGENTS.md`, not copies.
   - It takes the hasher as its own `init` starts it, a value and not a
     type. Do not guess how a hasher is started.
   - A hasher is told by shape (`Finish.of`), not by a list of names:
-    `update`, and a `final` that returns the digest or fills an array
-    with it. What does not have that shape is refused, not worked around.
+    `update`, and a `final` that returns the digest, an unsigned
+    integer, or fills an array of bytes with it. What is a digest is
+    said in `finished` and nowhere else; what does not have that shape
+    is refused, not worked around.
   - Do not call the digest zero overhead without saying what the state
     costs: a reducer is given its state as a value, and a hasher that
     holds a block is copied out and back for each piece. Do not remove

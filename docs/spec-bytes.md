@@ -68,11 +68,31 @@ and a `final` of one of two kinds:
 
 | `final` | The digest | Which |
 |---|---|---|
-| returns a value: `final(*H) T`, `final(H) T` | that value, an integer | `std.hash` |
+| returns a value: `final(*H) T`, `final(H) T` | that value, an unsigned integer | `std.hash` |
 | fills what it is handed: `final(*H, *[n]u8)`, or `final(*H, []u8)` with a `digest_length` | the array | `std.crypto.hash` |
 
 That is how the two families are told apart: nothing asks which module a
 hasher is from. A hasher of a caller's own with either shape is taken.
+
+**What a digest is, is said exactly.** The first check took any `final`
+of one parameter that returned something, and told the two families apart
+by that alone. A review found that a `final` returning `bool` passed as
+the integer of `std.hash`. So did a signed number, a float, an optional,
+an error union (which made the handler fallible) and an array that was
+returned and not filled. `finished` now names the two digests and takes
+nothing else: an unsigned integer that is returned, or an array of bytes
+that is filled by a `final` that returns nothing. No width is singled
+out: `std.hash.crc` has CRCs from three bits upward, so a `u1` is taken
+with them.
+
+The checks beside it were as loose and are tightened with it. `update`
+returns nothing: one that returned a `bool`, a count or an error union
+got as far as Zig's own "value ignored", and a reducer has nowhere to put
+an answer or a failure. And the first parameter of `final` is the hasher,
+`H`, `*H` or `*const H`, the three that `std` writes: a `final` that is
+no method was Zig's "no member function", and one that took `anytype`
+passed. Each of these is the one compile error for a type that is not a
+hasher.
 
 `finalResult(*H) [n]u8` was a third shape at first. A mutant without it
 passed every test, because every hasher of `std` that has it also has the
