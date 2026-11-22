@@ -9,9 +9,16 @@
 - [Errors](#errors)
 - [Stopping early](#stopping-early)
 - [Concurrency and backpressure](#concurrency-and-backpressure)
+- [Time](#time)
 - [Input and output](#input-and-output)
+- [Compressed input and output](#compressed-input-and-output)
+- [Directories](#directories)
+- [Text patterns](#text-patterns)
 - [Math](#math)
+- [Text](#text)
+- [Bytes](#bytes)
 - [HTTP](#http)
+- [The process](#the-process)
 - [Collections](#collections)
 - [Lifetimes](#lifetimes)
 - [Writing your own](#writing-your-own)
@@ -1371,6 +1378,142 @@ and are not part of this extension.
 
 Why it is built this way, and what was measured, is in
 [the design record](spec-compress.md).
+
+## Directories
+
+`zrx.ext.fs` makes a directory a source, so that "every file under this
+directory" is where a program begins and not a loop before it. It is an
+extension: two sources written against the public contract, compiled only
+when a program uses them.
+
+```zig
+const fs = zrx.ext.fs;
+
+const max_path = 1024;
+const max_depth = 16;
+const isFile = compose(.{ field(.kind), eq(.file) });
+
+const files = program(fs.walk("src", max_path, max_depth), .{
+    filter(isFile),
+    map(field(.path)),
+    print(Stdout, "{f}\n"),
+});
+
+files.run(.{ io, stdout(4096) });
+```
+
+| | |
+|---|---|
+| `fs.entries(path, n)` | Source: the entries of the directory at `path`. Needs `std.Io`. |
+| `fs.walk(path, n, depth)` | Source: the entries under it, through at most `depth` directories one inside the other. Needs `std.Io`. |
+| `fs.Entry(n)` | The item of both: `path`, a `Line(n)`, and `kind`, a `std.Io.File.Kind`. `entry.name()` is the last name of the path. |
+
+- **The directory is named by its path**, as a file is for `fileLines`. It
+  is opened when the source runs and closed when the source ends: at the
+  end of the listing, when the pipe is done, and when something fails. A
+  `walk` closes every directory it is inside of on each of those ways out.
+  The source keeps a copy of the path, so the text it was made from need
+  not outlive the call.
+- **An entry holds its path**, up to `n` bytes inline, so it may cross a
+  `queue` or wait in a `batch`. The path begins with the directory's as it
+  was given, then the system's separator and the names below:
+  `fs.walk("src", n, depth)` gives `src/ext/fs.zig`. It therefore opens from
+  where the directory was opened: `Io.Dir.cwd().openFile(io, entry.path.text(), .{})`
+  in a handler. `.` and `..` are not entries, and neither is the directory
+  itself. No separator is put after one (`src/` gives `src/ext`), nor on
+  Windows after a drive alone: `C:` is the directory the process is in on
+  that drive, so it gives `C:name` and not `C:\name`, which is in the
+  drive's root.
+- **`n` is the longest path.** A longer one fails the run with
+  `error.PathTooLong`; so does a directory whose own path is longer, before
+  it is opened. A handler is given its entry as a value, which is a copy of
+  those `n` bytes, so choose `n` for the paths you expect and not the
+  longest the system allows.
+- **A path too long to open fails the run.** A `walk` goes into one
+  directory at a time and can reach deeper than a path can name. An entry
+  whose path `std` would not open, of `std.fs.max_path_bytes` bytes or
+  more, fails the run with `error.NameTooLong`, as opening it would, so an
+  `n` beyond that buys nothing. On Linux and macOS every entry given before
+  it opens; on Windows, which counts a path in UTF-16, that is not tested.
+- **`kind`** is what the listing says the entry is: `.file`, `.directory`,
+  `.sym_link` and the rest of `std.Io.File.Kind`. Where a file system's
+  listing does not say, the source asks the entry itself, at one more system
+  call for it, so a directory is not missed for want of an answer.
+- **The order is the system's.** It is not sorted, and it need not be the
+  same on another system or after a change to the directory. One thing
+  holds in a `walk`: a directory comes before what is in it.
+- **A symbolic link is an entry of kind `.sym_link` and is not followed**,
+  whatever it points to, so a walk stays under its directory and cannot go
+  round in a circle. The directory the source is given may itself be a
+  link. On Linux and macOS a directory that has become a link by the time
+  the walk opens it fails the run (`error.SymLinkLoop` or `error.NotDir`,
+  as the system has it). On Windows that is not tested.
+- **`depth` is how many directories a `walk` may be inside of at once**,
+  the one it is given being the first: `fs.walk(path, n, 1)` lists that
+  directory and has no room for one in it. A directory deeper than that
+  fails the run with `error.TooDeep`, after it was given as an entry, so a
+  pipe that is done at that entry does not fail. A depth of 0 is a compile
+  error.
+- **Neither source allocates.** A `walk` keeps the listing of each directory
+  it is inside of on the stack of the task that runs the source, with room
+  for `depth` of them from the start: 2096 bytes each on Linux and macOS and
+  2104 on Windows with Zig 0.17.0, so about 34 kilobytes for a `depth` of
+  16, however deep the tree turns out to be. Nothing is kept for an entry.
+- **A source that nothing more is wanted of ends**: when a push answers
+  `.done`, and also when the pipe has completed beyond a task boundary and
+  no push is there to say so (it asks for [`zrx.Stop`](#stopping-a-producer-when-its-consumers-finish)),
+  as when a `filter` before a `queue` lets nothing more through.
+
+A directory that cannot be opened or read fails the run with what the system
+reported, such as `error.AccessDenied`, or `error.FileNotFound` for one that
+was removed meanwhile. In a `walk` that is after the directory itself was
+given as an entry. Nothing is left out silently: a walk that skipped a
+directory would look like a whole one. This is a failure of the source, so
+it belongs to no item and goes to the [rescue](#the-failure-of-a-run), not
+to an error path.
+
+To have an error path take one directory, make the directory an item. Both
+sources can be the source of an [`each`](#each), and may be made from an
+entry. Here every directory at the top is walked for itself, and one that
+cannot be is a row like the others:
+
+```zig
+const isDirectory = compose(.{ field(.kind), eq(.directory) });
+
+fn under(directory: fs.Entry(max_path)) fs.Walk(max_path, max_depth) {
+    return fs.walk(directory.path.text(), max_path, max_depth);
+}
+
+fn sized(directory: zrx.Tagged(fs.Entry(max_path), usize)) Row { ... }
+
+fn unread(failure: zrx.Failed(error{AccessDenied}, fs.Entry(max_path))) Row { ... }
+
+/// directory -> everything under it -> how many -> a row
+const counted = pipe(.{
+    each(under, .{fold(@as(usize, 0), count)}),
+    map(sized),
+});
+
+const rows = program(fs.entries(root, max_path), .{
+    filter(isDirectory),
+    attempt(counted, error{AccessDenied}, .{map(unread)}),
+    forEach(report),
+});
+```
+
+What fails is then the item's whole walk: a directory that cannot be read
+three levels down fails the top directory it is under. Going on past it
+within one walk is not there.
+
+`fileLines` and `fileBytes` borrow the path they are given, where these two
+sources copy it. Do not make one of them from `entry.path.text()` in a
+`source_of`: that handler is given a copy of the entry, which is gone when
+it returns. Open the file in a handler instead.
+
+Not there: watching a directory for changes, matching names against a glob
+(a `filter` whose handler looks at `entry.name()` does it), following
+links, sorting, and anything about an entry beyond its kind, such as its
+size or its times.
 
 ## Text patterns
 
