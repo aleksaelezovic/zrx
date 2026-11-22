@@ -7,6 +7,7 @@
 //! `Left` is that type and `take` is that decision; neither is inferred,
 //! so an error that should not be left over does not compile.
 const std = @import("std");
+const di = @import("di.zig");
 
 /// A failure as an item: the error, and the item it failed for as it was
 /// where the failure was caught.
@@ -42,6 +43,9 @@ pub fn takes(comptime E: type, comptime cancellation: Cancellation, comptime err
 /// Where `Possible` is `anyerror`, nothing is known about what is left
 /// unless `E` is `anyerror` too: then it is a cancellation, or nothing.
 pub fn Left(comptime E: type, comptime cancellation: Cancellation, comptime Possible: type) type {
+    // Every name left is compared with every name taken: the errors of a
+    // file and a handler that takes them by name are past the default.
+    @setEvalBranchQuota(di.quota);
     const possible = @typeInfo(Possible).error_set.error_names orelse {
         if (@typeInfo(E).error_set.error_names != null) return anyerror;
         return if (cancellation == .passes) error{Canceled} else error{};
