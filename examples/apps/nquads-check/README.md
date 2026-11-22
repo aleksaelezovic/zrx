@@ -109,6 +109,7 @@ const statements = pipe(.{route(.{
 const rejections = pipe(.{
     map(field(.number)),
     tap(Summary.rejection),
+    tap(rejected),
     print(Diagnostics, "line {d}: not a statement\n"),
 });
 
@@ -127,9 +128,10 @@ pub const check = program(lines(Input, max_line), .{
 - `isStatement` is `compose(.{ field(.line), nquads.statement })`: the
   pattern is put to the line of a numbered line. Its case is given the
   `Quad` with the numbered line it was taken from.
+- `rejected` is `process.status(1)`: a line that is reported leaves exit
+  status 1 where it is reported, and the run goes on.
 - The handlers are a few lines each: `Numbered.next`, the two counters of
-  `Summary`, `Tidy.of` with the `writeTriple` that writes a quad, and `judge`,
-  which makes a rejected line exit status 1.
+  `Summary`, and `Tidy.of` with the `writeTriple` that writes a quad.
 
 ## Triple terms, and how deep
 
