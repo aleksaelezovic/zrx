@@ -60,6 +60,18 @@ export fn zrx_cross_json(writer: *std.Io.Writer, first: u32, end: u32) bool {
     return true;
 }
 
+const Reading = struct { id: u32, name: zrx.Line(16) };
+
+export fn zrx_cross_json_decode(reader: *std.Io.Reader, writer: *std.Io.Writer) bool {
+    const copy = program(zrx.lines(*std.Io.Reader, 256), .{
+        zrx.map(zrx.ext.json.decode(Reading, .{ .scratch = 1024 })),
+        zrx.map(zrx.ext.json.encode(.{})),
+        zrx.write(*std.Io.Writer, "{f}\n"),
+    });
+    if (!ran(copy, .{ reader, writer })) return false;
+    return true;
+}
+
 fn bytesOf(path: []const u8) zrx.FileBytes(256) {
     return zrx.fileBytes(path, 256);
 }

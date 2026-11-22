@@ -271,13 +271,36 @@ to this file; edit `AGENTS.md`, not copies.
   wrapped to mark what they push; the scope knows nothing of it. Do not
   add a way to put operators on a source before a merge: operators live in
   the program's pipe.
-- **JSON is an extension named after its format.** `src/ext/json.zig`,
-  exported as `zrx.ext.json` and analyzed only when referenced, holds one
-  handler: `map(json.encode(.{}))` returns `std.json.fmt(item, options)`,
-  which `print` or `write` formats with `{f}`. One spelling: `encode` is
-  always called with its options, and there is no sink that hides
-  `write(Role, "{f}\n")`. No general serialization layer for one format.
-  Decoding is not there.
+- **JSON is an extension named after its format.** `src/ext/json.zig`
+  (`zrx.ext.json`) holds two handlers over `std.json`, `encode` and
+  `decode`, and is analyzed only when referenced.
+  [docs/spec-json.md](docs/spec-json.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - One spelling each: `map(json.encode(.{}))`, formatted with `{f}`, and
+    `map(json.decode(T, options))`. Both are always called with their
+    options. There is no sink that hides `write(Role, "{f}\n")`, and no
+    general serialization layer for one format.
+  - `decode` is put to text, a `[]const u8` or a value with `text()`, and
+    reads one whole document. Parsing stays `std.json`'s.
+  - What is decoded is a value. Whether a `T` is one is read off the
+    type: a pointer anywhere in it is refused where `decode` is written.
+    No `from` contract and no shadow type built from `T`.
+  - Text in a value is a `Line(n)`, which has `jsonParse` and
+    `jsonParseFromValue` beside its `jsonStringify` in `src/io.zig`.
+    Those are `std.json`'s hooks and all the core has of this. Both read
+    the same, a string or an array of numbers: one way to read a `Line`
+    at either of `std.json`'s ways in. A hook can fail only with what
+    `std.json` already fails with from where it is called.
+  - The scratch memory is a size in the options, on the handler's stack
+    and new for every item, not an allocator dependency. It has no
+    default: what a text needs differs by target.
+  - `DecodeError` is written out, so that an error `std` adds does not
+    compile.
+  - `decode` has no fixture and no claim of zero overhead: the parser is
+    called, not inlined. Do not widen `tools/same_code.zig` for it.
+  - Not there, and back only by decision: a decoder that reads as the
+    text arrives, and a document that spans items.
 - **A text pattern is a handler, and it does not go back.**
   `src/ext/pattern.zig` (`zrx.ext.pattern`) is written against the handler
   contract alone and has no operator.
