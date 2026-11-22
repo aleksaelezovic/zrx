@@ -286,10 +286,12 @@ to this file; edit `AGENTS.md`, not copies.
   - What is decoded is a value. Whether a `T` is one is read off the
     type: a pointer anywhere in it is refused where `decode` is written.
     No `from` contract and no shadow type built from `T`.
-  - Text in a value is a `Line(n)`, which has a `jsonParse` beside its
-    `jsonStringify` in `src/io.zig`. That is `std.json`'s hook and all
-    the core has of this. A `jsonParse` can fail only with what
-    `std.json` already fails with.
+  - Text in a value is a `Line(n)`, which has `jsonParse` and
+    `jsonParseFromValue` beside its `jsonStringify` in `src/io.zig`.
+    Those are `std.json`'s hooks and all the core has of this. Both read
+    the same, a string or an array of numbers: one way to read a `Line`
+    at either of `std.json`'s ways in. A hook can fail only with what
+    `std.json` already fails with from where it is called.
   - The scratch memory is a size in the options, on the handler's stack
     and new for every item, not an allocator dependency. It has no
     default: what a text needs differs by target.

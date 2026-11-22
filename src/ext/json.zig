@@ -98,17 +98,21 @@ pub fn decode(comptime T: type, comptime options: DecodeOptions) type {
 /// `call`, so that it is checked where the handler is used.
 fn Decoded(comptime T: type, comptime Args: []const type) type {
     if (Args.len != 1 or !(isText(Args[0]) or holdsText(Args[0]))) @compileError(
-        "json.decode: decodes one item that is text, a `[]const u8` or a `Line`, got " ++ di.listTypes(Args) ++
+        "json.decode: decodes one item that is text, a `[]const u8` or a value that declares `pub fn text(self: *const @This()) []const u8` as a `Line` does, got " ++ di.listTypes(Args) ++
             "; put the handler that yields the text before it, as in `compose(.{ field(.body), json.decode(T, options) })`",
     );
     return DecodeError!T;
 }
 
+/// Whether a `T` is bytes that `call` reads as a `[]const u8`: a slice of
+/// them or a pointer to an array of them, neither `volatile` nor
+/// `allowzero`, which is what coerces to one.
 fn isText(comptime T: type) bool {
     const info = switch (@typeInfo(T)) {
         .pointer => |pointer| pointer,
         else => return false,
     };
+    if (info.attrs.@"volatile" or info.attrs.@"allowzero") return false;
     return switch (info.size) {
         .slice => info.child == u8,
         .one => switch (@typeInfo(info.child)) {
@@ -121,13 +125,15 @@ fn isText(comptime T: type) bool {
 
 /// Whether a `T` holds a text of its own and reads it with `text()`, as a
 /// `Line` does. Told by name: it is what a caller's own type may declare.
+/// A `text` that takes its receiver at compile time is generic, and an item
+/// is not known then.
 fn holdsText(comptime T: type) bool {
     if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "text")) return false;
     const reads = switch (@typeInfo(@TypeOf(T.text))) {
         .@"fn" => |reads| reads,
         else => return false,
     };
-    return reads.param_types.len == 1 and reads.param_types[0] == *const T and reads.return_type == []const u8;
+    return !reads.is_generic and reads.param_types.len == 1 and reads.param_types[0] == *const T and reads.return_type == []const u8;
 }
 
 /// A place in a type: the type found there and the fields that lead to it.

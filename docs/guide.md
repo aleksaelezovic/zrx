@@ -1014,10 +1014,17 @@ with a pointer anywhere in it does not compile. Write
 
 - text as a `zrx.Line(n)`, a copy of at most `n` bytes. `std.json` reads a
   line as it writes one, like a byte slice: from a string, or from an array
-  of numbers. A text of more than `n` bytes is `error.ValueTooLong`;
+  of numbers. A text of more than `n` bytes is `error.LengthMismatch`;
 - several values as an array, `[3]f32`, of exactly that many;
 - a type of your own with `std.json`'s hook, `jsonParse`. It must be a
   value as well.
+
+A `Line` is read so by `std.json` itself, wherever it is used: from text
+(`parseFromSlice`, through `jsonParse`) and from a `std.json.Value`
+(`parseFromValue`, through `jsonParseFromValue`). It was read before as
+the object of its two fields, `{"bytes":[...],"len":3}`, which is now
+`error.UnexpectedToken`; write such a line as its string or as the array
+of its bytes.
 
 **The scratch memory is bounded, and you say by how much.** `.scratch` is a
 number of bytes on the stack that `std.json` may use while it reads one
@@ -1037,7 +1044,7 @@ longest text.
 |---|---|
 | `SyntaxError`, `UnexpectedEndOfInput` | The text is not one JSON document. An empty text ends too early; anything after the document is a syntax error. |
 | `UnexpectedToken`, `MissingField`, `UnknownField`, `DuplicateField` | It is JSON, and not the shape of a `T`. |
-| `InvalidEnumTag`, `InvalidNumber`, `InvalidCharacter`, `Overflow`, `LengthMismatch`, `ValueTooLong` | A value in it is not one the field holds: a name the enum does not have, a fraction or a word where an integer goes, a number that does not fit, a string that is not the length of its array, a text too long for its line. |
+| `InvalidEnumTag`, `InvalidNumber`, `InvalidCharacter`, `Overflow`, `LengthMismatch`, `ValueTooLong` | A value in it is not one the field holds: a name the enum does not have, a fraction or a word where an integer goes, a number that does not fit, a string that is not the length of its array or too long for its line, a value longer than `.parse.max_value_len`. |
 | `OutOfMemory` | The text needs more scratch memory than `.scratch`. |
 
 `decode` costs what `std.json` costs: its parser is called once for an

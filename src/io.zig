@@ -264,10 +264,18 @@ pub fn Line(comptime max_line_bytes: usize) type {
 
         /// `std.json` reads a line like a byte slice, and what it read is
         /// copied: a string, or an array of numbers. A text of more bytes
-        /// than a line holds is `error.ValueTooLong`, which is `std.json`'s.
+        /// than a line holds is `error.LengthMismatch`, which is `std.json`'s.
+        /// Read from text, as by `std.json.parseFromSlice`.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
             const bytes = try std.json.innerParse([]const u8, allocator, source, options);
-            return from(bytes) catch error.ValueTooLong;
+            return from(bytes) catch error.LengthMismatch;
+        }
+
+        /// The same, read from a `std.json.Value`, as by
+        /// `std.json.parseFromValue`.
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            const bytes = try std.json.innerParseFromValue([]const u8, allocator, source, options);
+            return from(bytes) catch error.LengthMismatch;
         }
     };
 }

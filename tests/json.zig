@@ -242,7 +242,8 @@ test "decode is a handler like any other: it composes with the one that yields t
 const long_name: [2000]u8 = @splat('a');
 const too_much = "{\"name\":\"\\n" ++ long_name ++ "\",\"legs\":4}";
 
-/// One text for every error `std.json` has for one whole text.
+/// One text for every error `std.json` has for one whole text, but
+/// `ValueTooLong`, which only a `max_value_len` in the options can make.
 const failing = [_]struct { []const u8, json.DecodeError }{
     .{ "rex", error.SyntaxError },
     .{ "{\"name\":\"rex\",\"legs\":4} {}", error.SyntaxError },
@@ -257,7 +258,7 @@ const failing = [_]struct { []const u8, json.DecodeError }{
     .{ "{\"name\":\"rex\",\"legs\":4,\"tail\":1}", error.UnknownField },
     .{ "{\"name\":\"rex\"}", error.MissingField },
     .{ "{\"name\":\"rex\",\"legs\":4,\"code\":\"abc\"}", error.LengthMismatch },
-    .{ "{\"name\":\"rex the ninth\",\"legs\":4}", error.ValueTooLong },
+    .{ "{\"name\":\"rex the ninth\",\"legs\":4}", error.LengthMismatch },
     .{ too_much, error.OutOfMemory },
 };
 
@@ -400,6 +401,23 @@ fn innermost(nested: [1][1]u8) u8 {
     return nested[0][0];
 }
 
+test "a value longer than the max_value_len of the parse options is ValueTooLong" {
+    // `std.json` measures a text it copies, here because of the escape.
+    const texts = [_][]const u8{ "{\"name\":\"r\\u0065x\",\"legs\":4}", "{\"name\":\"r\\u0065\",\"legs\":4}" };
+    var seen: Animals = .{};
+    var errors: Errors = .{};
+    const short = json.decode(Animal, .{ .scratch = 1024, .parse = .{ .max_value_len = 2 } });
+    const read = pipe(.{
+        recover(json.DecodeError, .{forEach(noteFailure)}),
+        map(short),
+        forEach(support.record(Animal)),
+    });
+    program(fromSlice(&texts), read).run(.{ &seen, &errors });
+    try errors.expect(&.{error.ValueTooLong});
+    try std.testing.expectEqual(1, seen.len);
+    try expectAnimal(.{ "re", 4, .cat }, seen.items[0]);
+}
+
 test "the scratch memory is the item's: a text is read with all of it, however many came before" {
     // Each text has two escapes to copy. Were the memory the stream's, 512
     // bytes would not last 256 texts.
@@ -411,21 +429,40 @@ test "the scratch memory is the item's: a text is read with all of it, however m
     try expectAnimal(.{ "rex", 4, .cat }, seen.items[255]);
 }
 
-test "std.json reads a Line as it writes one: a string or an array of numbers, copied" {
-    const Named = struct { name: Name };
-    const plain = try std.json.parseFromSlice(Named, std.testing.allocator, "{\"name\":\"rex\"}", .{});
-    defer plain.deinit();
-    try std.testing.expectEqualStrings("rex", plain.value.name.text());
+const Named = struct { name: Name };
+
+/// `Named` read by `std.json` from `text`, through both of its ways in:
+/// from the text, and from the `std.json.Value` read from it first. They
+/// must agree.
+fn readNamed(text: []const u8) !Name {
+    const direct = std.json.parseFromSlice(Named, std.testing.allocator, text, .{});
+    const value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+    defer value.deinit();
+    const from_value = std.json.parseFromValue(Named, std.testing.allocator, value.value, .{});
+    if (direct) |read| {
+        defer read.deinit();
+        const again = try from_value;
+        defer again.deinit();
+        try std.testing.expectEqualStrings(read.value.name.text(), again.value.name.text());
+        return read.value.name;
+    } else |err| {
+        try std.testing.expectError(err, from_value);
+        return err;
+    }
+}
+
+test "std.json reads a Line as it writes one, from text or from a Value: a string or an array of numbers, copied" {
+    try std.testing.expectEqualStrings("rex", (try readNamed("{\"name\":\"rex\"}")).text());
 
     var buffer: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buffer);
     const bytes: Named = .{ .name = try .from("r\xffx") };
     try writer.print("{f}", .{std.json.fmt(bytes, .{})});
     try std.testing.expectEqualStrings("{\"name\":[114,255,120]}", writer.buffered());
-    const again = try std.json.parseFromSlice(Named, std.testing.allocator, writer.buffered(), .{});
-    defer again.deinit();
-    try std.testing.expectEqualStrings("r\xffx", again.value.name.text());
+    try std.testing.expectEqualStrings("r\xffx", (try readNamed(writer.buffered())).text());
 
-    try std.testing.expectError(error.ValueTooLong, std.json.parseFromSlice(Named, std.testing.allocator, "{\"name\":\"123456789\"}", .{}));
-    try std.testing.expectError(error.UnexpectedToken, std.json.parseFromSlice(Named, std.testing.allocator, "{\"name\":7}", .{}));
+    try std.testing.expectError(error.LengthMismatch, readNamed("{\"name\":\"123456789\"}"));
+    try std.testing.expectError(error.UnexpectedToken, readNamed("{\"name\":7}"));
+    // The object of its two fields, which `std.json` read before a `Line` had a hook, is not a line.
+    try std.testing.expectError(error.UnexpectedToken, readNamed("{\"name\":{\"bytes\":[114,101,120,0,0,0,0,0],\"len\":3}}"));
 }

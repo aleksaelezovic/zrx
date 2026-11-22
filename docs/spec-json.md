@@ -89,36 +89,65 @@ that are checked and then dropped (`actor`). To keep that check, the type
 decoded has those fields too, as a type with a `jsonParse` that reads a
 string and keeps nothing. The extension does not provide that type.
 
-## `Line` has a `jsonParse`, in `src/io.zig`
+## `Line` has `std.json`'s hooks, in `src/io.zig`
 
 This is the one change outside the extension, and a proposal until the
 owner accepts it.
 
-Text in a value is a `Line(n)`. `std.json` reads a struct through the
-declaration `T.jsonParse` of that struct: it looks nowhere else. So the
-hook has to be declared on `Line` itself, beside the `jsonStringify` that
-was already there for `encode`; nothing in `src/ext/json.zig` could make
-`std.json` read a `Line`. Without it the rule above leaves no text but an
-array of exactly as many bytes.
+Text in a value is a `Line(n)`. `std.json` reads a struct through a
+declaration of that struct: it looks nowhere else. So the hook has to be
+declared on `Line` itself, beside the `jsonStringify` that was already
+there for `encode`; nothing in `src/ext/json.zig` could make `std.json`
+read a `Line`. Without it the rule above leaves no text but an array of
+exactly as many bytes.
 
-It is `std.json`'s contract and not the extension's: the method names
-nothing of zrx, and a caller who uses `std.json` directly gets it too.
+It is `std.json`'s contract and not the extension's: the methods name
+nothing of zrx, and a caller who uses `std.json` directly gets them too.
 `Line` is read as it is written, like a byte slice: from a string, or from
 an array of numbers, which is what `jsonStringify` writes for bytes that
-are not UTF-8. It delegates to `std.json.innerParse([]const u8, ...)` and
-copies.
+are not UTF-8.
 
-A text too long for its line is `error.ValueTooLong`, not the
-`error.StreamTooLong` that `Line.from` has. A `jsonParse` can return only
-what `std.json` already fails with: its result is returned through
-`std.json`'s own error set.
+`std.json` has two ways in, and each asks for a hook of its own: text
+(`parseFromSlice`, `parseFromTokenSource` and their `Leaky` forms, which
+`decode` uses) calls `jsonParse`; a `std.json.Value` read first
+(`parseFromValue`, `parseFromValueLeaky`) calls `jsonParseFromValue`.
+`Line` has both, and they read the same: each delegates to `std.json`'s
+reading of a `[]const u8` from its source and copies. With only
+`jsonParse`, which the first version of this change had, the two ways in
+read a line in two formats. One way to read a `Line` means both hooks.
+`tests/json.zig` reads every case through both and compares them.
 
-The method is generic (`source: anytype`), so it exists only where it is
-called. Checked on `wasm32-freestanding` and `thumb-freestanding-eabi`, in
-Debug: a program over `Line` items that does not decode compiles to 87
-functions, none of `std.json`; one that decodes its lines has 277, 62 of
-them `std.json`'s. The core compiles freestanding as before
-(`zig build cross`), and so does `decode`.
+### The format a `Line` is read from changes
+
+This changes what `std.json` reads for a `Line` at both ways in, for a
+caller who uses it directly. Before, a `Line` had no hook and was read as
+the struct it is, the object of its two fields:
+`{"bytes":[114,101,120,0,0,0,0,0],"len":3}`, with every byte of the
+buffer written. Now that object is `error.UnexpectedToken`, and a line is
+read from `"rex"` or `[114,101,120]`. Nothing in zrx wrote the object:
+`jsonStringify` wrote a line as a string before this change as well, so
+until now `std.json` could not read back what it wrote of a line. A caller
+who kept the object has to write it as the string or the array of its
+bytes. This is for the owner to accept.
+
+A text too long for its line is `error.LengthMismatch`, `std.json`'s error
+for a string that is not the length of its array, and not the
+`error.StreamTooLong` that `Line.from` has. A hook can return only what
+`std.json` already fails with, and `jsonParseFromValue` only what
+`std.json.ParseFromValueError` lists. The first version returned
+`error.ValueTooLong` from `jsonParse`, which that set does not have, so
+the two ways in could not have agreed on it. `ValueTooLong` is now only
+`std.json`'s own: a value longer than `.parse.max_value_len`.
+
+The methods are generic (`source: anytype`), so they exist only where
+they are called. Checked on `wasm32-freestanding` and
+`thumb-freestanding-eabi`, in Debug, with `jsonParse` alone: a program
+over `Line` items that does not decode compiles to 87 functions, none of
+`std.json`; one that decodes its lines has 277, 62 of them `std.json`'s.
+With both hooks, the object of such a program that does not decode has no
+name of `std.json` in it on either target; the functions were not counted
+again. The core compiles freestanding as before (`zig build cross`), and
+so does `decode`.
 
 ## How the scratch memory is given
 
@@ -202,4 +231,8 @@ Back only by decision:
 - a default for `.scratch`;
 - a place for `isText` and `holdsText` that the pattern extension and this
   one share. Each has a private copy of the rule "a `[]const u8`, or a
-  value with `text()`".
+  value with `text()`". Review found two items that passed the copy here
+  and failed inside the handler, a `volatile` byte slice and a `text`
+  that takes its receiver at compile time; it now refuses both, and an
+  `allowzero` slice, with the message for an item that is not text. The
+  copy in the pattern extension was not changed.
