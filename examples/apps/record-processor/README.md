@@ -41,25 +41,27 @@ flowchart TD
     N --> M["map(withinLimit): fatal past the record cap"]
     M --> B["branch"]
     B --> A["filter accepted, map record, print to Accepted"]
-    B --> R["filter rejected, map rejection, print to Diagnostics"]
+    B --> R["filter rejected, tap status 1, map rejection, print to Diagnostics"]
     B --> T["map contribution, fold totals"]
-    T --> S["tap: remember totals, print summary to Console"]
+    T --> S["print summary to Console"]
 ```
 
 - The schema is four named handlers composed left to right; the first rule a
   line breaks becomes that record's outcome. A rejection is data, not a failed run.
 - `Rules` (amount ceiling, record cap) is an injected dependency.
 - The four destinations are roles: `Input`, `Accepted`, `Diagnostics`
-  (`zrx.Stderr`) and `Console` (`zrx.Stdout`). The program provides `stdout`
-  and `stderr` as defaults; a production run adds a `fileReader` for the
-  input and a `fileWriter` in `.create_new` mode for the output. Tests pass
+  (`process.Stderr`) and `Console` (`process.Stdout`). The program provides
+  `stdout` and `stderr` as defaults; a production run adds a `fileReader` or
+  a `stdin` binding for the input and a `fileWriter` in `.create_new` mode
+  for the output. Tests pass
   fixed readers and writers to the same program, which replace the defaults.
 - The summary is written only after record output has been flushed successfully.
 
-`app.zig` is the boundary around it: it parses the command, runs the program
-with the bindings the command names and turns the totals into an outcome. A
-run returns nothing: what fails it goes to `rescue(fatal)`, which writes the
-`fatal:` line and stores the status. `main.zig` returns that status.
+`app.zig` is the boundary around it: it parses the command and runs the
+program with the bindings the command names. A run returns nothing: a
+rejected record leaves status 1 where it is reported (`process.status`),
+and what fails the run goes to `rescue(fatal)`, a `process.fail`, which
+writes the `fatal:` line and sets status 2. `main.zig` returns the status.
 
 ## Format and policies
 
@@ -107,7 +109,7 @@ Every executable run has a 10-second deadline and is killed and reaped on failur
 ```text
 src/
   main.zig                 the arguments in, the exit status out
-  app.zig                  command dispatch, opening the input, running, the fatal report
+  app.zig                  command dispatch, the bindings of a run, the fatal report
   composition.zig          the pipeline and its roles
   domain/
     commands.zig           option parsing and usage
@@ -130,9 +132,10 @@ the output is created and a missing input leaves no file behind.
 What is still plain Zig here:
 
 1. **Choosing a program.** Help, invalid usage and processing are a `switch`
-   in `app.zig`, and so is "this file, or stdin": `lines(Input, n)` with a
-   `fileReader`, or `stdinLines(n)`, over the same pipe. A pipe cannot switch
-   to another source.
+   in `app.zig`. "This file, or stdin" is no longer a choice of program: it
+   is one program over `lines(Input, n)` and an `if` around two runs, one
+   with a `fileReader` and one with `process.stdin`. A binding is a type, so
+   the two cannot be one value.
 2. **`print` ends a pipe.** Writing records and then aggregating is a
    `branch` with a `filter` per destination.
 3. **Taking a line apart.** `validation.parseFields` splits a line into its
@@ -145,7 +148,9 @@ What is still plain Zig here:
 
 What needed nothing: the record cap (`scan` numbers, a handler enforces),
 injected rules, testing the production pipe against in-memory I/O, and the
-totals the caller needs for the exit status. A run returns nothing, and
-what it produces is an effect of its pipe: `tap(remember)`
-stores the totals through a `*Summary` dependency. Bounded text for a field
+exit status. A run returns nothing, and what it produces is an effect of
+its pipe: `tap(process.status(1))` on the path of a rejected record raises
+the status through a `*process.Exit` dependency. An earlier version stored
+the totals through a `*Summary` and had the caller look at them after the
+run. Bounded text for a field
 (`Text(n)` in `records.zig`) is the domain's own type.

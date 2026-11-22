@@ -7,7 +7,6 @@ const allocator = std.testing.allocator;
 const io = std.testing.io;
 
 const composition = app.composition;
-const Summary = app.summaries.Summary;
 
 // --- the composition, with readers and writers supplied by the test ---------
 
@@ -15,7 +14,7 @@ const Run = struct {
     accepted: []const u8,
     diagnostics: []const u8,
     console: []const u8,
-    summary: Summary,
+    exit: app.Exit,
 };
 
 /// Runs the production program over `input`; the returned slices live in `storage`.
@@ -24,20 +23,20 @@ fn process(storage: *[3][512]u8, input: []const u8, rules: app.records.Rules) !R
     var accepted: std.Io.Writer = .fixed(&storage[0]);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     try tryRun(composition.processing, .{
         rules,
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     return .{
         .accepted = accepted.buffered(),
         .diagnostics = diagnostics.buffered(),
         .console = console.buffered(),
-        .summary = summary,
+        .exit = exit,
     };
 }
 
@@ -47,7 +46,8 @@ test "accepted records, diagnostics and the summary each go to their own writer"
     try std.testing.expectEqualStrings("AB-1,Ada Lovelace,42\nC,Cat,0\n", run.accepted);
     try std.testing.expectEqualStrings("record 2: InvalidIdentifier\n", run.diagnostics);
     try std.testing.expectEqualStrings("summary: accepted=2 rejected=1 amount_cents=42\n", run.console);
-    try std.testing.expectEqual(Summary{ .accepted = 2, .rejected = 1, .amount_cents = 42 }, run.summary);
+    // The rejected record left its status; the run went on.
+    try std.testing.expectEqual(composition.rejected_status, run.exit.code);
 }
 
 test "rules are injected policy" {
@@ -72,19 +72,19 @@ test "exceeding the record limit is fatal and reports no summary" {
     var accepted: std.Io.Writer = .fixed(&storage[0]);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{ .max_records = 2 },
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.TooManyRecords, result);
     try std.testing.expectEqualStrings("A,Ada,1\nB,Bob,2\n", accepted.buffered());
     try std.testing.expectEqualStrings("", console.buffered());
-    try std.testing.expectEqual(Summary{}, summary);
+    try std.testing.expectEqual(0, exit.code);
 }
 
 test "a failed record write fails the run before any summary" {
@@ -94,14 +94,14 @@ test "a failed record write fails the run before any summary" {
     var accepted: std.Io.Writer = .fixed(&small);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.WriteFailed, result);
     try std.testing.expectEqualStrings("", console.buffered());
@@ -114,14 +114,14 @@ test "a failed summary write is an error even when every record was accepted" {
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var small: [4]u8 = undefined;
     var console: std.Io.Writer = .fixed(&small);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.WriteFailed, result);
     // Earlier record effects are not undone.
