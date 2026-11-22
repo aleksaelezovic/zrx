@@ -1019,6 +1019,12 @@ files.run(.{ io, stdout(4096) });
   it is opened. A handler is given its entry as a value, which is a copy of
   those `n` bytes, so choose `n` for the paths you expect and not the
   longest the system allows.
+- **A path too long to open fails the run.** A `walk` goes into one
+  directory at a time and can reach deeper than a path can name. An entry
+  whose path `std` would not open, of `std.fs.max_path_bytes` bytes or
+  more, fails the run with `error.NameTooLong`, as opening it would, so an
+  `n` beyond that buys nothing. On Linux and macOS every entry given before
+  it opens; on Windows, which counts a path in UTF-16, that is not tested.
 - **`kind`** is what the listing says the entry is: `.file`, `.directory`,
   `.sym_link` and the rest of `std.Io.File.Kind`. Where a file system's
   listing does not say, the source asks the entry itself, at one more system
@@ -1029,9 +1035,9 @@ files.run(.{ io, stdout(4096) });
 - **A symbolic link is an entry of kind `.sym_link` and is not followed**,
   whatever it points to, so a walk stays under its directory and cannot go
   round in a circle. The directory the source is given may itself be a
-  link. A directory that has become a link by the time the walk opens it
-  fails the run (`error.SymLinkLoop` or `error.NotDir`, as the system has
-  it).
+  link. On Linux and macOS a directory that has become a link by the time
+  the walk opens it fails the run (`error.SymLinkLoop` or `error.NotDir`,
+  as the system has it). On Windows that is not tested.
 - **`depth` is how many directories a `walk` may be inside of at once**,
   the one it is given being the first: `fs.walk(path, n, 1)` lists that
   directory and has no room for one in it. A directory deeper than that

@@ -47,8 +47,10 @@ pub fn Entry(comptime max_path_bytes: usize) type {
 /// The entries of the directory at `path`, without `.` and `..`, in the order
 /// the system lists them. Subdirectories are entries and are not gone into;
 /// `walk` does that. A path longer than `max_path_bytes` fails the run with
-/// `error.PathTooLong`, the directory's own included. `path` is copied: it
-/// need not outlive this call. Needs `std.Io`.
+/// `error.PathTooLong`, the directory's own included, and an entry's path
+/// that `std` would not open, of `std.fs.max_path_bytes` bytes or more,
+/// with `error.NameTooLong`. `path` is copied: it need not outlive this
+/// call. Needs `std.Io`.
 pub fn entries(path: []const u8, comptime max_path_bytes: usize) Entries(max_path_bytes) {
     return .{ .path = Line(max_path_bytes).from(path) catch null };
 }
@@ -75,7 +77,7 @@ pub fn Entries(comptime max_path_bytes: usize) type {
             var listing = dir.iterateAssumeFirstIteration();
             while (!stop.requested()) {
                 const found = try listing.next(io) orelse return;
-                try joinAs(native, max_path_bytes, &path, root_len, found.name);
+                try join(max_path_bytes, &path, root_len, found.name);
                 if (try down.push(Item{ .path = path, .kind = try kindOf(io, dir, found) }) == .done) return;
             }
         }
@@ -90,9 +92,10 @@ pub fn Entries(comptime max_path_bytes: usize) type {
 /// was given being the first: with a depth of 1 it lists that one, and a
 /// directory in it is one too many. A directory deeper than that fails the
 /// run with `error.TooDeep`, after it was given as an entry. A path longer
-/// than `max_path_bytes` fails it with `error.PathTooLong`, and a directory
-/// that cannot be opened or read fails it with what the system reported:
-/// nothing is left out silently.
+/// than `max_path_bytes` fails it with `error.PathTooLong`, one that `std`
+/// would not open, of `std.fs.max_path_bytes` bytes or more, with
+/// `error.NameTooLong`, and a directory that cannot be opened or read fails
+/// it with what the system reported: nothing is left out silently.
 ///
 /// `path` is copied: it need not outlive this call. Needs `std.Io` and no
 /// allocator: the listings of the directories it is inside of are on the
@@ -149,14 +152,16 @@ pub fn Walk(comptime max_path_bytes: usize, comptime max_depth: usize) type {
                     depth -= 1;
                     continue;
                 };
-                try joinAs(native, max_path_bytes, &path, top.path_len, found.name);
+                try join(max_path_bytes, &path, top.path_len, found.name);
                 const kind = try kindOf(io, dir, found);
                 // The directory is an item before it is opened: a pipe that
                 // is done with it does not have it opened.
                 if (try down.push(Item{ .path = path, .kind = kind }) == .done) return;
                 if (kind != .directory) continue;
                 if (depth == max_depth) return error.TooDeep;
-                // Not through a link, if the name has become one since it was listed.
+                // Not through a link, if the name has become one since it was
+                // listed. Tested on Linux and macOS only: on Windows `std`
+                // opens a reparse point itself, and nothing here checks that.
                 const below = try dir.openDir(io, found.name, .{ .iterate = true, .follow_symlinks = false });
                 levels[depth] = .{ .listing = below.iterateAssumeFirstIteration(), .path_len = path.len };
                 depth += 1;
@@ -187,6 +192,20 @@ const native: Dir.path.PathType = switch (@import("builtin").os.tag) {
     .uefi => .uefi,
     else => .posix,
 };
+
+/// `joinAs` by the rules of this system, and a path that `std` would not
+/// open, of `std.fs.max_path_bytes` bytes or more, is refused as opening it
+/// would refuse it. A walk opens one directory inside another and can go
+/// deeper than a path can name: an entry it gave there would not open.
+fn join(
+    comptime max_path_bytes: usize,
+    path: *Line(max_path_bytes),
+    dir_len: usize,
+    name: []const u8,
+) error{ PathTooLong, NameTooLong }!void {
+    try joinAs(native, max_path_bytes, path, dir_len, name);
+    if (path.len >= Dir.max_path_bytes) return error.NameTooLong;
+}
 
 /// Makes `path` that of `name` in the directory whose own path is its first
 /// `dir_len` bytes, as a system with the path rules of `rules` reads paths.

@@ -83,6 +83,18 @@ this section.
   a directory and reads the lines of its files has both, and they call for
   different remedies. Not `error.NameTooLong` either, which is `std`'s for
   a path the system refuses.
+- **A path too long to open fails the run before it is given.** A walk
+  opens each directory inside the one before, so it can reach a path
+  longer than the system takes. A review found one on macOS: the walk gave
+  a path that fit the caller's `n`, and opening it by that path, as the
+  guide says a handler may, failed with `error.NameTooLong`. So a path of
+  `std.fs.max_path_bytes` bytes or more fails the run with that error, the
+  one `std` returns for opening it: it is the system that has no room, and
+  no other `n` helps. Skipping the entry was not taken, for the reason
+  under [What fails](#what-fails). The bound is `std`'s, and the test
+  builds its tree from it and runs on Linux and macOS. On Windows the
+  system counts a path in UTF-16 and may refuse a shorter one; the test is
+  not run there.
 - The directory's own path must fit too, and is checked before it is
   opened. Otherwise whether a bound is too small would depend on whether
   the directory happens to be empty.
@@ -151,6 +163,13 @@ open below the directory the source was given has `follow_symlinks =
 false`, so a link put in a directory's place since it was listed is not
 gone through either: the run fails. The directory the source is given may
 be a link; it is what the caller named.
+
+That the run fails is tested on Linux and macOS only. On Windows `std`
+opens with `FILE_OPEN_REPARSE_POINT`, which opens a reparse point rather
+than refusing it, and a review found nothing that checks what was opened.
+Checking the handle was considered: it would be code that no test here
+runs, behind a promise only a cross-compilation stands for. So the guide
+narrows the promise to the systems it is tested on instead.
 
 ## Stopping
 
@@ -223,7 +242,7 @@ walk opens it fails the run with `error.FileNotFound`.
   `fromProducer` with `Stop` do.
 - The join is tested by itself, by the rules of both kinds of system (see
   [How the directory is given](#how-the-directory-is-given)).
-- Each safeguard was removed in turn (twenty-four mutants) and a test failed
+- Each safeguard was removed in turn (twenty-five mutants) and a test failed
   for each; none failed to compile.
 
 The directory is given as `.zig-cache/tmp/<sub_path>`, built from

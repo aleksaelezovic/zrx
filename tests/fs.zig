@@ -566,6 +566,94 @@ test "a directory whose own path is too long fails the run before it is opened" 
     try Dirs.expectClosed(0);
 }
 
+/// Room for the path of an entry as long as the system opens, and more.
+const longest = std.fs.max_path_bytes;
+/// What a path the system opens has room for after the tree's own path.
+const room = longest - 1 - Tree.path_len;
+/// Directory names half as long as a name may be, so that the file at the
+/// bottom can have one byte more than the room left for it.
+const long_name = std.fs.max_name_bytes / 2;
+/// As many such directories one inside the other as leave room for a
+/// separator and a name of a byte or more.
+const long_levels = (room - 2) / (long_name + 1);
+/// The name of the file whose path is the longest the system opens.
+const last_name = room - long_levels * (long_name + 1) - 1;
+
+/// What a handler was given, and how much of it it could open.
+const Reopened = struct { given: usize = 0, opened: usize = 0 };
+
+/// Opens what an entry names from where the source was run, as the guide
+/// says a handler may.
+fn reopen(dirs: Io, reopened: *Reopened, entry: fs.Entry(longest)) !void {
+    reopened.given += 1;
+    const text = entry.path.text();
+    if (entry.kind == .directory) (try Dir.cwd().openDir(dirs, text, .{})).close(dirs) else (try Dir.cwd().openFile(dirs, text, .{})).close(dirs);
+    reopened.opened += 1;
+}
+
+test "an entry the system would not open by its path fails the run, and every one given before it opens" {
+    // Windows counts a path in UTF-16, and this tree is longer than it opens.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    var tree: Tree = .init();
+    defer tree.deinit();
+
+    // The directory at the bottom, below the tree and then from where the
+    // tests run, and the file in it, one byte short of a path the system
+    // does not open.
+    var below: [room]u8 = undefined;
+    var len: usize = 0;
+    for (0..long_levels) |level| {
+        if (level != 0) {
+            below[len] = sep[0];
+            len += 1;
+        }
+        @memset(below[len..][0..long_name], 'd');
+        len += long_name;
+    }
+    try tree.dir(below[0..len]);
+    const bottom = len;
+    below[len] = sep[0];
+    @memset(below[len + 1 ..][0 .. last_name + 1], 'f');
+    var bottom_path: [Tree.path_len + 1 + room]u8 = undefined;
+    @memcpy(bottom_path[0..Tree.path_len], tree.path());
+    bottom_path[Tree.path_len] = sep[0];
+    @memcpy(bottom_path[Tree.path_len + 1 ..][0..bottom], below[0..bottom]);
+    const bottom_dir = bottom_path[0 .. Tree.path_len + 1 + bottom];
+
+    const walked = program(fs.walk(tree.path(), longest, long_levels + 1), .{forEach(reopen)});
+    const listed = program(fs.entries(bottom_dir, longest), .{forEach(reopen)});
+
+    // The longest path the system opens is given, and it opens.
+    try tree.file(below[0 .. bottom + 1 + last_name]);
+    {
+        var reopened: Reopened = .{};
+        try support.run(walked, .{ Dirs.init(.{}), &reopened });
+        try std.testing.expectEqual(Reopened{ .given = long_levels + 1, .opened = long_levels + 1 }, reopened);
+        try std.testing.expectEqual(Dirs.opened.load(.monotonic), Dirs.closed.load(.monotonic));
+    }
+    {
+        var reopened: Reopened = .{};
+        try support.run(listed, .{ io, &reopened });
+        try std.testing.expectEqual(Reopened{ .given = 1, .opened = 1 }, reopened);
+    }
+
+    // One byte more, and it is not given: the walk got there one directory
+    // at a time, but its path would not open.
+    try tree.tmp.dir.deleteFile(io, below[0 .. bottom + 1 + last_name]);
+    try tree.file(below[0 .. bottom + 1 + last_name + 1]);
+    {
+        var reopened: Reopened = .{};
+        try std.testing.expectError(error.NameTooLong, support.run(walked, .{ Dirs.init(.{}), &reopened }));
+        try std.testing.expectEqual(Reopened{ .given = long_levels, .opened = long_levels }, reopened);
+        try std.testing.expectEqual(Dirs.opened.load(.monotonic), Dirs.closed.load(.monotonic));
+    }
+    {
+        var reopened: Reopened = .{};
+        try std.testing.expectError(error.NameTooLong, support.run(listed, .{ io, &reopened }));
+        try std.testing.expectEqual(Reopened{}, reopened);
+    }
+}
+
 test "a directory that cannot be opened fails the walk, after it was given as an entry" {
     var tree: Tree = .init();
     defer tree.deinit();
