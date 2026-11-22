@@ -549,12 +549,12 @@ export fn same_take_while(ptr: [*]const u32, len: usize, below: u32, out: *u64) 
 const time = zrx.ext.time;
 
 /// The low bits of a time: enough to show that the time read was the one used.
-fn low(at: std.Io.Timestamp) u64 {
+fn lowBits(at: std.Io.Timestamp) u64 {
     return @truncate(@as(u96, @bitCast(at.nanoseconds)));
 }
 
 fn addStamped(sum: u64, pair: time.Stamped(u32)) u64 {
-    return sum +% low(pair.at) +% pair.item;
+    return sum +% lowBits(pair.at) +% pair.item;
 }
 
 fn stampedNow(io: std.Io, value: u32) time.Stamped(u32) {
