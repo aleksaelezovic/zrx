@@ -586,6 +586,45 @@ to this file; edit `AGENTS.md`, not copies.
     that brings a new error adds it there.
   - Not there, and back only by decision: `groupBy` with a sub-pipe per
     key, room that grows, room on the heap.
+- **A directory is a source, named by its path.** `src/ext/fs.zig`
+  (`zrx.ext.fs`) holds two sources, `entries` and `walk`, written against
+  the source contract alone.
+  [docs/spec-fs.md](docs/spec-fs.md) is its design record: the reasons and
+  what was rejected. Read it before changing the extension. The rules it
+  gives:
+  - The directory is given by path, as for `fileLines`, not by a role. A
+    source holds a copy of its path, so one may be made from an entry
+    inside the `source_of` of an `each`.
+  - An item holds its path inline (`Entry(n)`), beginning with the
+    directory's as it was given. What does not fit fails the run with
+    `error.PathTooLong`, and a path `std` would not open (of
+    `std.fs.max_path_bytes` or more) with `error.NameTooLong`, before it
+    is given.
+  - Nothing allocates. What a source needs room for is written where it
+    is made, and running out is an error of its own name: `walk(path, n,
+    depth)` holds `depth` listings in its `run` and fails with
+    `error.TooDeep`. The directory given is depth 1. Not a list that
+    grows, and not the call stack.
+  - A name is joined by the path rules of the system, in `joinAs`: no
+    separator after one, nor after a drive alone on Windows. Windows is
+    not run here, so a change to the join is pinned by the join tests,
+    which hold both sets of rules on any system.
+  - Every directory that was opened is closed on every way out. Do not
+    use `std`'s `Walker`: its `deinit` leaves them open. A directory is
+    pushed before it is opened.
+  - A kind the listing left `.unknown` is asked for. Links are never
+    followed, also not one put in a directory's place since it was listed.
+  - What cannot be opened or read fails the run: it is the source's
+    failure and belongs to no item. An error path takes one directory
+    when the directory is an item (`each` under `attempt`). Do not carry
+    a failure in the item to go on past it.
+  - Both sources ask for `zrx.Stop` and look at it before each read.
+  - Tests depend neither on the order of a listing nor on permissions:
+    the test `Io` in `tests/fs.zig` stands in for what is not at hand.
+  - No zero-overhead fixture and no claim of zero overhead.
+  - Not there, and back only by decision: watching, globbing, following
+    links, sorting, metadata beyond the kind, going on past an
+    unreadable directory within one walk.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
