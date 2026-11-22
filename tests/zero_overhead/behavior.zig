@@ -368,6 +368,42 @@ test "referencesScanned" {
     try std.testing.expectEqual(9, sum);
 }
 
+test "trimmedLength, longestColumns, longestWords" {
+    const texts = comptime textsOf(&.{
+        "",     " ",          "a",   " a",        "a\t",        " \t a b \t ", "a,b,c",        "a,,c",   ",", ",a,",
+        "abc,", "one, three", " , ", "\t\ttab\t", "a  b\t\tcd", "    ",        "x,yy,zzz,,yy", "no-sep",
+    });
+    for ([_][]const cases.Text{ &.{}, texts[0..5], &texts }) |some| inline for (.{ cases.trimmedLength, cases.longestColumns, cases.longestWords }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, some, &with);
+        case(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    };
+    var columns: u64 = 0;
+    cases.longestColumns(true, texts[6..8], &columns);
+    try std.testing.expectEqual(2, columns);
+}
+
+test "rowsTrimmed, rowsUpper" {
+    const texts = [_][]const u8{
+        "",       " ",                                "north,17", "  south\t",   "\t \t",                            "a b",
+        "MiXed1", "0123456789abcdefghijklmnopqrstuv", "{`az@[",   "caf\xc3\xa9", " 123456789abcdefghijklmnopqrstu ",
+    };
+    var rows: [texts.len]cases.Row = undefined;
+    for (&rows, texts) |*row, text| row.* = try cases.Row.from(text);
+    for ([_][]const cases.Row{ &.{}, rows[0..4], &rows }) |some| inline for (.{ cases.rowsTrimmed, cases.rowsUpper }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        case(true, some, &with);
+        case(false, some, &without);
+        try std.testing.expectEqual(without, with);
+    };
+    var upper: u64 = 0;
+    cases.rowsUpper(true, rows[5..6], &upper);
+    try std.testing.expectEqual('A' + ' ' + 'B', upper);
+}
+
 test "nested" {
     const values = [_]u32{ 1, 6, 7, 2, 100, 5, 6, 1000 };
     const groups = [_]cases.Group{

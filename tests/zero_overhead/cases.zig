@@ -1191,6 +1191,158 @@ export fn same_line_reference(ptr: [*]const *const Row, len: usize, out: *u64) v
     referencesScanned(exported_with_zrx, ptr[0..len], out);
 }
 
+// --- text handlers and sources (zrx.ext.text) -----------------------------------------------------
+
+const txt = zrx.ext.text;
+
+fn addLength(sum: u64, piece: []const u8) u64 {
+    return sum +% piece.len;
+}
+fn longer(longest: u64, piece: []const u8) u64 {
+    return @max(longest, piece.len);
+}
+
+/// The length of all the texts without the blanks at their edges: `trim`
+/// put to a text that stays where it is.
+pub fn trimmedLength(comptime with_zrx: bool, texts: []const Text, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(bytes), map(txt.trim(" \t")), fold(@as(u64, 0), addLength), forEach(store) });
+        run(program(fromSlice(texts), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (texts) |each| sum +%= std.mem.trim(u8, bytes(each), " \t").len;
+        out.* = sum;
+    }
+}
+
+export fn same_text_trim(ptr: [*]const Text, len: usize, out: *u64) void {
+    trimmedLength(exported_with_zrx, ptr[0..len], out);
+}
+
+/// For every text its longest column, summed: `each` over `split`.
+pub fn longestColumns(comptime with_zrx: bool, texts: []const Text, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.each(zrx.compose(.{ bytes, txt.split(",") }), .{fold(@as(u64, 0), longer)}),
+            map(zrx.field(.item)),
+            fold(@as(u64, 0), addWide),
+            forEach(store),
+        });
+        run(program(fromSlice(texts), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (texts) |each| {
+            var columns = std.mem.splitScalar(u8, bytes(each), ',');
+            var longest: u64 = 0;
+            while (columns.next()) |column| longest = @max(longest, column.len);
+            sum +%= longest;
+        }
+        out.* = sum;
+    }
+}
+
+/// The source is `std.mem.splitScalar` and the loop over it: no call and no
+/// stack slot on either side.
+export fn same_text_split(ptr: [*]const Text, len: usize, out: *u64) void {
+    longestColumns(exported_with_zrx, ptr[0..len], out);
+}
+
+/// For every text its longest word, summed: `each` over `tokenize`.
+pub fn longestWords(comptime with_zrx: bool, texts: []const Text, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{
+            zrx.each(zrx.compose(.{ bytes, txt.tokenize(" \t") }), .{fold(@as(u64, 0), longer)}),
+            map(zrx.field(.item)),
+            fold(@as(u64, 0), addWide),
+            forEach(store),
+        });
+        run(program(fromSlice(texts), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (texts) |each| {
+            var words = std.mem.tokenizeAny(u8, bytes(each), " \t");
+            var longest: u64 = 0;
+            while (words.next()) |word| longest = @max(longest, word.len);
+            sum +%= longest;
+        }
+        out.* = sum;
+    }
+}
+
+export fn same_text_tokenize(ptr: [*]const Text, len: usize, out: *u64) void {
+    longestWords(exported_with_zrx, ptr[0..len], out);
+}
+
+fn addBytes(sum: u64, row: Row) u64 {
+    var next = sum;
+    for (row.text()) |byte| next +%= byte;
+    return next;
+}
+
+/// `trim` put to a line, by hand: see `same_text_trim_line`.
+fn trimRow(data: struct { Row }) Row {
+    const kept = std.mem.trim(u8, data[0].text(), " \t");
+    var trimmed: Row = .{ .bytes = undefined, .len = kept.len };
+    @memcpy(trimmed.bytes[0..kept.len], kept);
+    return trimmed;
+}
+
+/// The bytes of the rows without the blanks at their edges, summed: `trim`
+/// put to a line, which answers a line.
+pub fn rowsTrimmed(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(txt.trim(" \t")), fold(@as(u64, 0), addBytes), forEach(store) });
+        run(program(fromSlice(rows), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (rows) |row| sum = addBytes(sum, trimRow(.{row}));
+        out.* = sum;
+    }
+}
+
+/// The loop by hand trims each row in a function of its own, which it
+/// gives the row as a tuple of one, as a handler is given its data. Written
+/// inline, the two differ in where a stack slot begins and ends (a
+/// function's slots are marked for each call once it is inlined) and in a
+/// store of a zero that the pipe has not; given the row alone, in the type
+/// of that stack slot and nothing else.
+///
+/// Measured on both sides, for this pipe and both targets: the row copied
+/// once, into the tuple, and what is kept copied once, into the new line.
+/// An item goes from stage to stage as a value, and in this pipe the
+/// optimizer does not take the first copy out (see `lean_pattern_line`).
+/// That is a measurement of this pipe, not a rule for others.
+export fn same_text_trim_line(ptr: [*]const Row, len: usize, out: *u64) void {
+    rowsTrimmed(exported_with_zrx, ptr[0..len], out);
+}
+
+/// The bytes of the rows in upper case, summed: `toUpper` put to a line.
+pub fn rowsUpper(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
+    if (with_zrx) {
+        const total = pipe(.{ map(txt.toUpper), fold(@as(u64, 0), addBytes), forEach(store) });
+        run(program(fromSlice(rows), total), .{Result{ .out = out }});
+    } else {
+        var sum: u64 = 0;
+        for (rows) |*each| {
+            var upper = each.*;
+            for (upper.bytes[0..upper.len]) |*byte| byte.* = std.ascii.toUpper(byte.*);
+            for (upper.text()) |byte| sum +%= byte;
+        }
+        out.* = sum;
+    }
+}
+
+/// The loop by hand copies each row and converts the copy, where one would
+/// convert the bytes as one reads them. An item reaches a stage as a value
+/// (see `lean_pattern_line`), and the handler converts the one it was
+/// given: in this pipe that is the row copied once, on both sides. With a
+/// sink that stores the row, where this one reads it, the pipe measured
+/// one copy of the row's bytes and one stack slot more than the loop by
+/// hand (41 instructions to 35 on aarch64). `docs/spec-text.md` has both.
+export fn same_text_upper(ptr: [*]const Row, len: usize, out: *u64) void {
+    rowsUpper(exported_with_zrx, ptr[0..len], out);
+}
+
 // --- each ---------------------------------------------------------------------------------------
 
 /// Some values and what their sum counts for.

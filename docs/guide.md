@@ -1755,6 +1755,163 @@ number, conversion between integers and floats, and vectors. A handler of
 your own over `std.math` is a few lines; these return when something needs
 them.
 
+## Text
+
+`zrx.ext.text` tidies a text item and takes it apart, with `std.mem` and
+`std.ascii`. It is an extension: handlers and a source written against the
+public contracts, compiled only when a program uses them.
+
+```zig
+const text = zrx.ext.text;
+
+const Name = zrx.Line(32);
+
+/// A row taken column by column: `name, cents`.
+const Entry = struct {
+    columns: u8 = 0,
+    name: Name = undefined,
+    cents: u32 = 0,
+
+    fn column(entry: Entry, piece: []const u8) !Entry {
+        var next = entry;
+        switch (entry.columns) {
+            0 => next.name = try .from(piece),
+            1 => next.cents = try std.fmt.parseInt(u32, piece, 10),
+            else => return error.TooManyColumns,
+        }
+        next.columns += 1;
+        return next;
+    }
+
+    fn isWhole(entry: Entry) bool {
+        return entry.columns == 2;
+    }
+};
+
+const entries = pipe(.{
+    recover(anyerror, rejections),
+    each(text.split(","), .{
+        map(text.trim(" \t")),
+        fold(Entry{}, Entry.column),
+    }),
+    map(field(.item)),
+    map(require(Entry.isWhole, error.MissingColumn)),
+    forEach(save),
+});
+
+program(fileLines(path, 128), entries)
+```
+
+A line becomes a stream of its columns, and the columns one record. A line
+that breaks a rule fails with the name of that rule, a name that is too long
+(`StreamTooLong`) or an amount that is no number (`InvalidCharacter`) among
+them, which the error path is given with the line.
+
+| | |
+|---|---|
+| `text.trim(bytes)` | Handler: the item without the bytes named in `bytes` at its start and at its end. |
+| `text.trimStart(bytes)`, `text.trimEnd(bytes)` | The same, at one end. |
+| `text.toUpper`, `text.toLower` | Handlers: a line with its ASCII letters in that case. |
+| `text.split(delimiter)` | For `each`: a source of the pieces between each `delimiter` and the next, the empty ones included. A text with `n` delimiters has `n + 1` pieces. |
+| `text.tokenize(delimiters)` | For `each`: a source of the pieces that hold none of the bytes in `delimiters`. None is empty. |
+| `text.whitespace` | The bytes `std.ascii` counts as whitespace, for `trim` and `tokenize`. |
+
+The bytes to strip are always named: `text.trim(" \t")`, or
+`text.trim(text.whitespace)`. A delimiter is a string also when it is one
+byte. For `split`, several bytes are that sequence: `text.split(", ")`
+divides `a, b,c` into `a` and `b,c`. For `tokenize` they are bytes any of
+which separates: `text.tokenize(", ")` makes `a`, `b` and `c` of it.
+
+Everything here works on bytes. The case is ASCII's: a byte that is no ASCII
+letter is left as it is, the bytes of UTF-8 included.
+
+### What a handler is put to
+
+Where the bytes are decides what a handler takes and what it answers.
+
+- A `[]const u8` points at bytes that stay where they are. `trim` answers a
+  slice of the same bytes, which lives as long as they do.
+- A [line](#lines-and-values) is a value that holds its bytes, a handler is
+  given it by value, and a piece of its text lives no longer than the call.
+  So `trim` put to a `Line(n)` answers a `Line(n)`: what is made of a value
+  is a value, which crosses a `queue` like any other.
+- Changing bytes needs bytes of one's own. `toUpper` and `toLower` are put
+  to a line and answer a line. Put to a `[]const u8` they do not compile:
+  copy the text into a line first.
+- Where the items are references to lines (`*const Row`), put the handler
+  that yields the text first, as [for a pattern](#lines-and-values):
+  `compose(.{ Row.text, text.trim(" ") })` answers a slice of the line
+  where it is.
+
+```zig
+/// A name from a slice, in upper case: `error.StreamTooLong` if it is longer.
+const shouted = compose(.{ Name.from, text.toUpper });
+```
+
+A copy costs what it copies. [Lines and values](#lines-and-values) has what
+was measured of the copies of a line, pipe by pipe, and that there is no
+rule to give. Two fixtures are further examples, each with a `Line(32)`
+and with its copies on both sides of the comparison: `same_text_trim_line`
+and `same_text_upper`. Put to a `[]const u8`, nothing is copied:
+`same_text_trim` is the loop over `std.mem.trim`.
+
+### Pieces
+
+`split` and `tokenize` are for [`each`](#each): what they answer for an item
+is a source, and the sub-pipe runs over its pieces.
+
+- The item is a `[]const u8`, or a struct `T` that reads its text with
+  `pub fn text(*const T) []const u8`, as a `Line` does. Only a struct is
+  taken: a union or an enum with such a `text` is a compile error. Text
+  that is a field of the item is reached through it:
+  `each(compose(.{ field(.tags), text.tokenize(" ") }), sub)`.
+- A piece is a `[]const u8` that points into the item. For a `[]const u8`
+  item that is its bytes, and the piece lives as long as they do. For a
+  struct, such as a line, it is the struct as `each` holds it while it
+  works on that item.
+- **A piece of a struct is valid until the push of that item has returned,
+  and no longer.** It is there in the sub-pipe; in what the `each` emits
+  for the item, the last emission included, such as the final value of a
+  `fold` in the sub-pipe that kept a piece; and in the stages after the
+  `each` that the push runs through, up to the next task boundary. A
+  caller that keeps a piece beyond that copies it.
+- So, like a piece of [`fileBytes`](#input-and-output), it is not sent
+  across a task boundary after the `each` (`queue`, `batchWithin`,
+  `debounce`, `concurrent`), nor kept in a `batch` or in the state of a
+  `fold` there. Nothing checks this. A boundary *inside* the sub-pipe is a
+  compile error, as for any `each`.
+- Make a value of what has to stay: a copy (`map(Name.from)`), a number, or
+  a `fold` in the sub-pipe that puts the columns into a struct, as `Entry`
+  above.
+- What goes on after the `each` is a `Tagged(Item, T)`, the line with what
+  the sub-pipe emitted: a `Line(n)` goes along with every value, until
+  `map(field(.item))` leaves it behind.
+
+### What is not here
+
+A test of what a text looks like is a [text pattern](#text-patterns), which
+describes the whole of it, and is not written a second time here:
+
+```zig
+const byte = pattern.byte;
+
+/// The text is `GET`.
+const is_get = seq(.{"GET"});
+/// The text starts with `/items/`.
+const under_items = seq(.{ "/items/", repeat(byte, .{}) });
+```
+
+Whether a text *ends* with some text, or holds it somewhere, is neither: a
+`repeat` gives nothing back, so `seq(.{ repeat(byte, .{}), ".zig" })` does
+not compile, and finding the places a pattern matches inside a text is not
+there. Until one of the two is decided, that test is a handler of your own
+over `std.mem.endsWith`. [The design record](spec-text.md) has the reasons.
+
+Also not here: Unicode, in the classes or the case; a delimiter chosen while
+the program runs (write a `source_of` of your own for it); and the other
+forms `std.mem` has, such as splitting at any of several bytes while keeping
+the empty pieces, or from the end.
+
 ## HTTP
 
 `zrx.ext.http` serves HTTP/1.1 with `std.http.Server`. It is an extension: a
@@ -2358,7 +2515,7 @@ case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
 Every synchronous operator has a fixture, and so have `rescue`,
-`process.fail` and `process.status`. Thirty-four are `same`; `take`,
+`process.fail` and `process.status`. Thirty-nine are `same`; `take`,
 `batch`, the handler combinators, `attempt`, a `recover` whose path has
 stages of its own, the text patterns and `abs` of [`ext.math`](#math) are
 `lean`, each with the reason next to it.
