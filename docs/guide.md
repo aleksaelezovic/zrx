@@ -868,6 +868,7 @@ field when a program has several (`reader: *std.Io.Reader` for input).
 | `stdout(n)`, `stderr(n)` | Provide `zrx.Stdout` / `zrx.Stderr`, buffered by `n` bytes. |
 | `fileWriter(Role, path, n, options)` | Binds a file writer as `Role`. The mode is `.replace` (default), `.create_new` or `.publish`. |
 | `ext.json.encode(options)` | Handler: the item as JSON text, to be formatted with `{f}`. |
+| `ext.json.decode(T, options)` | Handler: the `T` a text is the JSON of. See [Decoding JSON](#decoding-json). |
 | `lines(Role, n)` | Source: lines of the reader keyed by `Role`. |
 | `fileReader(Role, path, n)` | Binds a file's reader as `Role`, buffered by `n` bytes. |
 | `stdinLines(n)`, `fileLines(path, n)` | Sources: lines of standard input or a file; a line is at most `n` bytes, not counting its newline. |
@@ -968,6 +969,92 @@ reports, which for `std.Io.Reader` is `error.ReadFailed`.
 `batch(n)` emits `Batch(T, n)`. Use `group.slice()` while the group is alive,
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
+
+### Decoding JSON
+
+`json.decode(T, options)` from the extension `zrx.ext.json` is the handler
+that goes the other way: `map` a text with it and the item is the `T` that
+text is the JSON of.
+
+```zig
+const json = zrx.ext.json;
+
+const Record = struct { id: u64, action: Action, resource: zrx.Line(96) };
+
+/// Where a line that is not a record goes instead.
+const rejections = pipe(.{
+    map(described),
+    print(zrx.Stderr, "{f}\n"),
+});
+
+const archive = pipe(.{
+    recover(json.DecodeError, rejections),
+    map(json.decode(Record, .{ .scratch = 2048 })),
+    map(json.encode(.{})),
+    write(Archive, "{f}\n"),
+});
+```
+
+The item is a text: a `[]const u8`, or a value that reads its text with
+`text()`, as a `Line` does. Where the text is part of an item, put the
+handler that yields it first: `compose(.{ field(.body), json.decode(T, options) })`.
+A text is one whole document. Reading is `std.json.parseFromSlice`'s, with
+what that takes and refuses: a number may be written as a string, an enum
+by its name or its number, a field that is absent takes its default, and a
+field `T` does not have is an error unless the options say otherwise.
+
+The options are always given. `.scratch` has no default; `.parse` is
+`std.json.ParseOptions`, as in
+`json.decode(Record, .{ .scratch = 2048, .parse = .{ .ignore_unknown_fields = true } })`.
+
+**What is decoded is a value.** An item goes from stage to stage as a
+value, so nothing in a `T` may point into the text, nor into the memory
+`std.json` read it with: both are gone when the handler returns. A `T`
+with a pointer anywhere in it does not compile. Write
+
+- text as a `zrx.Line(n)`, a copy of at most `n` bytes. `std.json` reads a
+  line as it writes one, like a byte slice: from a string, or from an array
+  of numbers. A text of more than `n` bytes is `error.LengthMismatch`;
+- several values as an array, `[3]f32`, of exactly that many;
+- a type of your own with `std.json`'s hook, `jsonParse`. It must be a
+  value as well.
+
+A `Line` is read so by `std.json` itself, wherever it is used: from text
+(`parseFromSlice`, through `jsonParse`) and from a `std.json.Value`
+(`parseFromValue`, through `jsonParseFromValue`). It was read before as
+the object of its two fields, `{"bytes":[...],"len":3}`, which is now
+`error.UnexpectedToken`; write such a line as its string or as the array
+of its bytes.
+
+**The scratch memory is bounded, and you say by how much.** `.scratch` is a
+number of bytes on the stack that `std.json` may use while it reads one
+text; every text is read with all of it. One that needs more fails with
+`error.OutOfMemory`, an error of that item like any other. How much a text
+needs depends on the text and on the target: `std.json` keeps a bit for
+each level of nesting in a list that begins at about a cache line (64 or
+128 bytes), and copies there every text that is written with an escape or
+as an array of numbers, in a list that begins as large again. A number
+alone needs none. When in doubt, give it a few hundred bytes and twice the
+longest text.
+
+**Its errors are `std.json`'s**, and `json.DecodeError` names them all, so
+`recover`, `attempt` and `orElse` take them by name:
+
+| | |
+|---|---|
+| `SyntaxError`, `UnexpectedEndOfInput` | The text is not one JSON document. An empty text ends too early; anything after the document is a syntax error. |
+| `UnexpectedToken`, `MissingField`, `UnknownField`, `DuplicateField` | It is JSON, and not the shape of a `T`. |
+| `InvalidEnumTag`, `InvalidNumber`, `InvalidCharacter`, `Overflow`, `LengthMismatch`, `ValueTooLong` | A value in it is not one the field holds: a name the enum does not have, a fraction or a word where an integer goes, a number that does not fit, a string that is not the length of its array or too long for its line, a value longer than `.parse.max_value_len`. |
+| `OutOfMemory` | The text needs more scratch memory than `.scratch`. |
+
+`decode` costs what `std.json` costs: its parser is called once for an
+item and is not inlined, so `decode` is not among the handlers the
+[zero-overhead check](#how-zero-overhead-is-checked) compares.
+
+Not there: a decoder that reads a document piece by piece as it arrives, a
+document that spans several items (the pieces of `fileBytes`, or one
+object written over several lines), and any format but JSON. A text is
+whole before it is decoded.
 
 ## Compressed input and output
 
