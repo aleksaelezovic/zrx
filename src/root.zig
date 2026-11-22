@@ -113,6 +113,7 @@ pub const ext = struct {
     pub const pattern = @import("ext/pattern.zig");
     pub const compress = @import("ext/compress.zig");
     pub const process = @import("ext/process.zig");
+    pub const math = @import("ext/math.zig");
 };
 
 // For writing operators, sources and handlers of your own.

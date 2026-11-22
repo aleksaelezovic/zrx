@@ -292,8 +292,9 @@ pub fn require(comptime predicate: anytype, comptime err: anytype) type {
 /// `map(reduce(Window{}, Window.add))`. The result is `seed` for an empty
 /// item. Where `fold` reduces a stream, this reduces one item.
 pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
-    // The reducer's declared state parameter, else the seed's type, as for `fold`.
-    const State = di.Param("reduce", reducer, 2, 0) orelse @TypeOf(seed);
+    // The reducer's declared state parameter, else the seed's type, as for
+    // `fold`; null for a seed without a type, until the elements are known.
+    const Stated = sequence.State("reduce", reducer, @TypeOf(seed));
     return struct {
         pub const zrx_handler = {};
 
@@ -304,7 +305,7 @@ pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
 
         pub fn call(env: anytype, args: anytype) Reduced(@TypeOf(env), di.types(@TypeOf(args))) {
             const In = @TypeOf(args[0]);
-            var state: State = seed;
+            var state: State(sequence.Element(In).?) = seed;
             for (if (comptime sequence.isBatch(In)) args[0].slice() else args[0]) |element| {
                 const next = di.invoke(reducer, env, .{ state, element });
                 state = if (comptime Fallible(@TypeOf(next))) try next else next;
@@ -316,15 +317,20 @@ pub fn reduce(comptime seed: anytype, comptime reducer: anytype) type {
             expectOneItem("reduce", "folds the elements of", "map(reduce(seed, f))", arity);
         }
 
+        fn State(comptime Element: type) type {
+            return Stated orelse sequence.Inferred("reduce", reducer, seed, Element);
+        }
+
         fn Reduced(comptime Env: type, comptime Args: []const type) type {
             @setEvalBranchQuota(di.quota);
             expectOne(Args.len);
             const Element = sequence.Element(Args[0]) orelse
                 @compileError("reduce: items must be arrays, slices, or batches, got `" ++ @typeName(Args[0]) ++ "`");
-            di.check("reduce", reducer, Env, &.{ State, Element });
-            const R = di.Result("reduce", reducer, &.{ State, Element });
-            sequence.expectReturn("reduce", "reducer", R, State);
-            return if (Fallible(R)) @typeInfo(R).error_union.error_set!State else State;
+            const A = State(Element);
+            di.check("reduce", reducer, Env, &.{ A, Element });
+            const R = di.Result("reduce", reducer, &.{ A, Element });
+            sequence.expectReturn("reduce", "reducer", R, A);
+            return if (Fallible(R)) @typeInfo(R).error_union.error_set!A else A;
         }
     };
 }
