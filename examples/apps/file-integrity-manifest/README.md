@@ -36,8 +36,8 @@ const rows = pipe(.{
 });
 
 const exit_status = pipe(.{
-    fold(Exit.complete, Exit.after),
-    forEach(remember),
+    filter(hasFailed),
+    forEach(process.status(status.incomplete)),
 });
 
 pub const manifest = pipe(.{
@@ -51,15 +51,16 @@ pub const manifest = pipe(.{
 program(fromSlice(args[2..]), manifest).run(.{
     init.io,
     &exit,
-    rescue(fatal).provide(.{stderr(256)}),
+    rescue(fatal).provide(.{stderr(Stderr, 256)}),
     fileWriter(Manifest, args[1], 8192, .{ .mode = .publish }),
 });
-return @backingInt(exit);
+return exit.code;
 ```
 
 - **Hashing a file is a pipe of its own.** `each` gives every path a source,
   `fileBytes`, which reads it 32 KiB at a time; `digest` folds the pieces
-  into one `Hash`; `described` makes the row. The sub-pipe starts afresh for
+  into one `Hash`, the `bytes.digest` of SHA-256 beside a count of the
+  bytes; `described` makes the row. The sub-pipe starts afresh for
   every file.
 - **A file that cannot be hashed is data, not a failed run.** Whatever
   `hashed` fails with, such as a missing file or a directory, `attempt`
@@ -68,18 +69,21 @@ return @backingInt(exit);
 - **Four files at a time.** Each worker of `concurrent` has its own copy of
   `hashed`; they take turns pushing rows into the rest of the pipe.
 - **Every row goes to both sub-pipes of `branch`.** `rows` writes it;
-  `exit_status` folds all of them into one `Exit` and stores it once, at the
-  end of the stream. `main` returns it.
+  `exit_status` keeps the ones that say what went wrong, and each raises the
+  status with `process.status`. `main` returns it.
 - **The manifest appears whole or not at all.** `write` flushes once, at the
   end. The `.publish` file gets its name only after the run has succeeded and
   the rows are flushed; a run that fails before that leaves the output path
   untouched.
 - A run returns nothing. What fails it goes to `rescue(fatal)`:
   `fatal: ErrorName` on stderr and the status `failed`, once the output has
-  been closed without getting its name.
+  been closed without getting its name. `fatal` is `process.fail` with that
+  status and prefix.
 
 The handlers that remain are one to four lines each: `Hash.update`,
-`bytesOf`, `described`, `failed`, `Exit.after` and `remember`.
+`bytesOf`, `described`, `failed` and `regularFile`. The exit status, the
+rescue and the digest are the library's (`zrx.ext.process`,
+`zrx.ext.bytes`).
 
 ## Rows
 
@@ -130,7 +134,7 @@ Two things stay in `main` rather than in a pipe, and neither is a gap:
 
 - The argument count is checked before the program exists, because the
   output path is one of its bindings.
-- The exit status is stored through a `*Exit` and returned by `main`. It
+- The exit status is stored through a `*process.Exit` and returned by `main`. It
   cannot be acted on inside the pipe: the manifest is published after the
   pipe has ended.
 
@@ -145,6 +149,6 @@ zig build test -Doptimize=ReleaseFast
 zig build check
 ```
 
-`test` runs the pipe with an injected writer and `Exit` (including a file
+`test` runs the pipe with an injected writer and `process.Exit` (including a file
 larger than one read), and the real executable in temporary directories with
 its exit status, output and manifest asserted.
