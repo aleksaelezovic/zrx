@@ -186,6 +186,20 @@ test "stamped, throttled" {
     var summed: u64 = 0;
     cases.stamped(true, inputs[1], Scripted.over(script[1..]), &summed);
     try std.testing.expectEqual(@as(u64, 40 * std.time.ns_per_ms + 7), summed);
+    // Around the ends of the 63 bits the throttle counts in, which are at
+    // 0 and at 9223372036854 ms and a part of one: the loop by hand reads
+    // a clock outside them as the stage does.
+    const far = [_]i64{ -7, 0, 99, 100, 9223372036800, 9223372036854, 9223372036855, std.math.maxInt(i64), std.math.maxInt(i64) };
+    for (inputs) |items| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        cases.throttled(true, items, Scripted.over(&far), &with);
+        cases.throttled(false, items, Scripted.over(&far), &without);
+        try std.testing.expectEqual(without, with);
+    }
+    var kept: u64 = 0;
+    cases.throttled(true, inputs[2][0..far.len], Scripted.over(&far), &kept);
+    try std.testing.expectEqual(@as(u64, 1 + 4 + 5), kept);
 }
 
 test "batched" {

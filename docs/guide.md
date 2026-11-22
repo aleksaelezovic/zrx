@@ -945,6 +945,24 @@ clock once per item, on the task that pushes. Each place it is written has a
 window of its own, so each case of a `route` and each worker of a
 `concurrent` throttles by itself.
 
+### How far time is counted
+
+`ticks` and `throttle` count time in 63 bits of nanoseconds on `.awake`:
+from 0 to about 292 years of a clock that starts with the system. Nothing
+at the ends of that range is a fault, and nothing there fails the run.
+
+- **A period or window longer than the range is a compile error.**
+- **A clock outside the range is read as its nearest end.** Past the limit
+  the clock stands still for both.
+- **A time later than the limit never comes.** A window that would end
+  later never ends: nothing passes after the item that started it. A tick
+  due later is never pushed: `ticks` waits for it as for any tick, until
+  its consumers are done or the run is cancelled. A window that ends at the
+  limit ends there, and a tick due at the limit is pushed.
+
+`stamp` counts nothing: it hands on what the clock says, in the 96 bits of
+`std.Io`.
+
 ### Testing with a clock
 
 [`zrx.testing.Clock`](#testing-timed-operators) covers these: `ticks` waits
@@ -967,9 +985,10 @@ dependencies and `clock.advanceTo` in the handler.
 `stamp` and `throttle` each have a fixture (`same_time_stamp`,
 `same_time_throttle`): the same instructions as a loop by hand that reads
 the same clock. Reading the clock is a call through the `std.Io` in both.
-`throttle` keeps the end of its window in 64 bits of nanoseconds, good for
-292 years of a clock that starts with the system. The reasons, and what was
-measured, are in [the time spec](spec-time.md).
+`throttle` keeps the time of the item that passed in 64 bits, and holding
+the clock to [the range](#how-far-time-is-counted) is two comparisons for
+each item, in the loop by hand as well. The reasons, and what was measured,
+are in [the time spec](spec-time.md).
 
 ### Not here
 

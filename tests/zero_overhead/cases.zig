@@ -582,19 +582,19 @@ export fn same_time_stamp(ptr: [*]const u32, len: usize, io: *const std.Io, out:
 
 pub const throttle_window: std.Io.Duration = .fromMilliseconds(100);
 
-/// Both keep the end of the window in 64 bits, as the stage does and says
-/// why. The `@intCast` is an assumption in this build mode, not code.
+/// Both read the clock into 63 bits, as the stage does and says why, and
+/// keep the time the last item passed.
 pub fn throttled(comptime with_zrx: bool, items: []const u32, io: std.Io, out: *u64) void {
     if (with_zrx) {
         const total = pipe(.{ time.throttle(throttle_window), fold(@as(u64, 0), add), forEach(store) });
         run(program(fromSlice(items), total), .{ io, Result{ .out = out } });
     } else {
         var sum: u64 = 0;
-        var open_at: i64 = std.math.minInt(i64);
+        var passed_at: u64 = 1 << 63;
         for (items) |value| {
-            const now: i64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
-            if (now < open_at) continue;
-            open_at = now + @as(i64, @intCast(throttle_window.nanoseconds));
+            const now: u64 = std.math.lossyCast(u63, std.Io.Clock.awake.now(io).nanoseconds);
+            if (now -% passed_at < throttle_window.nanoseconds) continue;
+            passed_at = now;
             sum +%= value;
         }
         out.* = sum;

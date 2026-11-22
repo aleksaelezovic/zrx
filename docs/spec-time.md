@@ -22,7 +22,8 @@ input is silent needs a task, so it is a boundary and belongs with those.
 That line decides what is in the extension and what is not.
 
 Periods and windows are positive comptime `std.Io.Duration` values measured
-on `.awake`, as for `batchWithin` and `debounce`. The parameter is typed,
+on `.awake`, as for `batchWithin` and `debounce`, and no longer than
+[time is counted](#the-limit-of-the-count). The parameter is typed,
 so that `.fromSeconds(1)` can be written; a bare number is then Zig's own
 error at the call, which `tests/compile_fail/time_throttle_number.zig`
 pins.
@@ -105,10 +106,62 @@ of a burst is dropped and nothing is emitted at the end of the stream. A
 throttle that emits the last item of a window has to emit while its input
 is silent, which is `debounce`'s kind of operator.
 
-The end of the window is kept as `i64` nanoseconds (`Nanoseconds`), not as
-the 96 bits `std.Io` counts in. The reason is under "Measurements". The
-cost is a limit of 292 years on a clock that starts with the system; past
-it the `@intCast` is a safety panic in Debug and ReleaseSafe.
+What the stage keeps is the time the last item passed, in 64 bits
+(`Nanoseconds`), not the 96 bits `std.Io` counts in. The reason for the
+width is under "Measurements". The cost is a limit of 292 years on a clock
+that starts with the system, and what happens there is the next section.
+
+## The limit of the count
+
+The first draft kept the end of the window as an `i64`, made by an
+unchecked sum from an unchecked conversion of the clock. A review found
+it, and it was reproduced before it was changed: with a clock within a
+window of the limit, or a window near the limit, Debug panicked on the sum,
+and ReleaseFast let every item pass. `ticks` had the same sum in 96 bits,
+where a period near the end of those panicked as the source started.
+
+The cause was one: times were added with nothing that bounded them. So
+`ticks` and `throttle` count in one range, and each value is held to it
+where it comes in.
+
+- **The range** is 0 to `limit`, 2^63 - 1 nanoseconds, kept in a `u64`.
+- **A clock is read by `reading`**, which takes one outside the range for
+  its nearest end. Past the limit the clock stands still.
+- **A period or window is checked by `span`**: longer than the range is a
+  compile error, which `time_ticks_long` and `time_throttle_long` pin.
+- **A time later than the limit never comes.** That is the one rule for
+  both, and it is what a clock that stands still means.
+
+`throttle` keeps when the last item passed and compares the time since
+with the window. The end of the window is a sum that need not fit; the
+time between two readings always does. Before any item the stage holds one
+past the limit, which no reading is within a window of. So a window that
+would end later than the limit never ends, and one that ends at the limit
+ends there.
+
+`ticks` makes its sums in one place, `after`, in 128 bits, and is told
+when the time is later than the limit. It then waits on `stop.wait`: until
+its consumers are done or the run is cancelled, as for any tick. The count
+needs no check: it is the number of periods between two times within the
+range, at most 2^63.
+
+`.awake` does not go back. Should a clock do so, `throttle` passes the item
+and `ticks` takes the tick as on time; a test holds that neither is a
+fault.
+
+Rejected:
+
+- **A named error** for a clock outside the range. Every program with a
+  `throttle` or `ticks` could then fail, and would need an error path or a
+  rescue for something that takes 292 years to happen.
+- **Keeping the end of the window and saturating the sum.** A window that
+  ends at the limit and one that ends later would both be kept as the
+  limit, and one of the two would be wrong.
+- **Counting in the 96 bits of `std.Io`.** It moves the limit and keeps
+  the fault, and costs the instruction under "Measurements".
+- **Ending the stream of `ticks` at the limit.** A source that ends tells
+  its pipe to finish; one that waits for a time that does not come says
+  what is the case.
 
 ## Measurements
 
@@ -120,7 +173,7 @@ call.
 | Fixture | Instructions, both variants |
 |---|---|
 | `same_time_stamp` | 27 |
-| `same_time_throttle` | 36 |
+| `same_time_throttle` | 37 |
 
 Two things were found on the way.
 
@@ -130,10 +183,15 @@ instructions to 31 by hand: one `sext`, and the comparison in 128 bits
 where the loop by hand compared in 96. Zig keeps an `i96` in memory
 sign-extended to 128 bits. A stage is reached through a pointer and is
 optimized before it is inlined, so the extended form stays; a local of the
-loop by hand is promoted before that. With `i64` both variants are the
-same 36 instructions, of which five are the assumptions of the two
+loop by hand is promoted before that. With 64 bits both variants were the
+same 36 instructions, of which five were the assumptions of two
 `@intCast`s and no code. Keep a stage's state in integers the size of a
 register.
+
+**Holding the clock to the range costs two comparisons and two selects for
+each item.** With them both variants are the same 37 instructions and
+none is an assumption. The loop by hand reads the clock with the same
+`std.math.lossyCast` and keeps the same time.
 
 **The declared type of a stack slot is compared.** The `stamp` fixture
 builds its pair through a function by hand as well. Written in place by
@@ -150,10 +208,18 @@ Time is moved with `zrx.testing.Clock`. For the source a test waits on
 where a `tap` with the clock among its dependencies sets the time each
 item arrives at. Nothing waits a length of time.
 
-Fifteen mutants of the extension were each caught by a test. Six of them
-are caught by a hang and not by a failed expectation: a source that is not
-told to stop, or that waits at another time than the test does, leaves the
-test waiting. That is how the `Stop` tests of `tests/flow.zig` fail too.
+A reading outside the range comes from an `Io` whose `.awake` clock says
+the next of a list of times: `zrx.testing.Clock` counts in 64 bits itself.
+That a source waits with no end is seen through an `Io` that says when a
+wait without a timeout begins.
+
+Twenty-eight mutants of the extension were each caught by a test, thirteen
+of them mutants of what holds time to its range. Eleven are caught by a
+hang and not by a failed expectation: a source that is not told to stop,
+that waits at another time than the test does, or that ends where it
+should wait, leaves the test waiting. That is how the `Stop` tests of
+`tests/flow.zig` fail too. Three are caught by a panic of the Debug build,
+where a sum or a difference is checked again and does not fit.
 
 ## Not there
 

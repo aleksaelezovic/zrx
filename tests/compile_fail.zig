@@ -80,8 +80,10 @@ pub const cases = .{
     .{ "batch_within_without_io", "batchWithin: needs `std.Io` to run its timer task; pass `io` to `run(.{ io, ... })`" },
     .{ "debounce_without_io", "debounce: needs `std.Io` to run its timer task; pass `io` to `run(.{ io, ... })`" },
     .{ "time_ticks_period", "time.ticks: period must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "time_ticks_long", "time.ticks: period of 10000000000000000000 ns is longer than time is counted here, 2^63 ns (about 292 years); pass a shorter one" },
     .{ "time_ticks_without_io", "time.ticks: needs `std.Io` to wait for its period; pass `io` to `run(.{ io, ... })`" },
     .{ "time_throttle_duration", "time.throttle: window must be positive; pass e.g. `.fromSeconds(1)`" },
+    .{ "time_throttle_long", "time.throttle: window of 10000000000000000000 ns is longer than time is counted here, 2^63 ns (about 292 years); pass a shorter one" },
     .{ "time_throttle_without_io", "time.throttle: needs `std.Io` to read the clock; pass `io` to `run(.{ io, ... })`" },
     // The window is declared as `std.Io.Duration`, so that `.fromSeconds(1)` can be written: a bare number is Zig's own message, at the call.
     .{ "time_throttle_number", "expected type 'Io.Duration', found 'comptime_int'" },

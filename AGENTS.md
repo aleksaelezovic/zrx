@@ -190,6 +190,11 @@ to this file; edit `AGENTS.md`, not copies.
   - `stamp` is always called with its clock.
   - Keep a stage's state in integers the size of a register: `throttle`
     keeps 64 bits of nanoseconds, not the 96 of `std.Io`.
+  - Time is counted in 63 bits. A clock comes in through `reading` and a
+    period or window through `span`; `after` is the one place that adds
+    two times, and it says when the sum does not fit. `throttle` keeps
+    when an item passed, not when its window ends. A time past the limit
+    never comes: it is not an error and not a panic.
   - Not there, and back only with stopping from outside or by decision:
     `timeout`, `delay`, `sample`, a throttle that emits the last item.
     The stage contract does not grow for them.

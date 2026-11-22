@@ -390,3 +390,154 @@ test "throttle starts every run open, and each sub-pipe has a window of its own"
     zrx.program(zrx.fromSlice(&second), routed).run(.{ clock.io(), &clock, &seen });
     try seen.expect(&.{ 1, 2, 5 });
 }
+
+// --- the limit of the count -------------------------------------------------
+
+/// As far as the extension counts time, in nanoseconds: 292 years.
+const limit: i96 = std.math.maxInt(i64);
+const ms = std.time.ns_per_ms;
+const s = std.time.ns_per_s;
+
+/// An `Io` whose `.awake` clock says the next of a list of times, in
+/// nanoseconds, each time it is read. One at a time: its state is global.
+const AwakeAt = struct {
+    var vtable: Io.VTable = undefined;
+    var times: []const i96 = &.{};
+    var read: usize = 0;
+
+    fn over(script: []const i96) Io {
+        vtable = io.vtable.*;
+        vtable.now = now;
+        times = script;
+        read = 0;
+        return .{ .userdata = io.userdata, .vtable = &vtable };
+    }
+
+    fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
+        if (clock != .awake) return io.vtable.now(userdata, clock);
+        defer read += 1;
+        return .{ .nanoseconds = times[read] };
+    }
+};
+
+/// Pushes one item for each reading, numbered from 0, through `op`, which
+/// reads the clock once for each, and expects the ones in `passed`.
+fn expectPassed(comptime op: anytype, readings: []const i96, passed: []const u32) !void {
+    var seen: support.Recorder(u32) = .{};
+    var items: [8]u32 = undefined;
+    for (items[0..readings.len], 0..) |*item, index| item.* = @intCast(index);
+    zrx.program(zrx.fromSlice(items[0..readings.len]), .{
+        op,
+        zrx.forEach(support.record(u32)),
+    }).run(.{ AwakeAt.over(readings), &seen });
+    try seen.expect(passed);
+}
+
+test "throttle reads a clock past the limit as standing still there: a window that would end later never ends" {
+    // The window of the first item would end 50 ms past the limit.
+    try expectPassed(window, &.{ limit - 50 * ms, limit - 1, limit, limit + s, std.math.maxInt(i96) }, &.{0});
+    // One that ends at the limit ends, and the next never does.
+    try expectPassed(window, &.{ limit - 100 * ms, limit - 1, limit, limit, limit + s }, &.{ 0, 2 });
+    // A clock that starts past the limit: the first item passes, as in any run.
+    try expectPassed(window, &.{ std.math.maxInt(i96), std.math.maxInt(i96) }, &.{0});
+}
+
+test "throttle takes a window as long as the limit" {
+    const longest = time.throttle(.{ .nanoseconds = limit });
+    try expectPassed(longest, &.{ 0, limit - 1, limit, limit }, &.{ 0, 2 });
+    try expectPassed(longest, &.{ 5, limit - 1, limit, limit + s }, &.{0});
+}
+
+test "throttle reads a clock before zero as zero" {
+    try expectPassed(window, &.{ std.math.minInt(i96), -1, 0, 100 * ms - 1, 100 * ms }, &.{ 0, 4 });
+}
+
+test "a clock that goes back is no fault: throttle passes the item, ticks takes the tick as on time" {
+    try expectPassed(window, &.{ 500 * ms, 450 * ms, 460 * ms, 550 * ms }, &.{ 0, 1, 3 });
+
+    // Read at the start, when tick 0 is due, on the way back from the pipe
+    // (five seconds earlier) and when tick 1 is due.
+    var seen: support.Recorder(u64) = .{};
+    try support.run(zrx.program(every_ten, .{
+        zrx.take(2),
+        zrx.forEach(support.record(u64)),
+    }), .{ AwakeAt.over(&.{ 0, 10 * s, 5 * s, 20 * s }), &seen });
+    try seen.expect(&.{ 0, 1 });
+}
+
+/// The `Io` of a clock that says when a task waits on it with no end.
+/// One at a time: its state is global.
+const Untimed = struct {
+    var inner: Io = undefined;
+    var vtable: Io.VTable = undefined;
+    var waiting: Io.Event = .unset;
+
+    fn over(timed: Io) Io {
+        inner = timed;
+        vtable = timed.vtable.*;
+        vtable.futexWait = wait;
+        waiting = .unset;
+        return .{ .userdata = timed.userdata, .vtable = &vtable };
+    }
+
+    fn wait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: Io.Timeout) Io.Cancelable!void {
+        if (timeout == .none) waiting.set(io);
+        return inner.vtable.futexWait(userdata, ptr, expected, timeout);
+    }
+};
+
+test "a tick due at the limit comes; one due past it never does, and the source waits to be stopped" {
+    var clock: Clock = .init(io);
+    clock.advanceTo(.{ .nanoseconds = limit - 10 * s });
+    var seen: Seen = .{};
+    seen.init();
+    var run = try io.concurrent(countOn, .{ Untimed.over(clock.io()), &seen });
+    errdefer _ = run.cancel(io) catch {};
+
+    try clock.waitingAt(.{ .nanoseconds = limit });
+    clock.advanceTo(.{ .nanoseconds = limit });
+    try seen.expect(0);
+    // Tick 1 would be due ten seconds past the limit. The source does not
+    // end and does not spin: it waits with no end, and can be interrupted.
+    try Untimed.waiting.wait(io);
+    try seen.expectNone();
+    try std.testing.expectError(error.Canceled, run.cancel(io));
+    try seen.expectNone();
+}
+
+test "ticks started within a period of the limit never ticks" {
+    var clock: Clock = .init(io);
+    clock.advanceTo(.{ .nanoseconds = limit - 10 * s + 1 });
+    var seen: Seen = .{};
+    seen.init();
+    var run = try io.concurrent(countOn, .{ Untimed.over(clock.io()), &seen });
+    errdefer _ = run.cancel(io) catch {};
+
+    try Untimed.waiting.wait(io);
+    clock.advanceTo(.{ .nanoseconds = limit });
+    try std.testing.expectError(error.Canceled, run.cancel(io));
+    try seen.expectNone();
+}
+
+fn firstTenBehindQueue(timed: Io, seen: *Seen) !void {
+    try support.run(zrx.program(every_ten, .{
+        zrx.queue(1),
+        zrx.take(1),
+        zrx.forEach(Seen.collect),
+    }), .{ timed, seen });
+}
+
+test "ticks waiting for a tick that never comes ends once its consumers behind a boundary are done" {
+    var clock: Clock = .init(io);
+    clock.advanceTo(.{ .nanoseconds = limit - 10 * s });
+    var seen: Seen = .{};
+    seen.init();
+    var run = try io.concurrent(firstTenBehindQueue, .{ clock.io(), &seen });
+    defer _ = run.cancel(io) catch {};
+
+    try clock.waitingAt(.{ .nanoseconds = limit });
+    clock.advanceTo(.{ .nanoseconds = limit });
+    try run.await(io);
+    try seen.expect(0);
+    try seen.expectNone();
+}
