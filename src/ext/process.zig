@@ -43,6 +43,11 @@ pub const Stdin = struct { reader: *Io.Reader };
 /// `lines(Role, n)` is the same value for a file and for standard input,
 /// and which it reads is the binding it is run with. A failed read fails
 /// the run with `error.ReadFailed`, as with any reader given to `lines`.
+///
+/// The reader and its buffer are the binding's, and the reader reads ahead:
+/// what it has read past where the pipe stopped is gone with it. Runs that
+/// read on where the one before stopped share a reader `main` makes, given
+/// to each as a value of the role.
 pub fn stdin(comptime Role: type, comptime buffer_size: usize) Input(Role, buffer_size) {
     return .{};
 }
@@ -167,6 +172,11 @@ pub const Failure = struct {
 /// given for itself:
 /// `rescue(process.fail(.{})).provide(.{stderr(Stderr, 256)})`.
 ///
+/// The name is written with `std.ascii.hexEscape`: a byte that is not
+/// printable ASCII, such as a newline in a name declared in quotes, is
+/// written as `\x0a`, so that the line stays one. An identifier is written
+/// as it is.
+///
 /// The status comes first and the line is best effort: a write that fails
 /// is nobody's to take any more. A cancellation is a failure like any
 /// other here and is reported as `Canceled`.
@@ -190,8 +200,8 @@ pub fn fail(comptime options: Failure) type {
     return struct {
         pub const zrx_handler = {};
 
-        /// `fatal: {s}\n`, the prefix taken literally.
-        const format: ?[]const u8 = if (options.prefix) |prefix| literal(prefix) ++ ": {s}\n" else null;
+        /// `fatal: {f}\n`, the prefix taken literally.
+        const format: ?[]const u8 = if (options.prefix) |prefix| literal(prefix) ++ ": {f}\n" else null;
 
         pub fn requires(comptime _: usize) []const type {
             return if (format == null) &.{*Exit} else &.{ *Exit, Stderr };
@@ -205,7 +215,7 @@ pub fn fail(comptime options: Failure) type {
             di.get(env, *Exit).code = options.status;
             const line = format orelse return;
             const writer = di.get(env, Stderr).writer;
-            writer.print(line, .{@errorName(args[0])}) catch return;
+            writer.print(line, .{std.ascii.hexEscape(@errorName(args[0]), .lower)}) catch return;
             writer.flush() catch {};
         }
     };

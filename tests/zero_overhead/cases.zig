@@ -469,7 +469,7 @@ pub fn refused(comptime with_zrx: bool, err: anyerror, exit: *Exit, writer: *std
         });
     } else {
         exit.code = 2;
-        writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
+        writer.print("fatal: {f}\n", .{std.ascii.hexEscape(@errorName(err), .lower)}) catch return;
         writer.flush() catch {};
     }
 }

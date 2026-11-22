@@ -101,6 +101,18 @@ does and for its reason: by the time the failure is back at the binding, a
 `ReadFailed` may be another reader's, so the binding does not put the
 system's error in its place.
 
+**The reader reads ahead, and is the binding's.** A re-review ran a
+program that takes one line twice on one standard input, each run with a
+`stdin` of its own, and got the first of two lines only: the first
+binding's reader had read the start of the second line into its buffer,
+and the buffer went with the binding. Reproduced in `tests/process.zig`,
+where the second run reads what was left after the first one's reads.
+That is what a buffered reader does, and a binding that cannot hand its
+buffer on cannot do otherwise. Nothing new answers it: a value of the role
+is a binding already, so `main` makes one reader over standard input and
+gives it to each run as `Input{ .reader = &reader.interface }`. The guide
+says so with the code, and the same test pins that both lines arrive.
+
 **Nothing allocates, nothing is flushed.** The buffer is an array of a
 comptime size in the binding's `bind`, alive for as long as the run. The
 binding does not flush: `print` and `write` flush what they wrote, as with
@@ -185,13 +197,34 @@ prefix (0x00 to 0x1f, and 0x7f) is a compile error, where the prefix is
 written, that names the byte and its index. That includes a tab, which
 harms nothing, so that the rule has no exception to remember.
 
-Not looked at, and said here so that nobody takes it for covered:
+Not looked at in the prefix, and said here so that nobody takes it for
+covered: bytes from 0x80 up. A prefix may be UTF-8, and the separators
+that are written in several bytes (U+0085, U+2028, U+2029) are not
+searched for.
 
-- Bytes from 0x80 up. A prefix may be UTF-8, and the separators that are
-  written in several bytes (U+0085, U+2028, U+2029) are not searched for.
-- The name of the error. It is printed as it is, and an error declared
-  with a quoted name can hold anything. Under `anyerror` the name is known
-  only when the run has failed.
+**The name is escaped, not refused.** A re-review found the same cause in
+the name: an error declared with a quoted name can hold a newline, and
+`error.@"Too\nbig"` wrote two lines. A compile error cannot be the answer
+there: under `anyerror` the name is known only when the run has failed.
+So the name is printed with `std.ascii.hexEscape`: every byte that is not
+printable ASCII is written as `\xNN`, a newline as `\x0a`. That is the
+prefix's rule turned into an escape, and wider: bytes from 0x80 up are
+escaped too, so the line separators of Unicode are, and so is a name in
+UTF-8, which only a quoted name can be. An identifier, which is what
+almost every error is, is written as before. Not done: a backslash is not
+escaped, so a name that holds `\x0a` as text reads as one that holds a
+newline. The line stays one either way.
+
+Rejected, both from `std.zig`, because each decodes UTF-8 or parses an
+integer type and so has error constants of its own, which are numbered
+per compilation (see the fixture below): `same_process_fail` then
+differed in those constants only.
+
+- `fmtId`, which writes such a name `@"..."` whole, as it is written
+  after `error.`: 947 instructions each side.
+- `fmtString`, the escaping of what stands between those quotes, `\n`
+  for a newline and the line separators of Unicode as bytes, with UTF-8
+  kept: 775 each side.
 
 ## A handler, not a binding
 
@@ -252,7 +285,8 @@ Three fixtures, all `same`:
 - `same_process_fail_silent`: bound as a rescue, against a loop by hand
   that stores the status where it fails. 18 instructions.
 - `same_process_fail`: the line, against the `print` and `flush` one
-  writes. 126 instructions.
+  writes, the name through `hexEscape` on both sides. 196 instructions;
+  126 before the name was escaped.
 
 The streams have none. They are bindings around `std`'s file reader and
 writer and add no stage to a pipe; what a binding costs a run is
@@ -290,7 +324,8 @@ in the silent form, no check of what `fail` is given. Of this one:
 `stderr` exchanged, either way; `fail` raising; control bytes let through,
 or only the newline refused; `status` taking a lone error, or 0; a role
 with a second field. One survived at first: a `stdin` buffer one byte
-short. No test had a line of the full length, and one was added.
+short. No test had a line of the full length, and one was added. Of the
+re-review: the name printed as it is.
 
 ## Not there
 

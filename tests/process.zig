@@ -11,6 +11,7 @@ const fromValue = zrx.fromValue;
 const lines = zrx.lines;
 const map = zrx.map;
 const tap = zrx.tap;
+const take = zrx.take;
 const filter = zrx.filter;
 const forEach = zrx.forEach;
 const print = zrx.print;
@@ -212,6 +213,37 @@ test "a program of one error says the same of what failed before there was a run
     program(fromValue(failed), .{forEach(refusal)}).run(.{ &exit, Stderr{ .writer = &writer } });
     try std.testing.expectEqual(2, exit.code);
     try std.testing.expectEqualStrings("fatal: FileNotFound\n", writer.buffered());
+}
+
+fn quoted(value: u32) error{@"Too\nbig"}!u32 {
+    if (value > 2) return error.@"Too\nbig";
+    return value;
+}
+
+test "a byte of a name that is not printable is escaped, and the line stays one" {
+    var buffer: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    var exit: process.Exit = .{};
+    var seen: Seen = .{};
+    program(fromSlice(&many), .{ map(quoted), forEach(note) })
+        .run(.{ &seen, &exit, Stderr{ .writer = &writer }, rescue(process.fail(.{})) });
+    try std.testing.expectEqual(1, exit.code);
+    try std.testing.expectEqualStrings("error: Too\\x0abig\n", writer.buffered());
+
+    // Under `anyerror`, where the name is known only when it happens: a
+    // carriage return and an escape, a line separator of Unicode, and
+    // printable bytes that are no identifier's, which stay.
+    const refusal = process.fail(.{ .status = 2, .prefix = "fatal" });
+    const names = [_]struct { anyerror, []const u8 }{
+        .{ error.@"a\r\x1b[2Kb", "fatal: a\\x0d\\x1b[2Kb\n" },
+        .{ error.@"one\u{2028}two", "fatal: one\\xe2\\x80\\xa8two\n" },
+        .{ error.@"not \"one\" {name}", "fatal: not \"one\" {name}\n" },
+    };
+    for (names) |case| {
+        writer = .fixed(&buffer);
+        program(fromValue(case[0]), .{forEach(refusal)}).run(.{ &exit, Stderr{ .writer = &writer } });
+        try std.testing.expectEqualStrings(case[1], writer.buffered());
+    }
 }
 
 /// As the guide writes a program, its `main` and what it does about wrong
@@ -446,6 +478,30 @@ test "a reader given to run replaces a stdin default, and standard input is not 
     try std.testing.expectEqualStrings("IN,MEMORY,", writer.buffered());
     try std.testing.expectEqual(0, Streams.reads);
     try std.testing.expectEqualStrings("", Streams.out.text());
+}
+
+/// Reads one line and stops.
+const first = program(lines(Input, 8), .{
+    take(1),
+    map(shout),
+    print(Output, "{f},"),
+});
+
+test "a stdin binding reads ahead, and runs that read on share a reader of main's" {
+    // Each run with a `stdin` of its own: the first one's reader had read
+    // `tw` past its line, three bytes at a time, and it is gone with it.
+    const io = Streams.over(std.testing.io, "one\ntwo\n");
+    try support.run(first, .{ io, stdin(Input, 9), stdout(Output, 64) });
+    try support.run(first, .{ io, stdin(Input, 9), stdout(Output, 64) });
+    try std.testing.expectEqualStrings("ONE,O,", Streams.out.text());
+
+    // One reader, made as the guide makes it in `main`, given to both.
+    _ = Streams.over(std.testing.io, "one\ntwo\n");
+    var buffer: [9]u8 = undefined;
+    var reader = Io.File.stdin().readerStreaming(io, &buffer);
+    try support.run(first, .{ io, Input{ .reader = &reader.interface }, stdout(Output, 64) });
+    try support.run(first, .{ io, Input{ .reader = &reader.interface }, stdout(Output, 64) });
+    try std.testing.expectEqualStrings("ONE,TWO,", Streams.out.text());
 }
 
 test "a line of standard input that does not fit, and a read that fails" {

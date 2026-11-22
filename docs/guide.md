@@ -1698,6 +1698,19 @@ the same way. A test gives `run` a value of the role, an
   wrote, and `fail` flushes its line.
 - The buffer is in the binding, for as long as the run lasts. `n` is a
   comptime size, and `0` is a writer without a buffer.
+- The reader of `stdin` reads ahead, and what it has read past where the
+  pipe stopped goes with the binding. A second run with a `stdin` of its
+  own starts where the first one's reads stopped, not where its pipe did:
+  after a `take(1)`, the next line may be gone in part or whole. Runs that
+  read on from one another share a reader `main` makes, given to each as a
+  value of the role:
+
+```zig
+var buffer: [max_line + 1]u8 = undefined;
+var reader = std.Io.File.stdin().readerStreaming(init.io, &buffer);
+header.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
+body.run(.{ init.io, &exit, Input{ .reader = &reader.interface } });
+```
 
 The core has `stdout(n)`, `stderr(n)` and `stdinLines(n)` from before this
 extension, and the roles are the same types under both names:
@@ -1753,6 +1766,9 @@ The defaults are what Zig does with an error returned from `main`:
   replaces it.
 - The line holds the prefix, the name of the error and nothing else. A
   prefix with a control byte in it, such as a newline, is a compile error.
+  A name declared in quotes can hold one, so every byte of the name that
+  is not printable ASCII is written as `\xNN` (`std.ascii.hexEscape`): a
+  newline in it as `\x0a`. An identifier is written as it is.
   A failure that should say more (which file, which line) is an item's:
   take it in the pipe with an error path, where the item is at hand.
 - A cancellation is given to it like any failure and is written as
