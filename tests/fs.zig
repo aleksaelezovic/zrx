@@ -118,6 +118,8 @@ const Dirs = struct {
     var inner: Io = undefined;
     var options: Options = .{};
     var opened: std.atomic.Value(usize) = .init(0);
+    /// How many times a directory was asked to be opened, opened or not.
+    var asked: std.atomic.Value(usize) = .init(0);
     var closed: std.atomic.Value(usize) = .init(0);
     /// How many times a listing was asked for its next entry.
     var reads: std.atomic.Value(usize) = .init(0);
@@ -138,6 +140,7 @@ const Dirs = struct {
         inner = io;
         options = given;
         opened.store(0, .monotonic);
+        asked.store(0, .monotonic);
         closed.store(0, .monotonic);
         reads.store(0, .monotonic);
         vtable = inner.vtable.*;
@@ -148,6 +151,7 @@ const Dirs = struct {
     }
 
     fn open(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, given: Dir.OpenOptions) Dir.OpenError!Dir {
+        _ = asked.fetchAdd(1, .monotonic);
         if (options.refused) |name| if (std.mem.eql(u8, name, std.fs.path.basename(sub_path))) return error.AccessDenied;
         const result = try inner.vtable.dirOpenDir(userdata, dir, sub_path, given);
         _ = opened.fetchAdd(1, .monotonic);
@@ -578,6 +582,25 @@ const long_name = std.fs.max_name_bytes / 2;
 const long_levels = (room - 2) / (long_name + 1);
 /// The name of the file whose path is the longest the system opens.
 const last_name = room - long_levels * (long_name + 1) - 1;
+
+test "a directory the system would not open by its path fails the run before it is asked to open" {
+    // On Windows `std` converts the path to UTF-16 in a buffer it does not
+    // check first; elsewhere it refuses the path itself, so what shows the
+    // source asks first is that nothing was asked to open.
+    const path: [longest]u8 = @splat('a');
+    var seen: Seen(fs.Entry(longest)) = .{};
+    const noteLongest = Seen(fs.Entry(longest)).note;
+    const counting = Dirs.init(.{});
+    try std.testing.expectError(
+        error.NameTooLong,
+        support.run(program(fs.entries(&path, longest), .{forEach(noteLongest)}), .{ counting, &seen }),
+    );
+    try std.testing.expectError(
+        error.NameTooLong,
+        support.run(program(fs.walk(&path, longest, max_depth), .{forEach(noteLongest)}), .{ counting, &seen }),
+    );
+    try std.testing.expectEqual(0, Dirs.asked.load(.monotonic));
+}
 
 /// What a handler was given, and how much of it it could open.
 const Reopened = struct { given: usize = 0, opened: usize = 0 };

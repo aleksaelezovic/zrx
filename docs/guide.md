@@ -1433,8 +1433,9 @@ files.run(.{ io, stdout(4096) });
   directory at a time and can reach deeper than a path can name. An entry
   whose path `std` would not open fails the run with `error.NameTooLong`,
   as opening it would: one of `std.fs.max_path_bytes` bytes or more, or on
-  Windows, which counts a path in UTF-16, of more than 32767 units. So an
-  `n` beyond that buys nothing. On Linux and macOS every entry given before
+  Windows, which counts a path in UTF-16, of more than 32767 units. The
+  directory a source is given is held to that too, before it is opened.
+  So an `n` beyond that buys nothing. On Linux and macOS every entry given before
   it opens; on Windows the count is tested and the opening is not.
 - **`kind`** is what the listing says the entry is: `.file`, `.directory`,
   `.sym_link` and the rest of `std.Io.File.Kind`. Where a file system's

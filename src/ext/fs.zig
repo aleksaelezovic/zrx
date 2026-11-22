@@ -72,6 +72,7 @@ pub fn Entries(comptime max_path_bytes: usize) type {
             const io = di.get(env, Io);
             const stop = stopOf(env);
             var path = self.path orelse return error.PathTooLong;
+            if (!opens(native, path.text())) return error.NameTooLong;
             const root_len = path.len;
             const dir = try Dir.cwd().openDir(io, path.text(), .{ .iterate = true });
             defer dir.close(io);
@@ -135,6 +136,7 @@ pub fn Walk(comptime max_path_bytes: usize, comptime max_depth: usize) type {
             const io = di.get(env, Io);
             const stop = stopOf(env);
             var path = self.path orelse return error.PathTooLong;
+            if (!opens(native, path.text())) return error.NameTooLong;
 
             // The directories the walk is inside of, the one it was given first.
             var levels: [max_depth]Level = undefined;
@@ -228,7 +230,9 @@ pub fn joinAs(
     if (!opens(rules, path.text())) return error.NameTooLong;
 }
 
-/// Whether `std` takes `path` to open by the path rules of `rules`. On
+/// Whether `std` takes `path` to open by the path rules of `rules`: the
+/// directory a source is given is asked before it is opened, and the path
+/// of an entry before it is given. On
 /// Windows it is converted to UTF-16 in a buffer of `PATH_MAX_WIDE` units
 /// that is not checked first, so a path of more units than that is refused
 /// here and never given: it would overrun the buffer. A unit takes at least
