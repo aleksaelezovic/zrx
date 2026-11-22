@@ -11,6 +11,7 @@
 - [Concurrency and backpressure](#concurrency-and-backpressure)
 - [Input and output](#input-and-output)
 - [HTTP](#http)
+- [Collections](#collections)
 - [Lifetimes](#lifetimes)
 - [Writing your own](#writing-your-own)
 - [How zero overhead is checked](#how-zero-overhead-is-checked)
@@ -1637,6 +1638,138 @@ program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
 The [HTTP benchmark app](../examples/apps/http-bench/README.md) compares this
 with a server written against `std` alone and records what was measured.
 
+## Collections
+
+`zrx.ext.collections` holds the operators that have to keep items: the keys
+seen so far, a state for every key, the whole stream to put it in order.
+They keep them in `std` containers, so they need memory, which is what sets
+them apart from the operators of the core.
+
+```zig
+const collections = zrx.ext.collections;
+const foldBy = collections.foldBy;
+const top = collections.top;
+const descending = collections.descending;
+
+const Request = struct { service: Service, millis: u32 };
+
+fn count(total: u64, _: Request) u64 {
+    return total + 1;
+}
+
+/// The three services with the most requests, the busiest first.
+const busiest = pipe(.{
+    foldBy(field(.service), @as(u64, 0), count),
+    top(3, descending(field(.item))),
+    forEach(report),
+});
+
+program(requests, busiest).run(.{ gpa, collections.memory(), rescue(fatal) });
+```
+
+| Operator | Effect | Holds |
+|---|---|---|
+| `distinct(key)` | Passes an item the first time its key is seen. | Every key seen. |
+| `foldBy(key, seed, f)` | `fold`, once for every key. When the stream ends, each key goes on with its state as a `Tagged(Key, State)`, in the order the keys were first seen. | One key and one state for every key. |
+| `sorted(before)` | When the stream ends, every item, in order. | Every item. |
+| `top(n, before)` | When the stream ends, the first `n` items of the order, in order. | `n` items, and an arrival number with each. |
+| `takeLast(n)` | When the stream ends, the last `n` items, as they came. | `n` items. |
+
+`key` is a handler `fn (deps..., item) Key`, `before` one that says which of
+two items comes first, and `f` a reducer as `fold` takes one. None of the
+five is a task boundary. `distinct` passes items on as they come; the other
+four push nothing before the stream has ended, so the source runs to its
+end whatever follows them, and a `take` after them stops what they push.
+`top(0, ...)` and `takeLast(0)` stop the source at once.
+
+### Memory
+
+A stage is not told when a run fails, so it cannot own what has to be given
+back then. The memory is a binding instead. `collections.memory()` makes a
+`std.heap.ArenaAllocator` from the `std.mem.Allocator` among the bindings
+and provides it as `collections.Memory`, which the five operators ask for.
+When the run is over the arena is freed, whether the run ended or failed.
+To use an arena of your own, pass `collections.Memory{ .arena = &arena }` in
+its place.
+
+Running out of memory fails the run with `error.OutOfMemory`, which an
+error path or the rescue takes like any other error.
+
+### Keys
+
+A key is kept, so it has to be a value:
+
+- an integer, an enum, a `bool`, or a struct, array or optional of those,
+  told apart by all of its parts;
+- a `[]const u8`, told apart by its bytes. The first of each is copied into
+  the arena, so the text may be gone after the push;
+- a value that reads its text with `text()`, such as a `Line`, told apart
+  by that text.
+
+A float, and anything else with a pointer in it, is a compile error.
+`collections.itself` is the key of an item that is its own key:
+`distinct(itself)`.
+
+For `distinct`, a key counts as seen whatever became of its item further
+down: if the item fails there and an error path takes it, a later item with
+that key is still a duplicate. For `foldBy`, an item whose reducer fails
+leaves no trace: its key keeps the state it had, and a key that had none is
+forgotten.
+
+When the keys are the tags of an enum, `fold` over a `std.EnumArray` does
+what `foldBy` does and needs no memory.
+
+### Orders
+
+An order is a handler of two items that answers whether the first comes
+before the second. It cannot fail: it is asked while items are put in
+order, where a failure has nowhere to go.
+
+```zig
+sorted(ascending(field(.millis))), // by a key, smallest first
+sorted(descending(itself)), // by the item, largest first
+sorted(nearer), // fn (deps..., a: Item, b: Item) bool
+```
+
+`ascending(key)` and `descending(key)` order by a key that is an integer, a
+float, an enum (by the values of its tags) or text (byte by byte). Items of
+which neither comes before the other keep the order they arrived in, in
+`sorted` and in `top` alike.
+
+`top(n, before)` emits what `sorted(before)` followed by `take(n)` emits. It
+is there because it keeps `n` items where that keeps all of them.
+
+### What they cost
+
+These operators hold a real buffer, as `queue` does, and they hold it in an
+arena:
+
+- `sorted`, `top` and `takeLast` hold one buffer and give it back when
+  their stream ends. The arena can use that room again only if nothing was
+  taken from it since: inside `each`, a sub-pipe with one of the three uses
+  the same room for every item. `distinct` and `foldBy` give nothing back
+  before the run is over, so inside `each` what they hold grows with the
+  number of items.
+- A container that grows leaves its smaller self behind in the arena.
+  Measured for a million `u32` items, against the container alone over the
+  same allocator: `sorted` held 2.3 times as much at its peak, `distinct`
+  2.2 times, `foldBy` with a `u32` state 4.1 times. `top` and `takeLast`
+  take their room once, for `n` items, when the first item comes, and held
+  1.5 times as much.
+- An item is kept as the value it is. One that points elsewhere, such as a
+  slice, is kept as that pointer, and what it points to has to live until
+  the stream has ended.
+- An order is a handler, so it is given its two items as values: for an
+  item that holds its bytes, such as a `Line(n)`, that is two copies for
+  each comparison.
+
+Of the five, only `takeLast` is held to its loop by hand by
+[`zig build zero-overhead`](#how-zero-overhead-is-checked) (`same`). The
+other four are run both ways for their results and not compared: the check
+keeps the names the compiler numbers, and `std`'s sort and hash map leave
+such names behind. [The design record](spec-collections.md#zero-overhead)
+has what was measured without them.
+
 ## Lifetimes
 
 A run goes through these steps:
@@ -1758,7 +1891,8 @@ of every exported function:
 case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
-Every synchronous operator has a fixture, and so has `rescue`. Twenty-four are
+Every synchronous operator of the core has a fixture, and so has `rescue`.
+Of the [collections](#what-they-cost), `takeLast` has one. Twenty-five are
 `same`; `take`, `batch`, the handler combinators, `attempt`, a `recover`
 whose path has stages of its own and the text patterns are `lean`, each with
 the reason next to it.
@@ -1806,7 +1940,7 @@ chunked request bodies (answered 411 until `std` decodes them with checks;
 see [Answers](#answers)), configurable buffer sizes, TLS and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
 
 Present in the previous implementation and not ported: signals
-(`hold`, `withLatestFrom`), `retryPipe`, `takeLast`, `maxItems`, and one of
+(`hold`, `withLatestFrom`), `retryPipe`, `maxItems`, and one of
 the three standalone example applications. The
 [record processor](../examples/apps/record-processor/README.md) and the
 [HTTP benchmark](../examples/apps/http-bench/README.md) are ported, and

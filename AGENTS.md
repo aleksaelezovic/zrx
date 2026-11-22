@@ -344,6 +344,40 @@ to this file; edit `AGENTS.md`, not copies.
     read: chunked request bodies return by decision.
   - Parsing stays `std.http.Server`'s. HTTP imports nothing of the
     pattern extension and has no router of its own; do not give it one.
+- **Collections keep their items in an arena that a binding holds.**
+  `src/ext/collections.zig` (`zrx.ext.collections`) is written against the
+  operator, handler and resource contracts: `distinct`, `foldBy`, `sorted`,
+  `top` and `takeLast`. [docs/spec-collections.md](docs/spec-collections.md)
+  is its design record: the reasons, what was left out, what was measured
+  and what is still open for decision. Read it before changing the
+  extension. The rules it gives:
+  - A stage is not told when a run fails, so it owns no memory. The
+    operators ask for `Memory`, which `memory()` provides and frees when
+    the run is over. Do not give a stage a `deinit`, and do not allocate
+    in `init`.
+  - It is an arena. Say what it costs with the measurements, and do not
+    say that an operator's memory is free again at the end of its stream:
+    `sorted`, `top` and `takeLast` give one buffer back, which is used
+    again only where nothing was taken from the arena since, and
+    `distinct` and `foldBy` give nothing back before the run is over.
+  - One way to write each thing: a count per key is `foldBy` with a
+    reducer, so there is no `countBy`. An item that is its own key is
+    `itself`, so no operator has a second form without a key.
+  - `Keys` is the one place that reads a key's type. A `[]const u8` key is
+    copied when first kept; a key with any other pointer in it, or a
+    float, is a compile error.
+  - An order is a handler of two items that cannot fail. `sorted` is
+    stable, and `top` emits exactly what `sorted` and `take` emit: keep
+    the test that holds them together.
+  - Only `takeLast` has a fixture that is compared. The other four call
+    into `std` under names the compiler numbers, which the tool keeps; they
+    are run both ways for their results. Do not claim zero overhead for
+    them, and do not widen the tool for them without a decision.
+  - `tests/zero_overhead/cases.zig` names the errors of its fixtures in a
+    `comptime` block so that both variants number them alike. A fixture
+    that brings a new error adds it there.
+  - Not there, and back only by decision: `groupBy` with a sub-pipe per
+    key, a ring for `takeLast` that needs no memory.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.

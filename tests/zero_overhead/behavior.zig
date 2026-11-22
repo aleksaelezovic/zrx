@@ -370,3 +370,25 @@ test "attemptedCapped" {
     try std.testing.expect(!cases.attemptedCapped(true, inputs[3], &untouched));
     try std.testing.expectEqual(@as(u64, 99), untouched);
 }
+
+test "collections: distinctSum, groupedSum, sortedSum" {
+    const gpa = std.testing.allocator;
+    for (inputs) |items| inline for (.{ cases.distinctSum, cases.groupedSum, cases.sortedSum }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        try std.testing.expect(case(true, items, gpa, &with));
+        try std.testing.expect(case(false, items, gpa, &without));
+        try std.testing.expectEqual(without, with);
+    };
+}
+
+test "collections: topSum, lastSum" {
+    const gpa = std.testing.allocator;
+    for (inputs) |items| for ([_]usize{ 0, 1, 3, 12, 100 }) |limit| inline for (.{ cases.topSum, cases.lastSum }) |case| {
+        var with: u64 = 99;
+        var without: u64 = 98;
+        try std.testing.expect(case(true, items, limit, gpa, &with));
+        try std.testing.expect(case(false, items, limit, gpa, &without));
+        try std.testing.expectEqual(without, with);
+    };
+}
