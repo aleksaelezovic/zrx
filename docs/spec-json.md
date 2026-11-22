@@ -40,6 +40,21 @@ pattern extension: a `T` with a pointer anywhere in it is refused where
 that reads itself with a `jsonParse` is held to the same rule; how it reads
 is not looked at.
 
+"Anywhere" is every kind of type that holds another: an optional, an error
+union, an array, a vector, a struct, a union. Review found the error union
+missing: a type whose `jsonParse` filled a field `anyerror![]const u8` from
+the allocator compiled, and the name it returned was read back overwritten.
+The list of what a type is made of had an `else` for everything it did not
+name. It now names every kind, so one that `std` adds does not compile
+until it is said what it holds. Put once to 36 types, with pointers behind
+each of those kinds, it answered as `holdsPointer` of the pattern extension
+does; before, the two differed on the eight that held an error union. No
+test holds that comparison: they are two copies of one question, each
+private to its extension.
+
+What is not seen is an address kept as a number, a `usize` from
+`@intFromPtr`. No reading of a type finds that.
+
 `std.json` would read into such a `T` without complaint. With
 `.alloc_if_needed`, which is its default for a whole text, a string without
 an escape is a slice of the text and one with an escape is a copy in the

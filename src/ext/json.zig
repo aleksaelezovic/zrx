@@ -142,10 +142,14 @@ fn within(comptime path: []const u8, comptime name: []const u8) []const u8 {
     return if (path.len == 0) name else path ++ "." ++ name;
 }
 
-/// What `T` is made of, one level down, with where each part is.
+/// What `T` is made of, one level down, with where each part is. Every
+/// kind of type is written out: one that is passed over here is one whose
+/// pointers `decode` does not see, so a kind `std` adds does not compile
+/// until it is said what it is made of.
 fn parts(comptime T: type, comptime path: []const u8) []const Place {
     return switch (@typeInfo(T)) {
         .optional => |optional| &.{.{ .Type = optional.child, .path = path }},
+        .error_union => |fallible| &.{.{ .Type = fallible.payload, .path = path }},
         .array => |array| &.{.{ .Type = array.child, .path = path }},
         .vector => |vector| &.{.{ .Type = vector.child, .path = path }},
         inline .@"struct", .@"union" => |fields| {
@@ -156,7 +160,27 @@ fn parts(comptime T: type, comptime path: []const u8) []const Place {
             const found = places;
             return &found;
         },
-        else => &.{},
+        // A pointer is not made of what it points to, and is found as itself.
+        .pointer,
+        .type,
+        .void,
+        .bool,
+        .noreturn,
+        .int,
+        .float,
+        .comptime_float,
+        .comptime_int,
+        .undefined,
+        .null,
+        .error_set,
+        .@"enum",
+        .@"fn",
+        .@"opaque",
+        .frame,
+        .@"anyframe",
+        .enum_literal,
+        .spirv,
+        => &.{},
     };
 }
 

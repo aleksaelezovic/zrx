@@ -199,6 +199,24 @@ test "decode reads whatever std.json reads that is a value" {
     }, seen.items[0]);
 }
 
+/// Reads itself: a level, or why there is none.
+const Gauge = struct {
+    level: error{Offline}!u8,
+
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Gauge {
+        const level = try std.json.innerParse(?u8, allocator, source, options);
+        return .{ .level = level orelse error.Offline };
+    }
+};
+
+test "a type that reads itself is decoded, and an error union in it is a value like the one it holds" {
+    const texts = [_][]const u8{ "7", "null" };
+    var seen: support.Recorder(Gauge) = .{};
+    try support.run(program(fromSlice(&texts), .{ map(json.decode(Gauge, .{ .scratch = 64 })), forEach(support.record(Gauge)) }), .{&seen});
+    try std.testing.expectEqual(7, try seen.items[0].level);
+    try std.testing.expectError(error.Offline, seen.items[1].level);
+}
+
 test "decode passes its parse options on to std.json" {
     var seen: Animals = .{};
     const texts = [_][]const u8{
