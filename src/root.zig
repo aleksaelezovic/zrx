@@ -112,6 +112,7 @@ pub const ext = struct {
     pub const http = @import("ext/http.zig");
     pub const pattern = @import("ext/pattern.zig");
     pub const compress = @import("ext/compress.zig");
+    pub const process = @import("ext/process.zig");
 };
 
 // For writing operators, sources and handlers of your own.
