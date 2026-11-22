@@ -1,19 +1,23 @@
 //! Directories as sources, on top of `std.Io.Dir`.
 //!
-//!     const sources = program(fs.walk("src", 512), .{
+//!     const sources = program(fs.walk("src", 512, 16), .{
 //!         filter(isZigFile),
 //!         map(field(.path)),
 //!         print(Stdout, "{f}\n"),
 //!     });
 //!
 //! `entries` gives the entries of one directory and `walk` those under it,
-//! however deep. A directory is named by its path, as a file is for
-//! `fileLines`: it is opened when the source runs and closed when the source
-//! ends, whichever way it ends. An item holds its path, so it may cross a
-//! `queue`; the path begins with the directory's as it was given, so it
-//! opens with whatever opens a path. A source holds its directory's path
-//! too, so one may be made from an entry: `each(listing, ...)` lists the
-//! directories a walk found, each as an item of its own.
+//! as deep as it was given room for. A directory is named by its path, as a
+//! file is for `fileLines`: it is opened when the source runs and closed
+//! when the source ends, whichever way it ends. An item holds its path, so
+//! it may cross a `queue`; the path begins with the directory's as it was
+//! given, so it opens with whatever opens a path. A source holds its
+//! directory's path too, so one may be made from an entry: `each(listing,
+//! ...)` lists the directories a walk found, each as an item of its own.
+//!
+//! Nothing here allocates: the longest path and the depth of a walk are
+//! written where the source is made, and what does not fit fails the run
+//! with an error of its own name.
 //!
 //! Nothing here is known to the core: both are sources like any other.
 const std = @import("std");
@@ -51,7 +55,7 @@ pub fn entries(path: []const u8, comptime max_path_bytes: usize) Entries(max_pat
 
 /// The type of `entries(path, max_path_bytes)`, for a handler that returns one.
 pub fn Entries(comptime max_path_bytes: usize) type {
-    expectRoom("fs.entries", max_path_bytes);
+    expectRoom("fs.entries", "fs.entries(path, 1024)", max_path_bytes);
     return struct {
         /// The directory, or null when its own path is too long.
         path: ?Line(max_path_bytes),
@@ -71,31 +75,39 @@ pub fn Entries(comptime max_path_bytes: usize) type {
             var listing = dir.iterateAssumeFirstIteration();
             while (!stop.requested()) {
                 const found = try listing.next(io) orelse return;
-                try join(max_path_bytes, &path, root_len, found.name);
+                try joinAs(native, max_path_bytes, &path, root_len, found.name);
                 if (try down.push(Item{ .path = path, .kind = try kindOf(io, dir, found) }) == .done) return;
             }
         }
     };
 }
 
-/// The entries under the directory at `path`, however deep, without `.` and
-/// `..`. A directory is an entry, and comes before what is in it; beyond
-/// that the order is the system's. A symbolic link is an entry and is not
-/// followed. A path longer than `max_path_bytes` fails the run with
-/// `error.PathTooLong`, and a directory that cannot be opened or read fails
-/// it with what the system reported: nothing is left out silently.
+/// The entries under the directory at `path`, without `.` and `..`. A
+/// directory is an entry, and comes before what is in it; beyond that the
+/// order is the system's. A symbolic link is an entry and is not followed.
 ///
-/// `path` is copied: it need not outlive this call. Needs `std.Io`, and
-/// `std.mem.Allocator` for the directories it is inside of: one listing for
-/// each level it has gone down, freed when the walk ends. Nothing is
-/// allocated for an entry.
-pub fn walk(path: []const u8, comptime max_path_bytes: usize) Walk(max_path_bytes) {
+/// The walk is inside of at most `max_depth` directories at once, the one it
+/// was given being the first: with a depth of 1 it lists that one, and a
+/// directory in it is one too many. A directory deeper than that fails the
+/// run with `error.TooDeep`, after it was given as an entry. A path longer
+/// than `max_path_bytes` fails it with `error.PathTooLong`, and a directory
+/// that cannot be opened or read fails it with what the system reported:
+/// nothing is left out silently.
+///
+/// `path` is copied: it need not outlive this call. Needs `std.Io` and no
+/// allocator: the listings of the directories it is inside of are on the
+/// stack of the task that runs the source, `@sizeOf(std.Io.Dir.Iterator)`
+/// and a length for each of the `max_depth`.
+pub fn walk(path: []const u8, comptime max_path_bytes: usize, comptime max_depth: usize) Walk(max_path_bytes, max_depth) {
     return .{ .path = Line(max_path_bytes).from(path) catch null };
 }
 
-/// The type of `walk(path, max_path_bytes)`, for a handler that returns one.
-pub fn Walk(comptime max_path_bytes: usize) type {
-    expectRoom("fs.walk", max_path_bytes);
+/// The type of `walk(path, max_path_bytes, max_depth)`, for a handler that returns one.
+pub fn Walk(comptime max_path_bytes: usize, comptime max_depth: usize) type {
+    expectRoom("fs.walk", "fs.walk(path, 1024, 16)", max_path_bytes);
+    if (max_depth == 0) @compileError(
+        "fs.walk: a depth of 0 has no room for the directory the walk is given; pass a positive comptime depth such as `fs.walk(path, 1024, 16)`",
+    );
     return struct {
         /// The directory, or null when its own path is too long.
         path: ?Line(max_path_bytes),
@@ -104,9 +116,10 @@ pub fn Walk(comptime max_path_bytes: usize) type {
         pub const zrx_stop_source = true;
         pub const Item = Entry(max_path_bytes);
 
-        /// A directory the walk is inside of. `std`'s walker keeps the same,
-        /// but its `deinit` leaves the directories open when the walk ends
-        /// before the listing does, which here is every early stop.
+        /// A directory the walk is inside of. `std`'s walker keeps the same
+        /// in a list that grows, and its `deinit` leaves the directories
+        /// open when the walk ends before the listing does, which here is
+        /// every early stop.
         const Level = struct {
             listing: Dir.Iterator,
             /// How much of the path is this directory's.
@@ -115,51 +128,46 @@ pub fn Walk(comptime max_path_bytes: usize) type {
 
         pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
             comptime expectIo("fs.walk", @TypeOf(env));
-            comptime if (!di.has(@TypeOf(env), std.mem.Allocator)) @compileError(
-                "fs.walk: needs `std.mem.Allocator` for the directories it is inside of; pass an allocator to `run(.{ io, allocator, ... })`",
-            );
             const io = di.get(env, Io);
-            const allocator = di.get(env, std.mem.Allocator);
             const stop = stopOf(env);
             var path = self.path orelse return error.PathTooLong;
 
-            var levels: std.ArrayList(Level) = .empty;
-            defer {
-                for (levels.items) |level| level.listing.reader.dir.close(io);
-                levels.deinit(allocator);
-            }
-            try levels.ensureUnusedCapacity(allocator, 1);
-            const root = try Dir.cwd().openDir(io, path.text(), .{ .iterate = true });
-            levels.appendAssumeCapacity(.{ .listing = root.iterateAssumeFirstIteration(), .path_len = path.len });
+            // The directories the walk is inside of, the one it was given first.
+            var levels: [max_depth]Level = undefined;
+            var depth: usize = 0;
+            defer for (levels[0..depth]) |*level| level.listing.reader.dir.close(io);
 
-            while (levels.items.len != 0 and !stop.requested()) {
-                // Before the name is read: it lies in the listing, which
-                // lies in this list.
-                try levels.ensureUnusedCapacity(allocator, 1);
-                const top = &levels.items[levels.items.len - 1];
+            const root = try Dir.cwd().openDir(io, path.text(), .{ .iterate = true });
+            levels[0] = .{ .listing = root.iterateAssumeFirstIteration(), .path_len = path.len };
+            depth = 1;
+
+            while (depth != 0 and !stop.requested()) {
+                const top = &levels[depth - 1];
                 const dir = top.listing.reader.dir;
                 const found = try top.listing.next(io) orelse {
                     dir.close(io);
-                    levels.items.len -= 1;
+                    depth -= 1;
                     continue;
                 };
-                try join(max_path_bytes, &path, top.path_len, found.name);
+                try joinAs(native, max_path_bytes, &path, top.path_len, found.name);
                 const kind = try kindOf(io, dir, found);
                 // The directory is an item before it is opened: a pipe that
                 // is done with it does not have it opened.
                 if (try down.push(Item{ .path = path, .kind = kind }) == .done) return;
                 if (kind != .directory) continue;
+                if (depth == max_depth) return error.TooDeep;
                 // Not through a link, if the name has become one since it was listed.
                 const below = try dir.openDir(io, found.name, .{ .iterate = true, .follow_symlinks = false });
-                levels.appendAssumeCapacity(.{ .listing = below.iterateAssumeFirstIteration(), .path_len = path.len });
+                levels[depth] = .{ .listing = below.iterateAssumeFirstIteration(), .path_len = path.len };
+                depth += 1;
             }
         }
     };
 }
 
-fn expectRoom(comptime who: []const u8, comptime max_path_bytes: usize) void {
+fn expectRoom(comptime who: []const u8, comptime example: []const u8, comptime max_path_bytes: usize) void {
     if (max_path_bytes == 0) @compileError(
-        who ++ ": a path needs room for at least one byte; pass a positive comptime size such as `" ++ who ++ "(path, 1024)`",
+        who ++ ": a path needs room for at least one byte; pass a positive comptime size such as `" ++ example ++ "`",
     );
 }
 
@@ -173,14 +181,42 @@ fn stopOf(env: anytype) Stop {
     return if (comptime di.has(@TypeOf(env), Stop)) di.get(env, Stop) else .{};
 }
 
-/// Makes `path` that of `name` in the directory whose own path is its first `dir_len` bytes.
-fn join(comptime max_path_bytes: usize, path: *Line(max_path_bytes), dir_len: usize, name: []const u8) error{PathTooLong}!void {
-    const separated = dir_len != 0 and !Dir.path.isSep(path.bytes[dir_len - 1]);
+/// The rules of the system this is compiled for.
+const native: Dir.path.PathType = switch (@import("builtin").os.tag) {
+    .windows => .windows,
+    .uefi => .uefi,
+    else => .posix,
+};
+
+/// Makes `path` that of `name` in the directory whose own path is its first
+/// `dir_len` bytes, as a system with the path rules of `rules` reads paths.
+/// The sources join by the rules of the system they are compiled for. It is
+/// public for the tests, which hold the rules of systems they do not run on.
+pub fn joinAs(
+    comptime rules: Dir.path.PathType,
+    comptime max_path_bytes: usize,
+    path: *Line(max_path_bytes),
+    dir_len: usize,
+    name: []const u8,
+) error{PathTooLong}!void {
+    const separated = separates(rules, path.bytes[0..dir_len]);
     const start = dir_len + @intFromBool(separated);
     if (start > max_path_bytes or name.len > max_path_bytes - start) return error.PathTooLong;
-    if (separated) path.bytes[dir_len] = Dir.path.sep;
+    if (separated) path.bytes[dir_len] = if (rules == .posix) Dir.path.sep_posix else Dir.path.sep_windows;
     @memcpy(path.bytes[start..][0..name.len], name);
     path.len = start + name.len;
+}
+
+/// Whether a separator goes between the path of a directory and a name in
+/// it. None goes after one, and none where it would make the path that of
+/// another directory.
+fn separates(comptime rules: Dir.path.PathType, dir: []const u8) bool {
+    if (dir.len == 0 or rules.isSep(u8, dir[dir.len - 1])) return false;
+    if (rules != .windows) return true;
+    // A drive alone, `C:`, is the directory the process is in on that drive,
+    // and `C:name` is in it. `C:\name` is in the root of the drive.
+    const parsed = Dir.path.parsePathWindows(u8, dir);
+    return parsed.kind != .drive_relative or parsed.root.len != dir.len;
 }
 
 /// What kind of thing `found` is. Some file systems do not say in a listing;

@@ -980,21 +980,22 @@ when a program uses them.
 const fs = zrx.ext.fs;
 
 const max_path = 1024;
+const max_depth = 16;
 const isFile = compose(.{ field(.kind), eq(.file) });
 
-const files = program(fs.walk("src", max_path), .{
+const files = program(fs.walk("src", max_path, max_depth), .{
     filter(isFile),
     map(field(.path)),
     print(Stdout, "{f}\n"),
 });
 
-files.run(.{ io, allocator, stdout(4096) });
+files.run(.{ io, stdout(4096) });
 ```
 
 | | |
 |---|---|
 | `fs.entries(path, n)` | Source: the entries of the directory at `path`. Needs `std.Io`. |
-| `fs.walk(path, n)` | Source: the entries under it, however deep. Needs `std.Io` and `std.mem.Allocator`. |
+| `fs.walk(path, n, depth)` | Source: the entries under it, through at most `depth` directories one inside the other. Needs `std.Io`. |
 | `fs.Entry(n)` | The item of both: `path`, a `Line(n)`, and `kind`, a `std.Io.File.Kind`. `entry.name()` is the last name of the path. |
 
 - **The directory is named by its path**, as a file is for `fileLines`. It
@@ -1006,10 +1007,13 @@ files.run(.{ io, allocator, stdout(4096) });
 - **An entry holds its path**, up to `n` bytes inline, so it may cross a
   `queue` or wait in a `batch`. The path begins with the directory's as it
   was given, then the system's separator and the names below:
-  `fs.walk("src", n)` gives `src/ext/fs.zig`. It therefore opens from where
-  the directory was opened: `Io.Dir.cwd().openFile(io, entry.path.text(), .{})`
+  `fs.walk("src", n, depth)` gives `src/ext/fs.zig`. It therefore opens from
+  where the directory was opened: `Io.Dir.cwd().openFile(io, entry.path.text(), .{})`
   in a handler. `.` and `..` are not entries, and neither is the directory
-  itself.
+  itself. No separator is put after one (`src/` gives `src/ext`), nor on
+  Windows after a drive alone: `C:` is the directory the process is in on
+  that drive, so it gives `C:name` and not `C:\name`, which is in the
+  drive's root.
 - **`n` is the longest path.** A longer one fails the run with
   `error.PathTooLong`; so does a directory whose own path is longer, before
   it is opened. A handler is given its entry as a value, which is a copy of
@@ -1028,8 +1032,17 @@ files.run(.{ io, allocator, stdout(4096) });
   link. A directory that has become a link by the time the walk opens it
   fails the run (`error.SymLinkLoop` or `error.NotDir`, as the system has
   it).
-- **`walk` allocates for depth, not for entries**: one listing, about two
-  kilobytes, for each level it has gone down, and nothing for an entry.
+- **`depth` is how many directories a `walk` may be inside of at once**,
+  the one it is given being the first: `fs.walk(path, n, 1)` lists that
+  directory and has no room for one in it. A directory deeper than that
+  fails the run with `error.TooDeep`, after it was given as an entry, so a
+  pipe that is done at that entry does not fail. A depth of 0 is a compile
+  error.
+- **Neither source allocates.** A `walk` keeps the listing of each directory
+  it is inside of on the stack of the task that runs the source, with room
+  for `depth` of them from the start: 2096 bytes each on Linux and macOS and
+  2104 on Windows with Zig 0.17.0, so about 34 kilobytes for a `depth` of
+  16, however deep the tree turns out to be. Nothing is kept for an entry.
 - **A source that nothing more is wanted of ends**: when a push answers
   `.done`, and also when the pipe has completed beyond a task boundary and
   no push is there to say so (it asks for [`zrx.Stop`](#stopping-a-producer-when-its-consumers-finish)),
@@ -1051,8 +1064,8 @@ cannot be is a row like the others:
 ```zig
 const isDirectory = compose(.{ field(.kind), eq(.directory) });
 
-fn under(directory: fs.Entry(max_path)) fs.Walk(max_path) {
-    return fs.walk(directory.path.text(), max_path);
+fn under(directory: fs.Entry(max_path)) fs.Walk(max_path, max_depth) {
+    return fs.walk(directory.path.text(), max_path, max_depth);
 }
 
 fn sized(directory: zrx.Tagged(fs.Entry(max_path), usize)) Row { ... }

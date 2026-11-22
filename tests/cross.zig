@@ -172,11 +172,11 @@ fn isFile(entry: zrx.ext.fs.Entry(256)) bool {
     return entry.kind == .file and entry.name().len != 0;
 }
 
-export fn zrx_cross_fs(io: *const std.Io, allocator: *const std.mem.Allocator, path: [*:0]const u8) bool {
+export fn zrx_cross_fs(io: *const std.Io, path: [*:0]const u8) bool {
     const fs = zrx.ext.fs;
     const listed = program(fs.entries(std.mem.span(path), 256), .{ zrx.filter(isFile), zrx.drain() });
-    const walked = program(fs.walk(std.mem.span(path), 256), .{ zrx.queue(4), zrx.filter(isFile), zrx.drain() });
+    const walked = program(fs.walk(std.mem.span(path), 256, 8), .{ zrx.queue(4), zrx.filter(isFile), zrx.drain() });
     if (!ran(listed, .{io.*})) return false;
-    if (!ran(walked, .{ io.*, allocator.* })) return false;
+    if (!ran(walked, .{io.*})) return false;
     return true;
 }

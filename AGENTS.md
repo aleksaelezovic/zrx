@@ -356,10 +356,18 @@ to this file; edit `AGENTS.md`, not copies.
   - An item holds its path inline (`Entry(n)`), beginning with the
     directory's as it was given. What does not fit fails the run with
     `error.PathTooLong`.
+  - Nothing allocates. What a source needs room for is written where it
+    is made, and running out is an error of its own name: `walk(path, n,
+    depth)` holds `depth` listings in its `run` and fails with
+    `error.TooDeep`. The directory given is depth 1. Not a list that
+    grows, and not the call stack.
+  - A name is joined by the path rules of the system, in `joinAs`: no
+    separator after one, nor after a drive alone on Windows. Windows is
+    not run here, so a change to the join is pinned by the join tests,
+    which hold both sets of rules on any system.
   - Every directory that was opened is closed on every way out. Do not
-    use `std`'s `Walker`: its `deinit` leaves them open.
-  - Depth is allocated, never the call stack; nothing is allocated for an
-    entry. A directory is pushed before it is opened.
+    use `std`'s `Walker`: its `deinit` leaves them open. A directory is
+    pushed before it is opened.
   - A kind the listing left `.unknown` is asked for. Links are never
     followed, also not one put in a directory's place since it was listed.
   - What cannot be opened or read fails the run: it is the source's

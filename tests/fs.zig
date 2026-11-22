@@ -30,7 +30,6 @@ const field = zrx.field;
 const eq = zrx.eq;
 
 const io = std.testing.io;
-const allocator = std.testing.allocator;
 
 /// A temporary directory, and the path that opens it from where the tests
 /// run: that is what the sources are given.
@@ -75,6 +74,8 @@ const Tree = struct {
 };
 
 const max_path = Tree.path_len + 64;
+/// More directories than any tree here has one inside the other.
+const max_depth = 8;
 const Entry = fs.Entry(max_path);
 
 /// What a run delivered, to be compared without regard to order.
@@ -196,7 +197,7 @@ test "an empty directory has no entries" {
     const counting = Dirs.init(.{});
     try support.run(program(fs.entries(tree.path(), max_path), .{forEach(note)}), .{ counting, &seen });
     try seen.expect(&tree, &.{});
-    try support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ counting, allocator, &seen });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ counting, &seen });
     try seen.expect(&tree, &.{});
     try Dirs.expectClosed(2);
 }
@@ -223,7 +224,7 @@ test "a filter on the kind keeps files, and an entry says its name" {
     try tree.file("sub/inner.txt");
 
     var files: Seen(Entry) = .{};
-    try support.run(program(fs.walk(tree.path(), max_path), .{ filter(isFile), forEach(note) }), .{ io, allocator, &files });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{ filter(isFile), forEach(note) }), .{ io, &files });
     try files.expect(&tree, &.{ .{ "a.txt", .file }, .{ "sub" ++ sep ++ "inner.txt", .file } });
     for (files.log.slice()) |*entry| {
         const name = entry.name();
@@ -231,7 +232,7 @@ test "a filter on the kind keeps files, and an entry says its name" {
     }
 
     var directories: Seen(Entry) = .{};
-    try support.run(program(fs.walk(tree.path(), max_path), .{ filter(isDirectory), forEach(note) }), .{ io, allocator, &directories });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{ filter(isDirectory), forEach(note) }), .{ io, &directories });
     try directories.expect(&tree, &.{.{ "sub", .directory }});
 }
 
@@ -254,7 +255,7 @@ test "a directory that is not there fails the run with what the system said" {
     var seen: Seen(Entry) = .{};
     const counting = Dirs.init(.{});
     try std.testing.expectError(error.FileNotFound, support.run(program(fs.entries(&missing, max_path), .{forEach(note)}), .{ counting, &seen }));
-    try std.testing.expectError(error.FileNotFound, support.run(program(fs.walk(&missing, max_path), .{forEach(note)}), .{ counting, allocator, &seen }));
+    try std.testing.expectError(error.FileNotFound, support.run(program(fs.walk(&missing, max_path, max_depth), .{forEach(note)}), .{ counting, &seen }));
     try seen.expect(&tree, &.{});
     try Dirs.expectClosed(0);
 }
@@ -266,12 +267,12 @@ test "a source keeps the path it was given" {
 
     var given = tree.path_bytes;
     const listed = program(fs.entries(&given, max_path), .{forEach(note)});
-    const walked = program(fs.walk(&given, max_path), .{forEach(note)});
+    const walked = program(fs.walk(&given, max_path, max_depth), .{forEach(note)});
     @memset(&given, '?');
 
     var seen: Seen(Entry) = .{};
     try support.run(listed, .{ io, &seen });
-    try support.run(walked, .{ io, allocator, &seen });
+    try support.run(walked, .{ io, &seen });
     try std.testing.expectEqual(2, seen.log.len);
     for (seen.log.slice()) |*entry| try std.testing.expectEqualStrings("a.txt", try Seen(Entry).below(&tree, entry));
 }
@@ -304,7 +305,7 @@ test "walk gives every entry under a directory, however deep" {
     try plant(&tree);
 
     var seen: Seen(Entry) = .{};
-    try support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ Dirs.init(.{}), allocator, &seen });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ Dirs.init(.{}), &seen });
     try seen.expect(&tree, &nested);
     // The directory itself and the four below it.
     try Dirs.expectClosed(5);
@@ -316,7 +317,7 @@ test "walk gives a directory before what is in it" {
     try plant(&tree);
 
     var seen: Seen(Entry) = .{};
-    try support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ io, allocator, &seen });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ io, &seen });
     for (seen.log.slice(), 0..) |*entry, at| {
         const parent = std.fs.path.dirname(entry.path.text()).?;
         if (std.mem.eql(u8, parent, tree.path())) continue;
@@ -334,7 +335,7 @@ test "an entry holds its path across a queue" {
     try plant(&tree);
 
     var seen: Seen(Entry) = .{};
-    try support.run(program(fs.walk(tree.path(), max_path), .{ queue(2), forEach(note) }), .{ io, allocator, &seen });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{ queue(2), forEach(note) }), .{ io, &seen });
     try seen.expect(&tree, &nested);
 }
 
@@ -345,7 +346,7 @@ test "a listing that does not say what an entry is does not hide a directory" {
 
     var seen: Seen(Entry) = .{};
     const silent = Dirs.init(.{ .kinds_unknown = true });
-    try support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ silent, allocator, &seen });
+    try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ silent, &seen });
     try seen.expect(&tree, &nested);
 
     var top: Seen(Entry) = .{};
@@ -374,7 +375,7 @@ test "a symbolic link is an entry and is not followed" {
     inline for (.{ false, true }) |kinds_unknown| {
         var seen: Seen(Entry) = .{};
         const counting = Dirs.init(.{ .kinds_unknown = kinds_unknown });
-        try support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ counting, allocator, &seen });
+        try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ counting, &seen });
         try seen.expect(&tree, &expected);
         try Dirs.expectClosed(2);
     }
@@ -390,7 +391,7 @@ test "a directory that has become a symbolic link fails the walk and is not gone
 
     var seen: Seen(Entry) = .{};
     const counting = Dirs.init(.{ .links_as_directories = true });
-    const result = support.run(program(fs.walk(tree.path(), max_path), .{ filter(isFile), forEach(note) }), .{ counting, allocator, &seen });
+    const result = support.run(program(fs.walk(tree.path(), max_path, max_depth), .{ filter(isFile), forEach(note) }), .{ counting, &seen });
     // Which of the two is the system's choice.
     if (result) |_| return error.FollowedLink else |err| switch (err) {
         error.SymLinkLoop, error.NotDir => {},
@@ -411,7 +412,7 @@ test "the directory a walk is given may be a symbolic link" {
 
     const given = tree.with(sep ++ "link");
     var seen: Seen(Entry) = .{};
-    try support.run(program(fs.walk(&given, max_path), .{forEach(note)}), .{ io, allocator, &seen });
+    try support.run(program(fs.walk(&given, max_path, max_depth), .{forEach(note)}), .{ io, &seen });
     try seen.expect(&tree, &.{.{ "link" ++ sep ++ "inner.txt", .file }});
 }
 
@@ -443,7 +444,7 @@ test "a pipe that is done ends the walk, and every directory it was in is closed
 
     inline for (.{ 1, 2, 3, 5 }) |count| {
         var seen: Seen(Entry) = .{};
-        try support.run(program(fs.walk(tree.path(), max_path), .{ take(count), forEach(note) }), .{ Dirs.init(.{}), allocator, &seen });
+        try support.run(program(fs.walk(tree.path(), max_path, max_depth), .{ take(count), forEach(note) }), .{ Dirs.init(.{}), &seen });
         try seen.expect(&tree, chained[0..count]);
         // A directory is an item before it is opened: the one the pipe was
         // done with has not been.
@@ -491,7 +492,7 @@ test "a source nothing more is wanted of ends without a push to tell it so" {
     {
         var seen: Seen(Entry) = .{};
         var passed: Passed = .{};
-        try support.run(program(fs.walk(tree.path(), max_path), once), .{ endless, allocator, &seen, &passed });
+        try support.run(program(fs.walk(tree.path(), max_path, max_depth), once), .{ endless, &seen, &passed });
         try seen.expect(&tree, &.{.{ "x", .file }});
     }
 }
@@ -500,22 +501,30 @@ test "a source nothing more is wanted of ends without a push to tell it so" {
 // what fails
 // ---------------------------------------------------------------------------
 
+fn entriesOf(path: []const u8, comptime max_path_bytes: usize) fs.Entries(max_path_bytes) {
+    return fs.entries(path, max_path_bytes);
+}
+
+fn walkOf(path: []const u8, comptime max_path_bytes: usize) fs.Walk(max_path_bytes, max_depth) {
+    return fs.walk(path, max_path_bytes, max_depth);
+}
+
 test "a path that just fits is given, and one byte more fails the run" {
     var tree: Tree = .init();
     defer tree.deinit();
     try tree.file("abcd");
 
     const fits = Tree.path_len + sep.len + "abcd".len;
-    inline for (.{ fs.entries, fs.walk }) |source| {
+    inline for (.{ entriesOf, walkOf }) |source| {
         var seen: Seen(fs.Entry(fits)) = .{};
-        try support.run(program(source(tree.path(), fits), .{forEach(Seen(fs.Entry(fits)).note)}), .{ io, allocator, &seen });
+        try support.run(program(source(tree.path(), fits), .{forEach(Seen(fs.Entry(fits)).note)}), .{ io, &seen });
         try seen.expect(&tree, &.{.{ "abcd", .file }});
 
         var none: Seen(fs.Entry(fits - 1)) = .{};
         const counting = Dirs.init(.{});
         try std.testing.expectError(
             error.PathTooLong,
-            support.run(program(source(tree.path(), fits - 1), .{forEach(Seen(fs.Entry(fits - 1)).note)}), .{ counting, allocator, &none }),
+            support.run(program(source(tree.path(), fits - 1), .{forEach(Seen(fs.Entry(fits - 1)).note)}), .{ counting, &none }),
         );
         try none.expect(&tree, &.{});
         try Dirs.expectClosed(1);
@@ -533,7 +542,7 @@ test "a path too long further down fails the walk after what fitted" {
     const counting = Dirs.init(.{});
     try std.testing.expectError(
         error.PathTooLong,
-        support.run(program(fs.walk(tree.path(), bound), .{forEach(Seen(fs.Entry(bound)).note)}), .{ counting, allocator, &seen }),
+        support.run(program(fs.walk(tree.path(), bound, max_depth), .{forEach(Seen(fs.Entry(bound)).note)}), .{ counting, &seen }),
     );
     try seen.expect(&tree, chained[0..3]);
     try Dirs.expectClosed(4);
@@ -552,7 +561,7 @@ test "a directory whose own path is too long fails the run before it is opened" 
     );
     try std.testing.expectError(
         error.PathTooLong,
-        support.run(program(fs.walk(tree.path(), Tree.path_len - 1), .{forEach(noteShort)}), .{ counting, allocator, &seen }),
+        support.run(program(fs.walk(tree.path(), Tree.path_len - 1, max_depth), .{forEach(noteShort)}), .{ counting, &seen }),
     );
     try Dirs.expectClosed(0);
 }
@@ -566,33 +575,79 @@ test "a directory that cannot be opened fails the walk, after it was given as an
     const counting = Dirs.init(.{ .refused = "c" });
     try std.testing.expectError(
         error.AccessDenied,
-        support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ counting, allocator, &seen }),
+        support.run(program(fs.walk(tree.path(), max_path, max_depth), .{forEach(note)}), .{ counting, &seen }),
     );
     try seen.expect(&tree, chained[0..3]);
     try Dirs.expectClosed(3);
 }
 
-test "a walk that cannot allocate fails the run and leaves nothing open" {
+/// The chain is five directories one inside the other, the one given included.
+const chain_depth = 5;
+
+test "a tree as deep as the walk has room for is walked whole" {
     var tree: Tree = .init();
     defer tree.deinit();
     try plantChain(&tree);
 
-    // Every allocation the whole walk makes fails in turn.
-    var fail_at: usize = 0;
-    while (true) : (fail_at += 1) {
-        var failing: std.testing.FailingAllocator = .init(allocator, .{ .fail_index = fail_at });
+    var seen: Seen(Entry) = .{};
+    try support.run(program(fs.walk(tree.path(), max_path, chain_depth), .{forEach(note)}), .{ Dirs.init(.{}), &seen });
+    try seen.expect(&tree, &chained);
+    try Dirs.expectClosed(chain_depth);
+}
+
+test "a directory one deeper than the walk has room for fails the run, after it was given as an entry" {
+    var tree: Tree = .init();
+    defer tree.deinit();
+    try plantChain(&tree);
+
+    inline for (1..chain_depth) |depth| {
         var seen: Seen(Entry) = .{};
         const counting = Dirs.init(.{});
-        const result = support.run(program(fs.walk(tree.path(), max_path), .{forEach(note)}), .{ counting, failing.allocator(), &seen });
-        try std.testing.expectEqual(Dirs.opened.load(.monotonic), Dirs.closed.load(.monotonic));
-        if (!failing.has_induced_failure) {
-            try result;
-            try std.testing.expectEqual(5, seen.log.len);
-            break;
-        }
-        try std.testing.expectError(error.OutOfMemory, result);
+        try std.testing.expectError(
+            error.TooDeep,
+            support.run(program(fs.walk(tree.path(), max_path, depth), .{forEach(note)}), .{ counting, &seen }),
+        );
+        // The directory there was no room for is the last entry, and was not opened.
+        try seen.expect(&tree, chained[0..depth]);
+        try Dirs.expectClosed(depth);
     }
-    try std.testing.expect(fail_at > 0);
+}
+
+test "a walk of depth 1 lists a directory that holds no other" {
+    var tree: Tree = .init();
+    defer tree.deinit();
+    try tree.file("a.txt");
+    try tree.file("b.txt");
+
+    var seen: Seen(Entry) = .{};
+    try support.run(program(fs.walk(tree.path(), max_path, 1), .{forEach(note)}), .{ Dirs.init(.{}), &seen });
+    try seen.expect(&tree, &.{ .{ "a.txt", .file }, .{ "b.txt", .file } });
+    try Dirs.expectClosed(1);
+}
+
+test "a pipe that is done with a directory too deep to go into does not fail" {
+    var tree: Tree = .init();
+    defer tree.deinit();
+    try plantChain(&tree);
+
+    var seen: Seen(Entry) = .{};
+    try support.run(program(fs.walk(tree.path(), max_path, 2), .{ take(2), forEach(note) }), .{ Dirs.init(.{}), &seen });
+    try seen.expect(&tree, chained[0..2]);
+    try Dirs.expectClosed(2);
+}
+
+test "room for depth is not used up by directories the walk has left" {
+    var tree: Tree = .init();
+    defer tree.deinit();
+    try plant(&tree);
+    try tree.dir("d/e");
+    try tree.dir("f/g");
+
+    // Many directories, never more than three one inside the other.
+    var seen: Seen(Entry) = .{};
+    try support.run(program(fs.walk(tree.path(), max_path, 3), .{ filter(isFile), forEach(note) }), .{ Dirs.init(.{}), &seen });
+    try std.testing.expectEqual(5, seen.log.len);
+    try Dirs.expectClosed(9);
 }
 
 // ---------------------------------------------------------------------------
@@ -603,8 +658,8 @@ fn listing(path: []const u8) fs.Entries(max_path) {
     return fs.entries(path, max_path);
 }
 
-fn under(path: []const u8) fs.Walk(max_path) {
-    return fs.walk(path, max_path);
+fn under(path: []const u8) fs.Walk(max_path, max_depth) {
+    return fs.walk(path, max_path, max_depth);
 }
 
 fn tally(sum: usize, _: Entry) usize {
@@ -640,7 +695,7 @@ test "a directory listed for one item fails that item, which an error path takes
         try support.run(program(fromSlice(&paths), .{
             attempt(sized, error{FileNotFound}, .{map(unlisted)}),
             forEach(support.record(Counted)),
-        }), .{ Dirs.init(.{}), allocator, &seen });
+        }), .{ Dirs.init(.{}), &seen });
         try std.testing.expectEqual(3, seen.len);
         try std.testing.expectEqual(case[1], seen.items[0].entries);
         try std.testing.expectEqual(null, seen.items[1].entries);
@@ -654,8 +709,8 @@ fn listingOf(directory: Entry) fs.Entries(max_path) {
     return fs.entries(directory.path.text(), max_path);
 }
 
-fn underOf(directory: Entry) fs.Walk(max_path) {
-    return fs.walk(directory.path.text(), max_path);
+fn underOf(directory: Entry) fs.Walk(max_path, max_depth) {
+    return fs.walk(directory.path.text(), max_path, max_depth);
 }
 
 /// How many entries a directory of a walk has, or that it could not be opened.
@@ -684,7 +739,7 @@ test "the directories among the entries are listed each as an item, and one that
             filter(isDirectory),
             attempt(sized, error{AccessDenied}, .{map(refused)}),
             forEach(support.record(Sized)),
-        }), .{ Dirs.init(.{ .refused = "c" }), allocator, &seen });
+        }), .{ Dirs.init(.{ .refused = "c" }), &seen });
 
         try std.testing.expectEqual(3, seen.len);
         for (seen.slice()) |*sized_directory| {
@@ -701,6 +756,83 @@ test "the directories among the entries are listed each as an item, and one that
 }
 
 // ---------------------------------------------------------------------------
+// joining a name to a directory's path
+// ---------------------------------------------------------------------------
+
+/// The path of `name` in the directory `directory`, by the path rules of `rules`.
+fn joined(comptime rules: std.fs.path.PathType, directory: []const u8, name: []const u8) !zrx.Line(64) {
+    var path: zrx.Line(64) = try .from(directory);
+    try fs.joinAs(rules, 64, &path, directory.len, name);
+    return path;
+}
+
+fn expectJoined(comptime rules: std.fs.path.PathType, expected: []const u8, directory: []const u8, name: []const u8) !void {
+    const path = try joined(rules, directory, name);
+    try std.testing.expectEqualStrings(expected, path.text());
+}
+
+test "a name joined to a drive without a directory stays in that drive's current directory" {
+    // `C:` is the directory the process is in on drive C, and `C:\child` is
+    // not in it: that is in the root of the drive.
+    try expectJoined(.windows, "C:child", "C:", "child");
+    try expectJoined(.windows, "c:child", "c:", "child");
+    // A drive need not be a letter of one byte.
+    try expectJoined(.windows, "\u{20AC}:child", "\u{20AC}:", "child");
+    // The same further down: the name of a directory in it is joined as any other.
+    try expectJoined(.windows, "C:child\\below", "C:child", "below");
+    try expectJoined(.windows, "C:.\\child", "C:.", "child");
+}
+
+test "a name is joined with one separator, and with none after one" {
+    try expectJoined(.windows, "C:\\child", "C:\\", "child");
+    try expectJoined(.windows, "C:/child", "C:/", "child");
+    try expectJoined(.windows, "C:\\dir\\child", "C:\\dir", "child");
+    try expectJoined(.windows, "dir/child", "dir/", "child");
+    try expectJoined(.windows, "dir\\child", "dir", "child");
+    try expectJoined(.windows, ".\\child", ".", "child");
+    try expectJoined(.posix, "dir/child", "dir", "child");
+    try expectJoined(.posix, "dir/child", "dir/", "child");
+    try expectJoined(.posix, "./child", ".", "child");
+}
+
+test "a name joined to a root stays below that root" {
+    // The root of the current drive.
+    try expectJoined(.windows, "\\child", "\\", "child");
+    try expectJoined(.windows, "/child", "/", "child");
+    // A share, with and without the separator after it.
+    try expectJoined(.windows, "\\\\server\\share\\child", "\\\\server\\share", "child");
+    try expectJoined(.windows, "\\\\server\\share\\child", "\\\\server\\share\\", "child");
+    try expectJoined(.windows, "//server/share\\child", "//server/share", "child");
+    // A path that is not read as a drive at all.
+    try expectJoined(.windows, "\\\\?\\C:\\dir\\child", "\\\\?\\C:\\dir", "child");
+    try expectJoined(.posix, "/child", "/", "child");
+}
+
+test "what is a drive or a separator on one system is a name on another" {
+    try expectJoined(.posix, "C:/child", "C:", "child");
+    try expectJoined(.posix, "dir\\/child", "dir\\", "child");
+}
+
+test "a name joined to no path at all is that name" {
+    try expectJoined(.windows, "child", "", "child");
+    try expectJoined(.posix, "child", "", "child");
+}
+
+test "a joined path that does not fit is refused, the separator counted" {
+    var path: zrx.Line(8) = try .from("dir");
+    try fs.joinAs(.posix, 8, &path, 3, "abcd");
+    try std.testing.expectEqualStrings("dir/abcd", path.text());
+    try std.testing.expectError(error.PathTooLong, fs.joinAs(.posix, 8, &path, 3, "abcde"));
+    // Without a separator to write there is room for one byte more.
+    var drive: zrx.Line(8) = try .from("C:");
+    try fs.joinAs(.windows, 8, &drive, 2, "abcdef");
+    try std.testing.expectEqualStrings("C:abcdef", drive.text());
+    try std.testing.expectError(error.PathTooLong, fs.joinAs(.windows, 8, &drive, 2, "abcdefg"));
+    var full: zrx.Line(3) = try .from("dir");
+    try std.testing.expectError(error.PathTooLong, fs.joinAs(.posix, 3, &full, 3, ""));
+}
+
+// ---------------------------------------------------------------------------
 // the guide
 // ---------------------------------------------------------------------------
 
@@ -711,14 +843,14 @@ test "the guide's example lists the files under a directory" {
     defer tree.deinit();
     try plant(&tree);
 
-    const files = program(fs.walk(tree.path(), max_path), .{
+    const files = program(fs.walk(tree.path(), max_path, max_depth), .{
         filter(isFile),
         map(field(.path)),
         zrx.write(Listing, "{f}\n"),
     });
     var buffer: [1024]u8 = undefined;
     var writer: Io.Writer = .fixed(&buffer);
-    try support.run(files, .{ io, allocator, Listing{ .writer = &writer } });
+    try support.run(files, .{ io, Listing{ .writer = &writer } });
 
     var lines: usize = 0;
     var written = std.mem.tokenizeScalar(u8, writer.buffered(), '\n');

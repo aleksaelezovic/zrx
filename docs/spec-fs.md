@@ -1,8 +1,9 @@
 # Spec: directories
 
 Status: implemented as `zrx.ext.fs` (`src/ext/fs.zig`), in a first version
-of two sources, `entries(path, n)` and `walk(path, n)`. Everything in this
-file is a proposal until the owner has reviewed it.
+of two sources, `entries(path, n)` and `walk(path, n, depth)`. That nothing
+here allocates is the owner's decision. Everything else in this file is a
+proposal until the owner has reviewed it.
 
 This file is the design record of the extension: why it is the way it is,
 and what was considered and not done. The [guide](guide.md#directories)
@@ -38,6 +39,24 @@ of `src/io.zig`, a role bound by a resource (`lines(Role, n)` with
 The directory is opened when the source runs and closed when the source
 ends, by `defer`: at the end of the listing, when the pipe is done, and
 when something fails.
+
+**A name is joined by the path rules of the system.** One separator goes
+between the directory's path and a name in it, and none where the path
+already ends in one. On Windows none goes after a drive alone either: `C:`
+is the directory the process is in on that drive, and a separator would
+make it the root of the drive, so the entries of one directory would be
+given the paths of another. An external review of the first version found
+that by inspection. The neighbouring cases were gone through with it: a
+path that ends in a separator, a bare `\`, the root of a share with and
+without a separator after it, a path that begins `\\?\`, and a drive with
+a directory (`C:dir`). Only the drive alone was wrong.
+
+The join is `joinAs(rules, ...)`, and the sources call it with the rules of
+the system they are compiled for. It is public for one reason: the suites
+import only the public module, the rules are chosen at compile time, and
+Windows is not a system the tests are run on here. So `tests/fs.zig` holds
+the join by both sets of rules, whichever system it runs on. That pins the
+join and not the walk: behavior on Windows is still not run.
 
 **A source holds a copy of its path**, a `Line(n)`, where `fileLines`
 borrows. `each` calls `source_of` with a copy of its item, so a source made
@@ -79,23 +98,48 @@ a `filter` on the kind would drop everything. The source asks with one
 
 ## The walk
 
-**Its own stack, not `std`'s `Walker`.** `std.Io.Dir.Walker.deinit` and
+**Its own levels, not `std`'s `Walker`.** `std.Io.Dir.Walker.deinit` and
 `SelectiveWalker.deinit` in 0.17.0 free memory and leave the directories
 open; the doc comment says otherwise. A walk here ends early whenever the
-pipe is done, and would leak every directory it was inside of. The stack is
-an `ArrayList` of `Dir.Iterator`, each with the length of its directory's
-path. It also spares `std`'s second, unbounded name buffer: the path is
-built once, in the bounded one.
+pipe is done, and would leak every directory it was inside of. `std`'s
+walker also allocates, for its stack and for a name buffer without a bound.
+Here the path is built once, in the bounded one.
 
-**Depth is allocated.** A function that called itself for each level would
-let the file system choose the depth of the call stack, at about two
-kilobytes a level (`@sizeOf(Dir.Iterator)` is 2088 on macOS). So `walk`
-needs `std.mem.Allocator`, an ordinary dependency. Nothing is allocated for
-an entry.
+**Depth is written out, and nothing is allocated.** `walk(path, n, depth)`
+keeps a `[depth]Level` in the frame of its `run`: a `Dir.Iterator` and the
+length of its directory's path for each directory the walk is inside of.
+That is the rule the core and the other extensions follow: `queue(n)`,
+`Batch(T, n)`, `Line(n)` and `stdout(n)` take a size at compile time and
+hold the buffer, and running out has a name.
 
-Room for the next level is reserved before a name is read. The name lies in
-the listing's buffer, which lies in the list, and growing the list would
-move it.
+- A level is `@sizeOf(Dir.Iterator)` and a `usize`: 2096 bytes for the
+  Linux targets of the catalog and for macOS, 2104 for Windows, read off
+  the type for each target with Zig 0.17.0. The whole array is there from
+  the start, used or not, on the stack of the task that runs the source.
+  The guide says so, for a reader to choose the depth by.
+- **The directory given counts**: it is depth 1. `depth` is then the
+  number of listings held, which is what it costs, and a depth of 0 holds
+  nothing and is a compile error. Counted from below the directory, 0
+  would have been a second spelling of `entries`.
+- A directory deeper than that fails the run with `error.TooDeep`. Not
+  `error.PathTooLong`: the remedy is another number. As for a directory
+  that cannot be opened, the entry is pushed first, so a pipe that is done
+  at that entry does not fail.
+- Room is counted for the directories the walk is inside of, not for those
+  it has been in: a level is free again when its listing ends.
+
+*Rejected: a list that grows.* The first version kept the levels in an
+`ArrayList` and asked for `std.mem.Allocator`. It walked a tree of any
+depth, and that was all it had for it. It made `walk` the one thing in a
+program that needs an allocator, with a failure (`error.OutOfMemory`) that
+says nothing a caller can act on, where `error.TooDeep` names the number to
+change. It also needed care that the array does not: a name read from a
+listing lies in the listing, which lay in the list, so room for the next
+level had to be reserved before the name was read.
+
+*Rejected: a function that calls itself for each level.* The file system
+would choose the depth of the call stack, at two kilobytes a level, and
+running out of that has no error at all.
 
 **A directory is pushed before it is opened.** A pipe that is done with the
 directory's entry does not have it opened, and a directory comes before
@@ -177,7 +221,9 @@ walk opens it fails the run with `error.FileNotFound`.
   and a filter that lets one entry through. The run returns only if the
   source looks at the signal. Without that it hangs, as the tests of
   `fromProducer` with `Stop` do.
-- Each safeguard was removed in turn (sixteen mutants) and a test failed
+- The join is tested by itself, by the rules of both kinds of system (see
+  [How the directory is given](#how-the-directory-is-given)).
+- Each safeguard was removed in turn (twenty-four mutants) and a test failed
   for each; none failed to compile.
 
 The directory is given as `.zig-cache/tmp/<sub_path>`, built from
