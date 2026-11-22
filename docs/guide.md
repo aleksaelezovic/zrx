@@ -743,6 +743,8 @@ statements and tests are in the [segments spec](spec-segments.md#guarantees).
 Declare `stop: zrx.Stop` among a `fromProducer` handler's dependencies.
 `run` supplies it to the source. Use `stop.requested()` between reads or
 wait on `stop.wait(io)` alongside the input, for example with `std.Io.Select`.
+Pass the `std.Io` the producer is given: `run` signals through that one,
+and a wait on another may not be woken.
 Once it signals, return normally so the program can finish. Continue to
 stop when `out.push` answers `.done`, and propagate cancellation and input
 errors. The signal applies to downstream completion across task boundaries.
@@ -865,6 +867,155 @@ and let it outlive the run. It covers reads of `.awake` and timed waits on
   some handler waits on with a timeout must set it through the clock's `Io`.
 - It does not make a source deterministic. The test still decides when items
   arrive, as `input.send` does above.
+
+## Time
+
+`zrx.ext.time` holds what can be said about time without a task: a source
+that ticks, a handler that gives an item its time, and an operator that
+drops the items that come too soon. It is an extension: written against the
+source, handler and operator contracts, and compiled only when a program
+uses it.
+
+```zig
+const time = zrx.ext.time;
+
+const heartbeat = program(time.ticks(.fromSeconds(30)), .{
+    map(time.stamp(.real)),
+    forEach(report),
+});
+
+const alerts = pipe(.{
+    time.throttle(.fromSeconds(5)),
+    forEach(notify),
+});
+```
+
+| | |
+|---|---|
+| `time.ticks(period)` | Source: a count, `u64`, every `period`. |
+| `time.stamp(clock)` | Handler: the item with the time on `clock`, as `time.Stamped(T)`. |
+| `time.throttle(window)` | Operator: passes an item, then drops the ones within `window` of it. |
+
+All three take the time from the `std.Io` of the run. Periods and windows
+are positive comptime `std.Io.Duration` values measured on `.awake`, as for
+`batchWithin` and `debounce`.
+
+### ticks
+
+`ticks(period)` pushes 0 one period after it starts, 1 a period after that,
+and so on: tick `n` is due `n + 1` periods after the start. Those times are
+fixed when the source starts, so a pipe that takes its time does not make
+them drift.
+
+- **A late tick is skipped, not caught up.** A push returns when the pipe is
+  through with the tick. A tick whose time has passed by then is not pushed,
+  and its number is missing from the count: 0, 3, 4 says that two were
+  skipped. One that is due just then is pushed at once.
+- **It pushes the count, not the time.** `map(time.stamp(clock))` gives a
+  tick its time, on the clock you choose.
+- **It has no end of its own.** It ends when a push answers `.done`, as
+  after `take(n)`. It also asks for [`zrx.Stop`](#stopping-a-producer-when-its-consumers-finish),
+  so behind a task boundary it ends where it waits once its consumers are
+  done, without another tick. Cancelling the run interrupts the wait, or
+  the next push where every tick is due and there is no wait, and
+  `error.Canceled` is all the source can fail with.
+- **It starts no task.** Without a boundary the program is one loop on the
+  task that called `run`, and that task is the one that waits.
+
+Its wait is `stop.waitTimeout(io, timeout)`: `stop.wait` with an end,
+`error.Timeout` when the time is over or it was woken for nothing. A
+producer of your own that waits for a deadline can use it the same way,
+with the deadline read from the same `io`.
+
+### stamp
+
+`map(time.stamp(.real))` emits `time.Stamped(T)`: the fields `at`, a
+`std.Io.Timestamp`, and `item`. The clock is always given. `.real` is the
+time of day, as nanoseconds since 1970, and can jump when the system's clock
+is set; `.awake` only goes forward and is the one to measure with.
+
+```zig
+fn report(log: *Log, beat: time.Stamped(u64)) void {
+    log.add(beat.item, beat.at.toSeconds());
+}
+```
+
+The time is read when the item reaches the `map`. Behind a `queue` that is
+when the item is taken out, not when it was put in: stamp before the
+boundary to say when an item arrived. It is not a `Tagged`, whose field
+says where an item came from.
+
+### throttle
+
+`throttle(window)` passes an item and drops the ones that arrive within
+`window` of it. The window starts with an item that passed: a dropped item
+does not extend it, and an item that arrives just as it ends passes and
+starts the next. The first item of a run always passes.
+
+It keeps nothing, so the last item of a burst is dropped and nothing is
+emitted at the end of the stream. That is what tells it from `debounce`,
+which keeps the latest item and emits it once the input has been quiet, and
+needs a task to do so. `throttle` has no task and no buffer: it reads the
+clock once per item, on the task that pushes. Each place it is written has a
+window of its own, so each case of a `route` and each worker of a
+`concurrent` throttles by itself.
+
+### How far time is counted
+
+`ticks` and `throttle` count time in 63 bits of nanoseconds on `.awake`:
+from 0 to about 292 years of a clock that starts with the system. Nothing
+at the ends of that range is a fault, and nothing there fails the run.
+
+- **A period or window longer than the range is a compile error.**
+- **A clock outside the range is read as its nearest end.** Past the limit
+  the clock stands still for both.
+- **A time later than the limit never comes.** A window that would end
+  later never ends: nothing passes after the item that started it. A tick
+  due later is never pushed: `ticks` waits for it as for any tick, until
+  its consumers are done or the run is cancelled. A window that ends at the
+  limit ends there, and a tick due at the limit is pushed.
+
+`stamp` counts nothing: it hands on what the clock says, in the 96 bits of
+`std.Io`.
+
+### Testing with a clock
+
+[`zrx.testing.Clock`](#testing-timed-operators) covers these: `ticks` waits
+on `.awake` with a timed wait, which `waitingAt` sees, and `stamp(.awake)`
+and `throttle` read `.awake`. `stamp(.real)` reads the real clock.
+
+```zig
+try clock.waitingAt(.fromSeconds(10));
+clock.advanceTo(.fromSeconds(10));
+try std.testing.expectEqual(0, try seen.ticks.getOne(io));
+```
+
+A program without a boundary runs on the test's own task, so a handler can
+set the time each item arrives at: `tap(arrive)`, with the clock among the
+dependencies and `clock.advanceTo` in the handler.
+[`tests/time.zig`](../tests/time.zig) does both.
+
+### What it costs
+
+`stamp` and `throttle` each have a fixture (`same_time_stamp`,
+`same_time_throttle`): the same instructions as a loop by hand that reads
+the same clock. Reading the clock is a call through the `std.Io` in both.
+`throttle` keeps the time of the item that passed in 64 bits, and holding
+the clock to [the range](#how-far-time-is-counted) is two comparisons for
+each item, in the loop by hand as well. The reasons, and what was measured,
+are in [the time spec](spec-time.md).
+
+### Not here
+
+`timeout`, `delay` and `sample` are not here. A timeout has to end a run
+whose source is waiting, which is stopping it from outside: that is proposed
+in [the segments spec](spec-segments.md#stopping-from-outside) and not
+there yet. `delay` holds items until their time and `sample` emits while
+its input is silent, so each is a task boundary of its own, and the stage
+contract is not to grow for them. A throttle that emits the last item of a
+window instead of the first is `debounce`'s kind of operator for the same
+reason. The time between two items needs nothing new: `map(time.stamp(.awake))`
+and a `scan` over the pairs.
 
 ## Input and output
 
@@ -2515,7 +2666,7 @@ case and requires equal results. The targets are fixed so the outcome does not
 depend on the machine running the build.
 
 Every synchronous operator has a fixture, and so have `rescue`,
-`process.fail` and `process.status`. Thirty-nine are `same`; `take`,
+`process.fail` and `process.status`. Forty-one are `same`; `take`,
 `batch`, the handler combinators, `attempt`, a `recover` whose path has
 stages of its own, the text patterns and `abs` of [`ext.math`](#math) are
 `lean`, each with the reason next to it.

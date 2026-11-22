@@ -203,10 +203,14 @@ pub const RetireGate = struct {
     released: std.atomic.Value(bool) = .init(false),
 };
 
+/// The `Io` a `handoff` runs its task on, where it is not the program's.
+pub const TaskIo = struct { io: std.Io };
+
 /// A task boundary written against the public contract only: a bounded
 /// hand-over to a task of its own, as `queue` is. With a `*RetireGate` among
 /// the dependencies it takes its time retiring: until the run has
-/// interrupted its task, or the gate is released.
+/// interrupted its task, or the gate is released. With a `TaskIo` its task
+/// runs on that `Io`.
 pub fn handoff(comptime capacity: usize) Handoff(capacity) {
     return .{};
 }
@@ -234,7 +238,7 @@ fn Handoff(comptime capacity: usize) type {
                 pub const zrx_boundary = {};
 
                 pub fn init(self: *@This(), _: *const Op, env: Env) void {
-                    self.io = zrx.di.get(env, std.Io);
+                    self.io = if (comptime zrx.di.has(Env, TaskIo)) zrx.di.get(env, TaskIo).io else zrx.di.get(env, std.Io);
                     self.channel = .init(&self.buffer);
                     self.gate = if (gated) zrx.di.get(env, *RetireGate) else {};
                     self.worker = .init(0);
