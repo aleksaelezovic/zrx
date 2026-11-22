@@ -598,8 +598,9 @@ to this file; edit `AGENTS.md`, not copies.
   - An item holds its path inline (`Entry(n)`), beginning with the
     directory's as it was given. What does not fit fails the run with
     `error.PathTooLong`, and a path `std` would not open (of
-    `std.fs.max_path_bytes` or more) with `error.NameTooLong`, before it
-    is given.
+    `std.fs.max_path_bytes` bytes or more, or on Windows of more than
+    `PATH_MAX_WIDE` UTF-16 units) with `error.NameTooLong`, before it is
+    given.
   - Nothing allocates. What a source needs room for is written where it
     is made, and running out is an error of its own name: `walk(path, n,
     depth)` holds `depth` listings in its `run` and fails with

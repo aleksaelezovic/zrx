@@ -48,9 +48,10 @@ pub fn Entry(comptime max_path_bytes: usize) type {
 /// the system lists them. Subdirectories are entries and are not gone into;
 /// `walk` does that. A path longer than `max_path_bytes` fails the run with
 /// `error.PathTooLong`, the directory's own included, and an entry's path
-/// that `std` would not open, of `std.fs.max_path_bytes` bytes or more,
-/// with `error.NameTooLong`. `path` is copied: it need not outlive this
-/// call. Needs `std.Io`.
+/// that `std` would not open with `error.NameTooLong`: one of
+/// `std.fs.max_path_bytes` bytes or more, or on Windows of more than
+/// `PATH_MAX_WIDE` units of UTF-16. `path` is copied: it need not outlive
+/// this call. Needs `std.Io`.
 pub fn entries(path: []const u8, comptime max_path_bytes: usize) Entries(max_path_bytes) {
     return .{ .path = Line(max_path_bytes).from(path) catch null };
 }
@@ -93,9 +94,9 @@ pub fn Entries(comptime max_path_bytes: usize) type {
 /// directory in it is one too many. A directory deeper than that fails the
 /// run with `error.TooDeep`, after it was given as an entry. A path longer
 /// than `max_path_bytes` fails it with `error.PathTooLong`, one that `std`
-/// would not open, of `std.fs.max_path_bytes` bytes or more, with
-/// `error.NameTooLong`, and a directory that cannot be opened or read fails
-/// it with what the system reported: nothing is left out silently.
+/// would not open (as for `entries`) with `error.NameTooLong`, and a
+/// directory that cannot be opened or read fails it with what the system
+/// reported: nothing is left out silently.
 ///
 /// `path` is copied: it need not outlive this call. Needs `std.Io` and no
 /// allocator: the listings of the directories it is inside of are on the
@@ -193,37 +194,52 @@ const native: Dir.path.PathType = switch (@import("builtin").os.tag) {
     else => .posix,
 };
 
-/// `joinAs` by the rules of this system, and a path that `std` would not
-/// open, of `std.fs.max_path_bytes` bytes or more, is refused as opening it
-/// would refuse it. A walk opens one directory inside another and can go
-/// deeper than a path can name: an entry it gave there would not open.
+/// `joinAs` by the rules of this system.
 fn join(
     comptime max_path_bytes: usize,
     path: *Line(max_path_bytes),
     dir_len: usize,
     name: []const u8,
 ) error{ PathTooLong, NameTooLong }!void {
-    try joinAs(native, max_path_bytes, path, dir_len, name);
-    if (path.len >= Dir.max_path_bytes) return error.NameTooLong;
+    return joinAs(native, max_path_bytes, path, dir_len, name);
 }
 
 /// Makes `path` that of `name` in the directory whose own path is its first
 /// `dir_len` bytes, as a system with the path rules of `rules` reads paths.
-/// The sources join by the rules of the system they are compiled for. It is
-/// public for the tests, which hold the rules of systems they do not run on.
+/// A path that `std` would not open by those rules is refused with
+/// `error.NameTooLong`, as opening it would refuse it: a walk opens one
+/// directory inside another and can go deeper than a path can name, and an
+/// entry it gave there would not open. The sources join by the rules of the
+/// system they are compiled for. It is public for the tests, which hold the
+/// rules of systems they do not run on.
 pub fn joinAs(
     comptime rules: Dir.path.PathType,
     comptime max_path_bytes: usize,
     path: *Line(max_path_bytes),
     dir_len: usize,
     name: []const u8,
-) error{PathTooLong}!void {
+) error{ PathTooLong, NameTooLong }!void {
     const separated = separates(rules, path.bytes[0..dir_len]);
     const start = dir_len + @intFromBool(separated);
     if (start > max_path_bytes or name.len > max_path_bytes - start) return error.PathTooLong;
     if (separated) path.bytes[dir_len] = if (rules == .posix) Dir.path.sep_posix else Dir.path.sep_windows;
     @memcpy(path.bytes[start..][0..name.len], name);
     path.len = start + name.len;
+    if (!opens(rules, path.text())) return error.NameTooLong;
+}
+
+/// Whether `std` takes `path` to open by the path rules of `rules`. On
+/// Windows it is converted to UTF-16 in a buffer of `PATH_MAX_WIDE` units
+/// that is not checked first, so a path of more units than that is refused
+/// here and never given: it would overrun the buffer. A unit takes at least
+/// one byte, so a path of no more bytes than that has room. Elsewhere `std`
+/// refuses a path of `std.fs.max_path_bytes` bytes or more.
+fn opens(comptime rules: Dir.path.PathType, path: []const u8) bool {
+    if (rules != .windows) return path.len < Dir.max_path_bytes;
+    const room = std.os.windows.PATH_MAX_WIDE;
+    if (path.len <= room) return true;
+    const units = std.unicode.calcWtf16LeLen(path) catch return false;
+    return units <= room;
 }
 
 /// Whether a separator goes between the path of a directory and a name in

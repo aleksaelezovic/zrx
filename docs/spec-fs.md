@@ -93,8 +93,16 @@ this section.
   no other `n` helps. Skipping the entry was not taken, for the reason
   under [What fails](#what-fails). The bound is `std`'s, and the test
   builds its tree from it and runs on Linux and macOS. On Windows the
-  system counts a path in UTF-16 and may refuse a shorter one; the test is
-  not run there.
+  system counts a path in UTF-16, and `std` converts it into a buffer of
+  `PATH_MAX_WIDE` (32767) units without checking its length first: a
+  path of more units would write past the buffer when it is opened, a
+  panic in a safe build. A review found that `std.fs.max_path_bytes`,
+  three bytes for each of those units, let such a path through. So by
+  Windows rules the bound is the units. They are counted only for a path
+  of more bytes than that, since a unit takes at least one byte. The
+  join's test holds that rule on every host, a path of
+  ASCII and one of two-byte letters on each side of the bound; the tree is
+  not built on Windows.
 - The directory's own path must fit too, and is checked before it is
   opened. Otherwise whether a bound is too small would depend on whether
   the directory happens to be empty.
@@ -242,8 +250,8 @@ walk opens it fails the run with `error.FileNotFound`.
   `fromProducer` with `Stop` do.
 - The join is tested by itself, by the rules of both kinds of system (see
   [How the directory is given](#how-the-directory-is-given)).
-- Each safeguard was removed in turn (twenty-five mutants) and a test failed
-  for each; none failed to compile.
+- Each safeguard was removed in turn (twenty-seven mutants) and a test
+  failed for each; none failed to compile.
 
 The directory is given as `.zig-cache/tmp/<sub_path>`, built from
 `TmpDir.sub_path`, since a source takes a path and `tmpDir` gives a handle.
