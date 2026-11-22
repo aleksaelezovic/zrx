@@ -47,7 +47,7 @@ pub const server = program(http.connections(), .{
 });
 
 /// Tells whoever started the server which port it listens on.
-pub const announcement = program(fromProducer(u16, boundPort), .{print(zrx.Stdout, "{d}\n")}).provide(.{zrx.stdout(16)});
+pub const announcement = program(fromProducer(u16, boundPort), .{print(Stdout, "{d}\n")}).provide(.{stdout(Stdout, 16)});
 
 /// Both share the listener: bound once, announced, and accepted from.
 pub const service = system(.{ announcement, server });
