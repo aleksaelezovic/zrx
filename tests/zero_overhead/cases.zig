@@ -1146,6 +1146,14 @@ fn addBytes(sum: u64, row: Row) u64 {
     return next;
 }
 
+/// `trim` put to a line, by hand: see `same_text_trim_line`.
+fn trimRow(data: struct { Row }) Row {
+    const kept = std.mem.trim(u8, data[0].text(), " \t");
+    var trimmed: Row = .{ .bytes = undefined, .len = kept.len };
+    @memcpy(trimmed.bytes[0..kept.len], kept);
+    return trimmed;
+}
+
 /// The bytes of the rows without the blanks at their edges, summed: `trim`
 /// put to a line, which answers a line.
 pub fn rowsTrimmed(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
@@ -1154,32 +1162,24 @@ pub fn rowsTrimmed(comptime with_zrx: bool, rows: []const Row, out: *u64) void {
         run(program(fromSlice(rows), total), .{Result{ .out = out }});
     } else {
         var sum: u64 = 0;
-        for (rows) |*each| {
-            // An item reaches a stage as a value: see `lean_text_trim_line`.
-            const row = each.*;
-            const kept = std.mem.trim(u8, row.text(), " \t");
-            var trimmed: Row = .{ .bytes = undefined, .len = kept.len };
-            @memcpy(trimmed.bytes[0..kept.len], kept);
-            for (trimmed.text()) |byte| sum +%= byte;
-        }
+        for (rows) |row| sum = addBytes(sum, trimRow(.{row}));
         out.* = sum;
     }
 }
 
-/// `lean`, not `same`, and not for a loop of another shape: the two have
-/// the same loops, and differ in one instruction on either target (66 to
-/// 65 on aarch64, 127 to 126 on x86_64). The pipe marks where a stack
-/// slot begins and ends, which the loop by hand does not, and the loop by
-/// hand has one store of a zero that the pipe has not.
+/// The loop by hand trims each row in a function of its own, which it
+/// gives the row as a tuple of one, as a handler is given its data. Written
+/// inline, the two differ in where a stack slot begins and ends (a
+/// function's slots are marked for each call once it is inlined) and in a
+/// store of a zero that the pipe has not; given the row alone, in the type
+/// of that stack slot and nothing else.
 ///
-/// The loop by hand copies each row before it reads it, which nobody would
-/// write: see `lean_pattern_line`. An item goes from stage to stage as a
-/// value, and in this pipe the optimizer does not take that copy out. It
-/// is in both loops so that what is compared is the trimming. Measured on
-/// both sides, for this pipe and both targets: the row copied once, and
-/// what is kept copied once into the new line. That is a measurement of
-/// this pipe, not a rule for others.
-export fn lean_text_trim_line(ptr: [*]const Row, len: usize, out: *u64) void {
+/// Measured on both sides, for this pipe and both targets: the row copied
+/// once, into the tuple, and what is kept copied once, into the new line.
+/// An item goes from stage to stage as a value, and in this pipe the
+/// optimizer does not take the first copy out (see `lean_pattern_line`).
+/// That is a measurement of this pipe, not a rule for others.
+export fn same_text_trim_line(ptr: [*]const Row, len: usize, out: *u64) void {
     rowsTrimmed(exported_with_zrx, ptr[0..len], out);
 }
 

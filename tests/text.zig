@@ -276,6 +276,24 @@ test "the pieces of a line are there for the stages after the each, with the lin
     }
 }
 
+fn longest(kept: []const u8, piece: []const u8) []const u8 {
+    return if (piece.len > kept.len) piece else kept;
+}
+
+test "a piece the sub-pipe keeps is there in what the each emits at the end of the line" {
+    const rows = [_]Row{ row("a,bcd,ef"), row("gh") };
+    var seen: support.Recorder(Column) = .{};
+    try support.run(program(fromSlice(&rows), .{
+        each(text.split(","), .{fold(@as([]const u8, ""), longest)}),
+        forEach(keepColumn),
+    }), .{&seen});
+    try std.testing.expectEqual(2, seen.len);
+    for ([_][2][]const u8{ .{ "a,bcd,ef", "bcd" }, .{ "gh", "gh" } }, seen.slice()) |want, *got| {
+        try std.testing.expectEqualStrings(want[0], got.of.text());
+        try std.testing.expectEqualStrings(want[1], got.piece.text());
+    }
+}
+
 test "what is made of the pieces as values crosses a queue" {
     const rows = [_]Row{ row(" a ,b"), row("c") };
     var seen: support.Recorder(Word) = .{};

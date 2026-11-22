@@ -1425,7 +1425,7 @@ const shouted = compose(.{ Name.from, text.toUpper });
 A copy costs what it copies. [Lines and values](#lines-and-values) has what
 was measured of the copies of a line, pipe by pipe, and that there is no
 rule to give. Two fixtures are further examples, each with a `Line(32)`
-and with its copies on both sides of the comparison: `lean_text_trim_line`
+and with its copies on both sides of the comparison: `same_text_trim_line`
 and `same_text_upper`. Put to a `[]const u8`, nothing is copied:
 `same_text_trim` is the loop over `std.mem.trim`.
 
@@ -1434,20 +1434,26 @@ and `same_text_upper`. Put to a `[]const u8`, nothing is copied:
 `split` and `tokenize` are for [`each`](#each): what they answer for an item
 is a source, and the sub-pipe runs over its pieces.
 
-- The item is a `[]const u8`, or a value that reads its text with
-  `pub fn text(*const T) []const u8`, as a `Line` does. Text that is a
-  field of the item is reached through it:
+- The item is a `[]const u8`, or a struct `T` that reads its text with
+  `pub fn text(*const T) []const u8`, as a `Line` does. Only a struct is
+  taken: a union or an enum with such a `text` is a compile error. Text
+  that is a field of the item is reached through it:
   `each(compose(.{ field(.tags), text.tokenize(" ") }), sub)`.
 - A piece is a `[]const u8` that points into the item. For a `[]const u8`
   item that is its bytes, and the piece lives as long as they do. For a
-  line it is the line as `each` holds it while it works on that item.
-- So a piece of a line lives no longer than the push of that line. It is
-  there for the sub-pipe, and for the stages after the `each` that the push
-  still runs through. Like a piece of [`fileBytes`](#input-and-output), it
-  is not to be sent across a task boundary after the `each` (`queue`,
-  `batchWithin`, `debounce`, `concurrent`), nor kept in a `batch` or in
-  the state of a `fold` there. Nothing checks this. A boundary *inside*
-  the sub-pipe is a compile error, as for any `each`.
+  struct, such as a line, it is the struct as `each` holds it while it
+  works on that item.
+- **A piece of a struct is valid until the push of that item has returned,
+  and no longer.** It is there in the sub-pipe; in what the `each` emits
+  for the item, the last emission included, such as the final value of a
+  `fold` in the sub-pipe that kept a piece; and in the stages after the
+  `each` that the push runs through, up to the next task boundary. A
+  caller that keeps a piece beyond that copies it.
+- So, like a piece of [`fileBytes`](#input-and-output), it is not sent
+  across a task boundary after the `each` (`queue`, `batchWithin`,
+  `debounce`, `concurrent`), nor kept in a `batch` or in the state of a
+  `fold` there. Nothing checks this. A boundary *inside* the sub-pipe is a
+  compile error, as for any `each`.
 - Make a value of what has to stay: a copy (`map(Name.from)`), a number, or
   a `fold` in the sub-pipe that puts the columns into a struct, as `Entry`
   above.

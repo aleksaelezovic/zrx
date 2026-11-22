@@ -77,7 +77,7 @@ pub const cases = .{
     .{ "text_trim_uncalled", "map: `fn (comptime []const u8) type` returns a handler and is not one itself; call it and pass what it returns, as in `field(.name)`" },
     .{ "text_case_slice", "toUpper: a `[]const u8` has no bytes of its own to write the result to; copy it into a line first, as in `compose(.{ zrx.Line(32).from, text.toUpper })`" },
     .{ "text_case_item", "toLower: is put to one item that is a `zrx.Line(n)`, got `u32`; put the handler that yields the text before it, as in `compose(.{ field(.name), text.toLower })`" },
-    .{ "text_split_item", "split: is put to one item that is text, a `[]const u8` or a value that reads its text with `text()` as a `zrx.Line(n)` does, got `u32`; put the handler that yields the text before it, as in `compose(.{ field(.name), text.split(\",\") })`" },
+    .{ "text_split_item", "split: is put to one item that is text, a `[]const u8` or a struct `T` with `pub fn text(*const T) []const u8` as a `zrx.Line(n)` is, got `u32`; put the handler that yields the text before it, as in `compose(.{ field(.name), text.split(\",\") })`" },
     .{ "text_split_empty", "split: an empty delimiter separates nothing; name what stands between two pieces, as in `text.split(\",\")`" },
     .{ "text_tokenize_empty", "tokenize: no delimiters; name the bytes that separate two pieces, as in `text.tokenize(\" \\t\")` or `text.tokenize(text.whitespace)`" },
     // `split` declares its delimiter as a string, so this is Zig's own message, at the call.

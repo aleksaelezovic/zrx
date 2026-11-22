@@ -21,7 +21,7 @@ classes and the case are ASCII's.
 | `trim(bytes)`, `trimStart(bytes)`, `trimEnd(bytes)` | a `[]const u8` | a slice of the same bytes |
 | | a `Line(n)` | a `Line(n)` |
 | `toUpper`, `toLower` | a `Line(n)` | a `Line(n)` |
-| `split(delimiter)`, `tokenize(delimiters)` | a `[]const u8`, or a value with `text()` | a source of `[]const u8` pieces, for `each` |
+| `split(delimiter)`, `tokenize(delimiters)` | a `[]const u8`, or a struct with `text()` | a source of `[]const u8` pieces, for `each` |
 
 ## Where the bytes are decides
 
@@ -57,8 +57,10 @@ error union, and for a `Line` one that can never happen: every pipe that
 trims a line would have `StreamTooLong` among what it can fail with.
 
 What only reads a text takes what a pattern takes: `split` and `tokenize`
-are put to a `[]const u8` or to any value that reads its text with
-`text()`.
+are put to a `[]const u8` or to a struct `T` that reads its text with
+`pub fn text(*const T) []const u8`. Only a struct, as for a pattern: a
+union or an enum with such a `text` is the compile error that says what is
+taken.
 
 ## Pieces, and how long one lives
 
@@ -68,11 +70,15 @@ reads its text in `run`. A slice taken in the handler would point into the
 value the handler was given, which lives no longer than that call. The
 source stands still in the frame of `each`'s push for as long as it runs.
 
-So a piece of a `[]const u8` lives as long as its bytes, and a piece of a
-value lives no longer than the push of that item: the sub-pipe, and the
-synchronous stages after the `each`. `tests/text.zig` holds that it is
-there for those stages. Behind a task boundary after the `each`, or kept in
-a `batch` there, it dangles.
+So a piece of a `[]const u8` lives as long as its bytes. The rule for a
+piece of a struct is: **it is valid until the push of that item has
+returned, and no longer**. That is the sub-pipe; what the `each` emits for
+the item, the last emission included (the final value of a `fold` in the
+sub-pipe that kept a piece); and the synchronous stages after the `each`
+that the push runs through. A caller that keeps a piece beyond that copies
+it. `tests/text.zig` holds that a piece is there in each of those places.
+Behind a task boundary after the `each`, or kept in a `batch` there, it
+dangles.
 
 That is not a compile error, because it cannot be seen from an extension: a
 piece is a `[]const u8`, like a piece of `fileBytes`, and the guide says of
@@ -139,15 +145,15 @@ decision for both. Until then it is a handler of the caller's own over
 ## Measurements
 
 Read off the optimized IR of the fixtures, for `aarch64-linux` and
-`x86_64-linux`. Four fixtures are `same`: the zrx variant and the loop by
-hand are the same instructions. One is `lean`.
+`x86_64-linux`. All five are `same`: the zrx variant and the loop by hand
+are the same instructions.
 
 | Fixture | The pipe | Against | Calls | Stack slots | Copies |
 |---|---|---|---|---|---|
 | `same_text_trim` | `trim` put to a `[]const u8` | `std.mem.trim` | 0 | 0 | 0 |
 | `same_text_split` | `each` over `split(",")` | the loop over `std.mem.splitScalar` | 0 | 0 | 0 |
 | `same_text_tokenize` | `each` over `tokenize(" \t")` | the loop over `std.mem.tokenizeAny` | 0 | 0 | 0 |
-| `lean_text_trim_line` | `trim` put to a `Line(32)` | a loop that copies the row first | 0 | 2 | 2 |
+| `same_text_trim_line` | `trim` put to a `Line(32)` | a loop that trims the row in a function of its own | 0 | 2 | 2 |
 | `same_text_upper` | `toUpper` put to a `Line(32)` | a loop that copies the row first | 0 | 1 | 1 |
 
 The counts are the same on both sides of each comparison and on both
@@ -159,7 +165,9 @@ In the two fixtures with a line, the loop by hand copies each row before it
 reads it, which nobody would write: an item goes from stage to stage as a
 value, and in these pipes the optimizer does not take that copy out. It is
 on both sides so that what is compared is the handler, as in
-`lean_pattern_line`.
+`lean_pattern_line`. For `trim`, the loop by hand gives the row to a
+function of its own as a tuple of one, as a handler is given its data, and
+that function makes the trimmed line.
 
 ### What was tried for `trim` put to a line
 
@@ -172,16 +180,16 @@ on both sides so that what is compared is the handler, as in
   branch for a text that does not fit, which is never taken and which the
   optimizer left in.
 - **Making the line from its fields**, which is what is there: two stack
-  slots and two copies, the row once and what is kept once. 66
-  instructions to 65 by hand on aarch64, 127 to 126 on x86_64. The two
-  have the same loops. The pipe marks where a stack slot begins and ends,
-  and the loop by hand has one store of a zero the pipe has not; two more
-  ways to write the loop by hand came no closer than that. So the fixture
-  is `lean`, for a difference that is not one of loop shape, and the
-  comment next to it says so.
-
-The code that is better on both sides was taken over the one that compares
-as `same`.
+  slots and two copies, the row once and what is kept once. Against a loop
+  by hand that trims inline, 66 instructions to 65 on aarch64 and 127 to
+  126 on x86_64, with the same loops: the pipe marks where a stack slot
+  begins and ends for every item, and the loop by hand has one store of a
+  zero the pipe has not. Those marks are what the optimizer puts around
+  the slots of a function it inlines, so the loop by hand that trims in a
+  function of its own has them too, and has no store of a zero: with the
+  row given alone, the two differed in the type of one stack slot, the row
+  or a tuple of it. Given a tuple of one, it is the same instructions, 66
+  on aarch64 and 127 on x86_64. That is the fixture.
 
 ### What was tried for `toUpper`
 
@@ -208,7 +216,10 @@ in `AGENTS.md`.
 - The names `toUpper` and `toLower`, after `std.ascii`, and not `upper` and
   `lower`, which the pattern extension has for classes of bytes.
 - Only a `Line(n)` is made, as above.
-- A piece of a line is a borrow that lives for the push, as above.
+- A piece of a struct, such as a line, is valid until the push of that
+  item has returned: through the sub-pipe, the `each`'s last emission for
+  the item and the synchronous stages after it. A caller that keeps a
+  piece longer copies it. As above.
 - Several bytes are a sequence for `split` and a set for `tokenize`.
 
 ## Not there

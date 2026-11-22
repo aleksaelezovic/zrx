@@ -62,9 +62,10 @@ fn isLine(comptime T: type) bool {
     };
 }
 
-/// Whether a `T` holds a text of its own and reads it with `text()`, as a
-/// `Line` does. Told by name, as the pattern extension tells it: it is what
-/// a caller's own type may declare.
+/// Whether `T` is a struct that holds a text of its own and reads it with
+/// `pub fn text(*const T) []const u8`, as a `Line` does. Told by name, as
+/// the pattern extension tells it: it is what a caller's own struct may
+/// declare.
 fn holdsText(comptime T: type) bool {
     if (@typeInfo(T) != .@"struct" or !@hasDecl(T, "text")) return false;
     const reads = switch (@typeInfo(@TypeOf(T.text))) {
@@ -208,11 +209,14 @@ const Division = enum { split, tokenize };
 /// columns of every item. A text of `n` delimiters has `n + 1` pieces, the
 /// empty ones included; a delimiter of several bytes is that sequence.
 ///
-/// The item is a `[]const u8`, or a value that reads its text with
-/// `text()`, as a `Line` does. A piece is a `[]const u8` that points into
-/// the item: for a `[]const u8` into its bytes, for a value into the value
-/// as `each` holds it while it works on that item. A piece of a value
-/// lives no longer than the push of that item.
+/// The item is a `[]const u8`, or a struct `T` that reads its text with
+/// `pub fn text(*const T) []const u8`, as a `Line` does. A piece is a
+/// `[]const u8` that points into the item: for a `[]const u8` into its
+/// bytes, for a struct into the struct as `each` holds it while it works on
+/// that item. A piece of a struct is valid until the push of that item has
+/// returned: through the sub-pipe, `each`'s last emission for the item, and
+/// the synchronous stages after the `each`. A caller that keeps a piece
+/// longer copies it.
 pub fn split(comptime delimiter: []const u8) type {
     if (delimiter.len == 0) @compileError("split: an empty delimiter separates nothing; name what stands between two pieces, as in `text.split(\",\")`");
     return Divide("split", .split, delimiter);
@@ -252,14 +256,14 @@ fn Divide(comptime who: []const u8, comptime division: Division, comptime delimi
                 if (holdsText(Args[0])) return Args[0];
             }
             @compileError(
-                who ++ ": is put to one item that is text, a `[]const u8` or a value that reads its text with `text()` as a `zrx.Line(n)` does, got " ++ di.listTypes(Args) ++ before(who, "(\",\")"),
+                who ++ ": is put to one item that is text, a `[]const u8` or a struct `T` with `pub fn text(*const T) []const u8` as a `zrx.Line(n)` is, got " ++ di.listTypes(Args) ++ before(who, "(\",\")"),
             );
         }
     };
 }
 
-/// The pieces of one text. `Whole` is a `[]const u8`, or a value that holds
-/// its text.
+/// The pieces of one text. `Whole` is a `[]const u8`, or a struct that
+/// holds its text.
 fn Pieces(comptime Whole: type, comptime division: Division, comptime delimiter: []const u8) type {
     return struct {
         whole: Whole,
