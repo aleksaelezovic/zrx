@@ -102,7 +102,11 @@ this section.
   of more bytes than that, since a unit takes at least one byte. The
   join's test holds that rule on every host, a path of
   ASCII and one of two-byte letters on each side of the bound; the tree is
-  not built on Windows.
+  not built on Windows. The next review found the directory a source is
+  given still opened by that path unchecked, so it is held to the same
+  bound before it is opened. A test `Io` counts the directories asked to
+  be opened, which shows on any system that it was never asked: elsewhere
+  `std` refuses such a path itself, with the same error.
 - The directory's own path must fit too, and is checked before it is
   opened. Otherwise whether a bound is too small would depend on whether
   the directory happens to be empty.
@@ -250,7 +254,7 @@ walk opens it fails the run with `error.FileNotFound`.
   `fromProducer` with `Stop` do.
 - The join is tested by itself, by the rules of both kinds of system (see
   [How the directory is given](#how-the-directory-is-given)).
-- Each safeguard was removed in turn (twenty-seven mutants) and a test
+- Each safeguard was removed in turn (twenty-nine mutants) and a test
   failed for each; none failed to compile.
 
 The directory is given as `.zig-cache/tmp/<sub_path>`, built from
