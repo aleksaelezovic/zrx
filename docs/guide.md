@@ -969,6 +969,159 @@ reports, which for `std.Io.Reader` is `error.ReadFailed`.
 or `flatten()` to emit its items. Both slice accessors borrow from the value
 they are called on. Keep the whole value when storing or queueing it.
 
+## Compressed input and output
+
+The extension `zrx.ext.compress` makes a compressed stream a matter of
+bindings. A program reads `lines(Input, n)` and writes `write(Output, ...)`
+as before; what is bound to those roles decides whether the bytes on the
+other side are plain or compressed.
+
+```zig
+const compress = zrx.ext.compress;
+
+const Input = struct { reader: *std.Io.Reader }; // what the pipe reads
+const Packed = struct { reader: *std.Io.Reader }; // the compressed bytes
+
+const app = program(lines(Input, max_line), work);
+
+// a plain file:
+app.run(.{ io, fileReader(Input, "access.log", max_line + 1), ... });
+// a gzip file:
+app.run(.{
+    io,
+    fileReader(Packed, "access.log.gz", 4096),
+    compress.gzipReader(Input, Packed, max_line + 1),
+    ...
+});
+```
+
+| | |
+|---|---|
+| `gzipReader(Role, From, n)` | Binds as `Role` the plain bytes of the gzip stream read from `From`, buffered by `n` bytes. |
+| `zlibReader(Role, From, n)` | The same for a zlib stream (RFC 1950). |
+| `zstdReader(Role, From, n, window)` | The same for a Zstandard stream. `window` is a `[]u8` of yours that the decoder works in. |
+| `gzipWriter(Role, Into, options)` | Binds as `Role` a writer whose bytes reach `Into` as a gzip stream. `options.level` is `.default`, `.fastest`, `.best` or `.level_1` to `.level_9`. |
+| `zlibWriter(Role, Into, options)` | The same for a zlib stream. |
+
+Each of these is a [resource](#programs-and-systems) that needs one role and
+provides another, so it is acquired after whatever provides the role it
+needs, wherever the two are written. Two roles are needed because a type has
+one provider: the same role on both sides is a compile error that says so.
+What provides the compressed side is anything that provides a reader or a
+writer: `fileReader`, `fileWriter`, `stdout`, or a value of your own in a
+test. `n` is what it is for `fileReader`: for `lines`, the line limit plus
+one. The reader of the compressed bytes may have any buffer. Nothing here
+allocates.
+
+Reading:
+
+- Every member of a gzip stream is read, one after another, as `gzip -d`
+  does, and every frame of a Zstandard stream: both are read to the end of
+  their input.
+- A zlib stream is one stream, and what follows it is not read. Once the
+  stream has been read to its end, what follows is still in a reader of
+  your own if that reader has a buffer of 4 bytes or more. One with less is
+  read 4 KiB at a time, and what was read past the end of the stream is
+  gone.
+- A header is checked before anything after it is decoded. A gzip header
+  with a reserved flag set, and a zlib header whose check bits are wrong or
+  that asks for a preset dictionary, fail the read.
+- Once a gzip member or a zlib stream has been read to its end, the
+  checksum, and for gzip the length, that it declares are compared with
+  what was read.
+- A pipe that is done before its input ends, after `take(1)` say, reads no
+  further. What it did not read is not checked, and where the reader of
+  the compressed bytes then stands is not said.
+- A stream that is cut short, is corrupt, does not match its checksum, or
+  (gzip) is followed by bytes that are no member fails the read, and with it
+  the run, with `error.ReadFailed`: the error of any reader given to
+  `lines`, so a gzip or zlib input adds no error to a run. The lines decoded
+  before the failure have been delivered. A file of no bytes is no gzip and no
+  zlib stream.
+- A line longer than `n - 1` bytes is `error.StreamTooLong`, as for a file.
+- A Zstandard frame that needs a larger window than `window` has room for,
+  or a dictionary, fails the read. The checksum of a frame's content is not
+  compared, because `std` does not do it yet: content that was altered and
+  still decodes is delivered as it is.
+
+The memory a Zstandard decoder works in is too large for the stack, so it
+is yours to give, and it is not allocated for you. It holds one block,
+`std.compress.zstd.block_size_max` (128 KiB), and in what is left the
+window: the largest a frame may ask for.
+`std.compress.zstd.default_window_len`, 8 MiB, is what the format
+recommends every decoder to accept; `zstd --long` writes frames that need
+more.
+
+```zig
+const zstd = std.compress.zstd;
+
+var window: [zstd.block_size_max + zstd.default_window_len]u8 = undefined;
+
+app.run(.{
+    io,
+    fileReader(Packed, "access.log.zst", 4096),
+    compress.zstdReader(Input, Packed, max_line + 1, &window),
+    ...
+});
+```
+
+A slice with no room for a window, one of `block_size_max` bytes or less,
+fails the run with `error.ZstdWindowTooSmall` before anything is read: the
+one error a Zstandard input adds to a run. The slice is the binding's while
+a program runs, so two runs at the same time need two.
+
+Writing:
+
+- The end of the stream, with its checksum, is written once everything the
+  binding wraps has returned without an error, and `Into` is then flushed.
+  Writing it can fail, so it is part of the run and not of a release: the
+  run fails with `error.WriteFailed`.
+- When what the binding wraps fails, the stream is left without its end,
+  and reading it back fails. A failure after that, in writing the end or in
+  another binding, may leave the whole stream behind.
+- Under a `fileWriter` in `.publish` mode the end is written before the
+  file is given its name, so a file that was named holds the whole stream.
+  Publication is atomic per file, not per run, as for any
+  [published file](#input-and-output).
+- Use `write`, not `print`. A flush of the compressed role ends a block and
+  does not reach `Into`, so flushing every item costs compression and shows
+  nobody the item.
+- `Into` needs a buffer of at least 9 bytes; with less, the run fails with
+  `error.CompressedBufferTooSmall` before anything is written.
+
+```zig
+const Output = struct { writer: *std.Io.Writer };
+const Archive = struct { writer: *std.Io.Writer };
+
+program(source, .{
+    map(json.encode(.{})),
+    write(Output, "{f}\n"),
+}).provide(.{
+    fileWriter(Archive, "events.jsonl.gz", 4096, .{ .mode = .publish }),
+    compress.gzipWriter(Output, Archive, .{}),
+});
+```
+
+What each binding holds while the program runs, beside the buffer of `n`
+bytes:
+
+| | |
+|---|---|
+| `gzipReader`, `zlibReader` | 64 KiB of window and 4 KiB of compressed bytes, on the stack. |
+| `zstdReader` | The slice it is given, and 4 KiB of compressed bytes on the stack. `std`'s decoder puts another 256 KiB on the stack of the task that reads. |
+| `gzipWriter`, `zlibWriter` | 64 KiB of window, which is the writer's buffer, and 225 KiB of compressor state, on the stack. A Debug build copies the compressor as it is made and was measured at 741 KiB. |
+
+The codecs are `std.compress`'s, and zrx has none of its own. So there is
+no Zstandard compression, which `std` does not have, and no xz: `std`'s
+decoder keeps the whole decompressed stream in memory (22 MB for a text of
+14.6 MB when it was measured) and compares no checksum. Raw deflate and
+LZMA streams, which are rarely files of their own, are left out. Archives
+(`tar`, `zip`) are a different thing, a stream of files and not of bytes,
+and are not part of this extension.
+
+Why it is built this way, and what was measured, is in
+[the design record](spec-compress.md).
+
 ## Text patterns
 
 `zrx.ext.pattern` says what a text looks like, as a value built from parts,

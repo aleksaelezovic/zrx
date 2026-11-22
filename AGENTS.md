@@ -344,6 +344,45 @@ to this file; edit `AGENTS.md`, not copies.
     read: chunked request bodies return by decision.
   - Parsing stays `std.http.Server`'s. HTTP imports nothing of the
     pattern extension and has no router of its own; do not give it one.
+- **Compression is bindings, and the codecs are `std`'s.**
+  `src/ext/compress.zig` (`zrx.ext.compress`) is written against the
+  public resource contract and has no operator, source or handler.
+  [docs/spec-compress.md](docs/spec-compress.md) is its design record: the
+  reasons, what was rejected and what was measured. Read it before
+  changing the extension. The rules it gives:
+  - A binding needs one role and provides another, and the planner knows
+    nothing of it. Two roles, because a type has one provider: the same
+    role on both sides is a compile error where it is written.
+  - No codec of zrx's own. What is there is what `std.compress` can do
+    within a memory the caller sizes: gzip and zlib both ways, Zstandard
+    read only. xz returns when `std`'s decoder is bounded.
+  - Nothing is allocated. The Zstandard window is a slice of the
+    caller's, and its length says how much window there is.
+  - A program is not handed a `std` decoder's own reader: it asserts. Do
+    not remove the buffer in front of it to save a copy.
+  - A flate decoder reads the caller's reader itself where that reader
+    can hold what the decoder asks for. Do not put a buffer of the
+    binding's between them: it takes from the caller's reader what
+    follows a zlib stream.
+  - `std` compares no gzip or zlib checksum, checks only part of a
+    header, and reads one gzip member. The extension does all three. A
+    decoder that failed is not asked again.
+  - A checksum is compared, and what follows a zlib stream is left, only
+    once the stream is read to its end: a pipe that is done early reads
+    no further.
+  - A corrupt or truncated input is `error.ReadFailed` and nothing more
+    specific, so a rescue written for the plain program still fits.
+  - The end of a compressed stream is written in the binding after
+    everything it wraps has returned without an error, as `.publish`
+    names its file, and the writer below is flushed there. A failure of
+    what the binding wraps leaves the stream without its end on purpose;
+    nothing more is said of a failed run, and publication is atomic per
+    file.
+  - Do not wrap `std` writers. What cannot be said at compile time, a
+    writer below or a Zstandard slice that `std` would assert on, is an
+    error at acquisition.
+  - Say what each window costs, and give stack use as a measurement.
+  - There is no zero-overhead fixture: nothing here is in the item loop.
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
