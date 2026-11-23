@@ -16,6 +16,9 @@
 #
 # Needs GH_TOKEN with read access to pull requests, checks and actions.
 set -euo pipefail
+# A lookup that fails fails the gate: a result left out for want of an answer
+# could be the failing one. Each lookup is a lone assignment from $(...),
+# which `set -e` stops on, and nothing is looked up in a loop's subshell.
 
 repo=$1
 commit=$2
@@ -26,7 +29,12 @@ if [ -z "$pr" ]; then
     echo "::error::$commit is not the merge of a pull request into main"
     exit 1
 fi
-read -r head merged < <(gh api "repos/$repo/pulls/$pr" -q '[.head.sha, .merged_at] | @tsv')
+details=$(gh api "repos/$repo/pulls/$pr" -q '[.head.sha, .merged_at] | @tsv')
+read -r head merged <<<"$details"
+if [ -z "$head" ] || [ -z "$merged" ]; then
+    echo "::error::GitHub gave no head or merge time for #$pr"
+    exit 1
+fi
 
 # `main` takes a branch only up to date, so a merge has the files of the head
 # it merged. If it does not, it holds code no check of the head saw.
@@ -47,12 +55,19 @@ fi
 # merge, but for skipped ones, with the check suite it belongs to.
 results=$(gh api --paginate "repos/$repo/commits/$head/check-runs?filter=all&per_page=100" \
     -q ".check_runs[] | select(.app.slug == \"github-actions\" and .completed_at != null and .completed_at <= \"$merged\" and .conclusion != \"skipped\") | [.check_suite.id, .name, .completed_at, .conclusion] | @tsv")
-# The suites whose run a pull request started.
-from_pull_requests=$(cut -f 1 <<<"$results" | sort -u | while read -r suite; do
-    [ -n "$suite" ] || continue
+# The suites whose run a pull request started. Every suite is asked; one
+# that cannot be is an error, not a suite left out.
+from_pull_requests=""
+for suite in $(cut -f 1 <<<"$results" | sort -u); do
     event=$(gh api "repos/$repo/actions/runs?check_suite_id=$suite" -q '.workflow_runs[0].event // empty')
-    [ "$event" = pull_request ] && echo "$suite"
-done || true)
+    if [ -z "$event" ]; then
+        echo "::error::GitHub gave no run for check suite $suite on #$pr's head"
+        exit 1
+    fi
+    if [ "$event" = pull_request ]; then
+        from_pull_requests+="$suite"$'\n'
+    fi
+done
 # For each name, the latest of those decides.
 passed=$(awk -F '\t' 'NR == FNR { keep[$1] = 1; next } keep[$1] { print $2 "\t" $3 "\t" $4 }' \
         <(printf '%s\n' "$from_pull_requests") <(printf '%s\n' "$results") \
