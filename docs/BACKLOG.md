@@ -89,17 +89,25 @@ item starts when the owner picks it up.
 - **proposed** `pairwise`, and `concat` of sources.
 - **proposed** `.publish` finding an existing destination before the run
   does its work, not only when it publishes.
-- **proposed** A program as a graph: a compile-time walk of a pipe, in
-  which every composite operator describes its own shape and an operator of
-  a caller's own is one node. The same walk would serve
-  - a picture of a program, with its route cases and error paths labelled;
-  - facts known at compile time, such as the range of integers a
-    `filter(ge(10))` lets through, checked against what a later handler
-    needs;
-  - rewrites of a pipe, ordered and combinable, which an extension can add
-    to: a slice source with `skip` and `take` becomes a narrower slice. Two
-    `take`s in a row were measured and gained nothing.
-  The owner called the rewrites a nice-to-have.
+- **proposed** A program graph built by walking its source and pipe at
+  compile time. Each composite operator describes its own shape, and an
+  operator of the caller's own appears as one node. The same walk could
+  support several uses.
+
+  - A visualizer could label route cases and error paths, then highlight
+    the path through a selected case. In `nquads-check`, selecting the
+    statement case would show its nested route to cleaned output or a
+    length diagnostic. [N-Quads check](../examples/apps/nquads-check/README.md#the-pipe)
+  - A compile-time check could carry facts between stages. A
+    `filter(ge(10))` establishes that every emitted integer is at least
+    10. If a later handler needs that bound after a route rejoins, every
+    case that can emit must establish or preserve it.
+  - An optimizer could apply ordered, composable rewrite rules from zrx or
+    its extensions. For example, `fromSlice(items)` followed by
+    `skip(offset)` and `take(limit)` could iterate over a narrower slice
+    and jump directly to the first retained item. Two consecutive `take`s
+    were measured and gained nothing. The owner called rewrites a nice-to-have.
+
 - **proposed** A compile-time warning for a handler that never looks at
   cancellation, such as a busy loop. Not now.
 - **out** From the previous implementation: signals (`hold`,
