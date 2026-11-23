@@ -838,3 +838,30 @@ to this file; edit `AGENTS.md`, not copies.
 - Concurrency is tested as invariants over shapes (`tests/flow.zig`): every
   shape of pipe is run with its ended side running out, being done and
   failing. A new shape goes there, not into a one-off test.
+
+## README, CI and releases
+
+- The README is for a reader deciding whether to try zrx: what it is,
+  install, the quickstart, the model, zero overhead in a paragraph,
+  platforms, the build commands. Keep each a few lines. Numbers that
+  change with the code (how many fixtures, what is `lean`) are in the
+  guide, and the README links there. The README's quickstart is
+  `examples/quickstart.zig` without its comments; change both together.
+- The install lines of the README are what
+  `.github/scripts/consumer-smoke.sh` runs: a new project, an empty package
+  cache, `zig fetch --save=zrx` and the two `build.zig` lines. Change the
+  two together.
+- `.paths` in `build.zig.zon` is what a dependent fetches: the library and
+  what `build.zig` needs to be loaded. A file that `build.zig` imports or
+  embeds goes in that list; the smoke test fails without it.
+- CI checks a pull request into `main`, natively on Linux, macOS and
+  Windows; formatting and the cross-target catalog run on Linux. `main`
+  takes a branch only up to date, so nothing runs again on a push to it.
+  Branches are deleted when they are merged.
+- A release is a version tag on a commit of `main`. One pull request
+  changes `.version` in `build.zig.zon` and the tag in the README's
+  install line; after it is merged the owner pushes `vX.Y.Z`.
+  `.github/workflows/release.yml` checks that the tag names the version,
+  validates the tagged commit, installs the published archive with the
+  smoke test and makes a draft release. The owner publishes it. Agents do
+  not push tags or publish releases.
