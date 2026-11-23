@@ -11,8 +11,9 @@ on:
 permissions:
   contents: read
 
-# A tag pushed again, to another commit, starts a run that replaces the one
-# still going for it.
+# Version tags cannot be moved or deleted: a ruleset of the repository
+# refuses it. The checks of the tag below hold if that ruleset is ever
+# changed. A run for a tag replaces one still going for it.
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -130,5 +131,8 @@ jobs:
               exit 1 ;;
           esac
           # A tag moved while the draft was written leaves this hash stale:
-          # fail, and the run the move started writes the draft again.
-          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          # the draft is deleted, so that nothing stale can be published.
+          if ! .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"; then
+            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
+            exit 1
+          fi
