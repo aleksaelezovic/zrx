@@ -5,6 +5,9 @@ name: Validation
 # is what was checked and a push to `main` runs nothing again. A pull request
 # into another branch, such as one of a stack or one into a release branch,
 # runs no job: it is checked with the pull request that brings it to `main`.
+# A pull request that GitHub retargets to `main` (its base was merged and
+# deleted) runs nothing then; it is behind `main` by that merge, and `main`
+# takes it only once it is updated, which is a push and runs the checks.
 # A release tag runs this through `release.yml`.
 on:
   pull_request:
