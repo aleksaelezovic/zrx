@@ -78,7 +78,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        # Not macOS: GitHub's hosted macOS runners are few, and jobs were dropped
+        # for want of one. The library's suites run there.
+        os: [ubuntu-24.04, windows-2025]
         app: [record-processor, audit-archive, file-integrity-manifest, multi-file-log-analyzer, offline-telemetry, nquads-check, http-bench]
     defaults:
       run:
