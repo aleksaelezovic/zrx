@@ -2,12 +2,12 @@ name: Validation
 
 # A pull request into `main` is checked here, merged with `main` as it is;
 # `main` requires the branch to be up to date before merging, so what lands
-# is what was checked and a push to `main` runs nothing again. Pull requests
-# between the branches of a stack are checked once they target `main`.
+# is what was checked and a push to `main` runs nothing again. A pull request
+# into another branch, such as one of a stack or one into a release branch,
+# runs no job: it is checked with the pull request that brings it to `main`.
 # A release tag runs this through `release.yml`.
 on:
   pull_request:
-    branches: [main]
   workflow_call:
   workflow_dispatch:
 
@@ -22,6 +22,10 @@ concurrency:
 jobs:
   validation:
     name: "Library: ${{ matrix.os }}"
+    # See the top: only a pull request into `main` is checked. A branch
+    # filter on the event did not stop pull requests into other branches
+    # from running (seen on the stack for v0.2.0), so the jobs ask.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -65,6 +69,7 @@ jobs:
 
   apps:
     name: "App: ${{ matrix.app }} (${{ matrix.os }})"
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
