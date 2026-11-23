@@ -107,7 +107,8 @@ real storage and synchronization costs.
 
 ## Platforms
 
-CI runs every test natively on Linux, macOS and Windows. The core also
+CI runs the tests natively on Linux, macOS and Windows; a few that need
+POSIX file system behavior are skipped on Windows. The core also
 compiles for targets without an operating system (`wasm32-freestanding`,
 `thumb-freestanding-eabi`).
 
