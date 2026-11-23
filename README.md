@@ -21,6 +21,19 @@ const zrx = b.dependency("zrx", .{ .target = target, .optimize = optimize }).mod
 exe.root_module.addImport("zrx", zrx);
 ```
 
+## Motivation
+
+I created zrx to express whole programs as push-based input streams and
+transformation pipelines. I wanted AI to be able to write programs that both
+people and LLMs could read and review. The pipeline shows how data moves from
+the source through each transformation to its destination.
+
+zrx leans on Zig's `comptime`. The Zig Language Server (ZLS) has limited
+support for inferring types through these pipelines, so actionable compile
+errors are part of the design. The same specialization lets Zig inline and
+optimize synchronous pipelines so their native code can match hand-written
+loops.
+
 ## Quickstart
 
 ```zig
@@ -123,6 +136,12 @@ zig build example         # run the examples
 zig build zero-overhead   # print the code comparison
 zig build benchmark       # throughput against a hand-written loop
 ```
+
+## Contributing
+
+Start with the [backlog](docs/BACKLOG.md). For a backlog item, new feature, or
+API change, open an issue first so we can agree on scope. Small fixes and
+documentation improvements are welcome as pull requests.
 
 ## License
 
