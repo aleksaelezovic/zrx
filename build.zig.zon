@@ -3,17 +3,17 @@
     .version = "0.2.0",
     .fingerprint = 0xe5f0d6eec402ea20,
     .minimum_zig_version = "0.17.0",
+    // What a dependent fetches: the library and what its build script
+    // needs to be loaded. `build.zig` embeds `.zigversion` and imports the
+    // compile-error table, so those go along; the steps that need the rest
+    // of the tests, the examples and the tools exist only in a checkout.
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
-        "tests",
-        "examples",
-        "benchmarks",
-        "tools",
-        "docs",
-        "README.md",
-        "LICENSE",
         ".zigversion",
+        "tests/compile_fail.zig",
+        "LICENSE",
+        "README.md",
     },
 }
