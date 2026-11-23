@@ -345,6 +345,10 @@ A handler of your own over `std.math` is a few lines.
   app READMEs, on errors, cancellation and teardown, how long borrowed data
   lives and the limits of HTTP; and someone new to zrx following the
   README.
+- **wanted** The apps checked on macOS in CI again. They run on Linux and
+  Windows only, since GitHub's hosted macOS runners were too few and jobs
+  were dropped without one; the library's suites still run on macOS.
+  Back when macOS runners are to be had, or by another way to run them.
 - **gap** `.github/copilot-instructions.md` is a link to `AGENTS.md` from
   another folder, so its relative links are broken on GitHub.
 
