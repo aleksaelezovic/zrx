@@ -142,8 +142,10 @@ while it fills the field, so it is reported as `LengthMismatch` and no
 longer as `StreamTooLong`. It is also found before a missing field:
 `std.json` checks a value where it reads it and looks for missing fields
 only once the object is closed, so a line with an oversized resource and
-no `actor` is `LengthMismatch`, where it was `MissingField`. Of two faults
-in a line, one in a value is reported.
+no `actor` is `LengthMismatch`, where it was `MissingField`. A fault in a
+value is reported before a missing required field; this says nothing of
+other faults, such as an unknown field earlier in the object, which
+`std.json` reports where it reads it.
 
 One thing is heavier than it has to be. `actor` and `detail` must be there
 and are not kept, and a decoded type holds no slice, so `Entry` reads each

@@ -13,8 +13,9 @@ const Private = zrx.Line(max_line);
 
 /// What a line must hold. What is decoded is a value, so its text is copied.
 /// `std.json` checks a field where it reads it and looks for missing ones
-/// once the object is closed, so of two faults the one in a value wins: an
-/// oversized `resource` without an `actor` is `LengthMismatch`.
+/// once the object is closed, so a fault in a value is reported before a
+/// missing required field: an oversized `resource` without an `actor` is
+/// `LengthMismatch`.
 const Entry = struct {
     id: u64,
     ts_ms: u64,
