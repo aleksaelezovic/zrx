@@ -11,9 +11,10 @@
 //! read and `print` or `write` to write, where a test binds a reader or a
 //! writer of its own. `fileLines` and `fileBytes` are sources that open the
 //! file at a path when they run. They borrow the path: its bytes must stay
-//! alive through the run. So neither is made from a path inside an item in
-//! the `source_of` of an `each`, such as an entry's: that handler is given
-//! a copy of the item, which is gone before the source runs.
+//! alive through the run. A `source_of` may pass on a slice its item holds,
+//! whose bytes live elsewhere, but not a slice of text the item holds
+//! inline, such as an entry's path: that handler is given a copy of the
+//! item, which is gone before the source runs.
 //!
 //! `entries` gives the entries of one directory and `walk` those under it,
 //! as deep as it was given room for. A directory is named by its path, as a
@@ -159,8 +160,8 @@ fn expectRole(comptime who: []const u8, comptime Role: type, comptime field: []c
 /// when it ends. A line may be at most `max_line_bytes` long, not counting
 /// its `\n`; a longer one fails the run with `error.StreamTooLong`. A failed
 /// read fails the run with the error the system reported. `path` is
-/// borrowed: its bytes must stay alive through the run, so it is not made
-/// from an item in a `source_of`. Needs `std.Io`.
+/// borrowed: its bytes must stay alive through the run, so it is not text
+/// held inline in the item of a `source_of`. Needs `std.Io`.
 pub fn fileLines(path: []const u8, comptime max_line_bytes: usize) FileLines(max_line_bytes) {
     return .{ .path = path };
 }
@@ -202,8 +203,8 @@ fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.Fi
 /// the source's own buffer: it is valid until the push that carries it
 /// returns, so a stage that keeps bytes copies them. A failed read fails
 /// the run with the error the system reported. `path` is borrowed: its
-/// bytes must stay alive through the run, so it is not made from an item
-/// in a `source_of`. Needs `std.Io`.
+/// bytes must stay alive through the run, so it is not text held inline in
+/// the item of a `source_of`. Needs `std.Io`.
 pub fn fileBytes(path: []const u8, comptime max_bytes: usize) FileBytes(max_bytes) {
     return .{ .path = path };
 }

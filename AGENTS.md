@@ -601,7 +601,8 @@ to this file; edit `AGENTS.md`, not copies.
   - `fileLines` is the core's `lines` over the reader it opens. Do not
     give it a line reader of its own.
   - `fileLines` and `fileBytes` borrow their path, so neither may be made
-    from an item in the `source_of` of an `each`. That is open, and
+    from text an item holds inline (an entry's path) in the `source_of` of
+    an `each`; a slice whose bytes live elsewhere is fine. That is open, and
     recorded in the spec: do not fix it in passing.
   - The directory is given by path, as for `fileLines`, not by a role. A
     source holds a copy of its path, so one may be made from an entry
