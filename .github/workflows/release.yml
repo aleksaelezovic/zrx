@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# A tag pushed again, to another commit, starts a run that replaces the one
+# still going for it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   version:
     name: Tag names the manifest version
@@ -108,5 +114,21 @@ jobs:
           shows; the [guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/guide.md)
           is the reference.
           EOF
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --draft --verify-tag --title "zrx $GITHUB_REF_NAME" --notes-file notes.md
+          # A draft for the tag from an earlier run, of a tag since moved, is
+          # brought up to date. A published release is not touched.
+          state=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          case "$state" in
+            none)
+              gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --draft --verify-tag --title "zrx $GITHUB_REF_NAME" --notes-file notes.md ;;
+            draft)
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --draft --title "zrx $GITHUB_REF_NAME" --notes-file notes.md ;;
+            *)
+              echo "::error::release $GITHUB_REF_NAME is already published, and is left as it is"
+              exit 1 ;;
+          esac
+          # A tag moved while the draft was written leaves this hash stale:
+          # fail, and the run the move started writes the draft again.
+          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
