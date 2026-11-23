@@ -66,10 +66,10 @@ fn pathIn(arena: std.mem.Allocator, temp: *const std.testing.TmpDir, name: []con
 }
 
 /// Runs the app's pipe over `paths` into `output` and returns the outcome it stored.
-fn manifestOf(paths: []const []const u8, output: *std.Io.Writer) !app.Exit {
-    var exit: app.Exit = .complete;
+fn manifestOf(paths: []const []const u8, output: *std.Io.Writer) !u8 {
+    var exit: zrx.ext.process.Exit = .{};
     try tryRun(zrx.program(zrx.fromSlice(paths), app.manifest), .{ io, &exit, app.Manifest{ .writer = output } });
-    return exit;
+    return exit.code;
 }
 
 test "the pipe writes a row per path and stores the outcome" {
@@ -89,7 +89,7 @@ test "the pipe writes a row per path and stores the outcome" {
     // More paths than workers, and one of them several times.
     const exit = try manifestOf(&.{ abc, missing, root, abc, abc, abc }, &output);
 
-    try std.testing.expectEqual(app.Exit.incomplete, exit);
+    try std.testing.expectEqual(app.status.incomplete, exit);
     try expectRows(output.buffered(), &.{
         good_row,
         try std.fmt.allocPrint(arena, "{{\"path\":\"{s}\",\"failure\":\"FileNotFound\"}}", .{missing}),
@@ -113,7 +113,7 @@ test "a file larger than what a worker reads at a time is hashed whole" {
 
     var bytes: [1024]u8 = undefined;
     var output: std.Io.Writer = .fixed(&bytes);
-    try std.testing.expectEqual(app.Exit.complete, try manifestOf(&.{path}, &output));
+    try std.testing.expectEqual(0, try manifestOf(&.{path}, &output));
 
     var expected: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(&data, &expected, .{});

@@ -9,11 +9,13 @@ const map = zrx.map;
 const tap = zrx.tap;
 const resource = zrx.resource;
 const forEach = zrx.forEach;
-const stdout = zrx.stdout;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const Stdout = process.Stdout;
 
 /// Given to `run`: available to the whole program.
 const Logger = struct {
-    out: zrx.Stdout,
+    out: Stdout,
 
     fn info(logger: Logger, comptime format: []const u8, args: anytype) !void {
         try logger.out.writer.print("[log] " ++ format ++ "\n", args);
@@ -27,7 +29,7 @@ const Table = struct { name: []const u8 };
 /// Acquired when the program starts and released when it ends.
 const Database = struct { saved: *u32 };
 
-fn openLogger(out: zrx.Stdout) Logger {
+fn openLogger(out: Stdout) Logger {
     return .{ .out = out };
 }
 fn connect(logger: Logger, saved: *u32) !Database {
@@ -47,16 +49,8 @@ fn save(logger: Logger, database: Database, table: Table, value: i32) !void {
     try logger.info("saved {d} to {s}", .{ value, table.name });
 }
 
-const Exit = struct { code: u8 = 0 };
-
-/// A run returns nothing: what ends it goes to a rescue, and here becomes
-/// the exit status.
-fn fail(exit: *Exit, _: anyerror) void {
-    exit.code = 1;
-}
-
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     var saved: u32 = 0;
     const values = [_]i32{ 5, 12, 19 };
 
@@ -64,11 +58,13 @@ pub fn main(init: std.process.Init) u8 {
         map(timesTen),
         forEach(save),
     }).provide(.{
-        stdout(256),
+        stdout(Stdout, 256),
         resource(openLogger, null),
         resource(connect, disconnect),
         Table{ .name = "measurements" },
     });
-    app.run(.{ init.io, &saved, &exit, rescue(fail) });
+    // A run returns nothing: what ends it goes to a rescue, and here becomes
+    // the exit status.
+    app.run(.{ init.io, &saved, &exit, rescue(process.fail(.{ .prefix = null })) });
     return exit.code;
 }

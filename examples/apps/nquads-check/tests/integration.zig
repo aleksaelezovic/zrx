@@ -29,6 +29,7 @@ const Log = struct {
     output: std.Io.Writer,
     diagnostics: std.Io.Writer,
     summary: app.Summary = .{},
+    exit: app.Exit = .{},
 
     fn init(output: []u8, diagnostics: []u8) Log {
         return .{ .output = .fixed(output), .diagnostics = .fixed(diagnostics) };
@@ -41,6 +42,7 @@ fn check(text: []const u8, log: *Log) !void {
     try tryRun(app.check, .{
         io,
         &log.summary,
+        &log.exit,
         app.Input{ .reader = &reader },
         app.Output{ .writer = &log.output },
         app.Diagnostics{ .writer = &log.diagnostics },
@@ -54,6 +56,7 @@ test "statements are written the one way, and the other lines reported by number
     try std.testing.expectEqualStrings(tidied, log.output.buffered());
     try std.testing.expectEqualStrings(rejections, log.diagnostics.buffered());
     try std.testing.expectEqual(app.Summary{ .statements = 4, .in_graphs = 2, .rejected = 3 }, log.summary);
+    try std.testing.expectEqual(app.status.rejected, log.exit.code);
 }
 
 /// An IRI of `len` bytes.
@@ -91,6 +94,7 @@ test "what is written can be read again: a statement longer than a line once tid
     try std.testing.expectEqualStrings(log.output.buffered(), again.output.buffered());
     try std.testing.expectEqualStrings("", again.diagnostics.buffered());
     try std.testing.expectEqual(app.Summary{ .statements = 1 }, again.summary);
+    try std.testing.expectEqual(0, again.exit.code);
 }
 
 /// A statement with a triple term written without spaces, and the same
@@ -123,15 +127,15 @@ test "what is written can be read again, with a triple term that is written long
     try std.testing.expectEqualStrings(log.output.buffered(), again.output.buffered());
     try std.testing.expectEqualStrings("", again.diagnostics.buffered());
     try std.testing.expectEqual(app.Summary{ .statements = 1 }, again.summary);
+    try std.testing.expectEqual(0, again.exit.code);
 }
 
 test "the summary that cannot be written fails by itself, after the statements were" {
     var none: [0]u8 = .{};
     var console: std.Io.Writer = .fixed(&none);
-    var exit: app.Exit = .{};
     try std.testing.expectError(error.WriteFailed, tryRun(
         zrx.program(zrx.fromValue(app.Summary{ .statements = 1 }), app.report),
-        .{ &exit, app.Console{ .writer = &console } },
+        .{app.Console{ .writer = &console }},
     ));
 }
 
@@ -151,17 +155,15 @@ test "a line longer than a line may be fails the run" {
     try std.testing.expectError(error.StreamTooLong, check(&long, &log));
 }
 
-test "the report is the summary as JSON, and a rejected line is exit status 1" {
+test "the report is the summary as JSON" {
     inline for (.{
-        .{ app.Summary{ .statements = 3, .in_graphs = 1 }, 0, "{\"statements\":3,\"in_graphs\":1,\"rejected\":0}\n" },
-        .{ app.Summary{ .statements = 3, .rejected = 2 }, 1, "{\"statements\":3,\"in_graphs\":0,\"rejected\":2}\n" },
+        .{ app.Summary{ .statements = 3, .in_graphs = 1 }, "{\"statements\":3,\"in_graphs\":1,\"rejected\":0}\n" },
+        .{ app.Summary{ .statements = 3, .rejected = 2 }, "{\"statements\":3,\"in_graphs\":0,\"rejected\":2}\n" },
     }) |case| {
         var buffer: [128]u8 = undefined;
         var console: std.Io.Writer = .fixed(&buffer);
-        var exit: app.Exit = .{};
-        try tryRun(zrx.program(zrx.fromValue(case[0]), app.report), .{ &exit, app.Console{ .writer = &console } });
-        try std.testing.expectEqual(case[1], exit.code);
-        try std.testing.expectEqualStrings(case[2], console.buffered());
+        try tryRun(zrx.program(zrx.fromValue(case[0]), app.report), .{app.Console{ .writer = &console }});
+        try std.testing.expectEqualStrings(case[1], console.buffered());
     }
 }
 

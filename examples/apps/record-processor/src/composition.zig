@@ -9,6 +9,7 @@ const zrx = @import("zrx");
 const records = @import("domain/records.zig");
 const validation = @import("domain/validation.zig");
 const summaries = @import("domain/summary.zig");
+const streams = zrx.ext.process;
 
 const pipe = zrx.pipe;
 const map = zrx.map;
@@ -31,9 +32,9 @@ pub const Input = struct { reader: *std.Io.Reader };
 /// Where accepted, normalized records go.
 pub const Accepted = struct { writer: *std.Io.Writer };
 /// Where rejections are reported.
-pub const Diagnostics = zrx.Stderr;
+pub const Diagnostics = streams.Stderr;
 /// Where the summary goes.
-pub const Console = zrx.Stdout;
+pub const Console = streams.Stdout;
 
 /// A line that breaks a rule is still a record: a rejected one.
 fn rejected(reason: records.ValidationError, _: Line) Outcome {
@@ -53,10 +54,8 @@ const validated = orElse(compose(.{
     Outcome.accept,
 }), rejected);
 
-/// The caller decides the exit status from the totals.
-fn remember(result: *Summary, summary: Summary) void {
-    result.* = summary;
-}
+/// What the process exits with when a record was rejected and the run went on.
+pub const rejected_status = 1;
 
 const accepted_records = pipe(.{
     filter(Numbered.isAccepted),
@@ -66,6 +65,7 @@ const accepted_records = pipe(.{
 
 const rejections = pipe(.{
     filter(Numbered.isRejected),
+    tap(streams.status(rejected_status)),
     map(Numbered.rejection),
     print(Diagnostics, "{f}\n"),
 });
@@ -73,11 +73,11 @@ const rejections = pipe(.{
 const totals = pipe(.{
     map(Summary.of),
     fold(Summary{}, Summary.add),
-    tap(remember),
     print(Console, "{f}\n"),
 });
 
-/// Needs `records.Rules`, `Accepted`, `Diagnostics`, `Console` and a `*Summary`.
+/// Needs `records.Rules`, `Accepted`, `Diagnostics`, `Console` and the
+/// `*Exit` a rejected record leaves its status in.
 pub const records_pipe = pipe(.{
     map(validated),
     scan(Numbered{}, Numbered.advance),
@@ -91,19 +91,17 @@ pub const records_pipe = pipe(.{
 
 /// Where the summary and the diagnostics go unless a run says otherwise.
 const consoles = .{
-    zrx.stdout(256),
-    zrx.stderr(1024),
+    streams.stdout(Console, 256),
+    streams.stderr(Diagnostics, 1024),
 };
 
-/// Processes the lines of `Input`: a file in production, a fixed reader in tests.
+/// Processes the lines of `Input`: a file or standard input in production,
+/// by the binding it is run with, and a fixed reader in tests.
 pub const processing = zrx.program(zrx.lines(Input, records.max_line_bytes), records_pipe).provide(consoles);
 
-/// Processes the lines of standard input.
-pub const from_stdin = zrx.program(zrx.stdinLines(records.max_line_bytes), records_pipe).provide(consoles);
-
 /// Writes one text to standard output.
-pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement).provide(.{zrx.stdout(1024)})) {
-    return zrx.program(zrx.fromValue(text), announcement).provide(.{zrx.stdout(1024)});
+pub fn announce(text: []const u8) @TypeOf(zrx.program(zrx.fromValue(text), announcement).provide(.{streams.stdout(Console, 1024)})) {
+    return zrx.program(zrx.fromValue(text), announcement).provide(.{streams.stdout(Console, 1024)});
 }
 
 const announcement = pipe(.{print(Console, "{s}")});

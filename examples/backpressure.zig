@@ -9,59 +9,52 @@ const rescue = zrx.rescue;
 const range = zrx.range;
 const map = zrx.map;
 const tap = zrx.tap;
-const scan = zrx.scan;
 const fold = zrx.fold;
+const reduce = zrx.reduce;
 const batch = zrx.batch;
 const queue = zrx.queue;
 const branch = zrx.branch;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
 const print = zrx.print;
+const sum = zrx.ext.math.sum;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
+const Stdout = process.Stdout;
+const Stderr = process.Stderr;
 
 fn slowWrite(io: std.Io, _: u32) !void {
     try io.sleep(.fromMilliseconds(1), .awake);
-}
-fn add(sum: u64, value: u32) u64 {
-    return sum + value;
-}
-fn sumOf(values: zrx.Batch(u32, 10)) u64 {
-    var total: u64 = 0;
-    for (values.slice()) |value| total += value;
-    return total;
 }
 
 /// A slow sink behind a small buffer.
 const archive = pipe(.{
     queue(4),
     tap(slowWrite),
-    fold(0, add),
-    print(zrx.Stdout, "archived sum: {d}\n"),
+    fold(@as(u64, 0), sum),
+    print(Stdout, "archived sum: {d}\n"),
 });
 
 /// A fast aggregation that keeps running while the archive catches up.
 const report = pipe(.{
     queue(16),
     batch(10),
-    map(sumOf),
-    print(zrx.Stderr, "batch sum: {d}\n"),
+    map(reduce(@as(u64, 0), sum)),
+    print(Stderr, "batch sum: {d}\n"),
 });
 
-const Exit = struct { code: u8 = 0 };
-
-/// A run returns nothing: what ends it goes to a rescue, and here becomes
-/// the exit status.
-fn fail(exit: *Exit, _: anyerror) void {
-    exit.code = 1;
-}
-
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const app = program(range(u32, 1, 31), pipe(.{
         branch(.{
             archive,
             report,
         }),
-    })).provide(.{ stdout(64), stderr(128) });
-    app.run(.{ init.io, &exit, rescue(fail) });
+    })).provide(.{
+        stdout(Stdout, 64),
+        stderr(Stderr, 128),
+    });
+    // A run returns nothing: what ends it goes to a rescue, and here becomes
+    // the exit status.
+    app.run(.{ init.io, &exit, rescue(process.fail(.{ .prefix = null })) });
     return exit.code;
 }

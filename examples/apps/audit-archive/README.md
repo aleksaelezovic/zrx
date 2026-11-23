@@ -38,16 +38,17 @@ pub const archiving = program(lines(Input, records.max_line), archive);
 archiving.run(.{
     io,
     exit,
-    rescue(fatal).provide(.{stderr(256)}),
+    rescue(fatal).provide(.{stderr(Stderr, 256)}),
     fileReader(Input, input, records.max_line + 1),
     fileWriter(Archive, output, 16 * 1024, .{ .mode = .publish }),
 });
 ```
 
-- `decode` parses a line with `std.json` into the `Record` that is kept. It
-  owns its text (`zrx.Line(96)`), so it can cross the queue. `require` fails
-  the run on a resource identifier that `isSafe` refuses. Those two are the
-  functions of the app, in [`src/records.zig`](src/records.zig).
+- `decode` is `json.decode` into what a line must hold, and then the part of
+  it that is kept, a `Record`. It owns its text (`zrx.Line(96)`), so it can
+  cross the queue. `require` fails the run on a resource identifier that
+  `isSafe` refuses. That is the domain of the app, in
+  [`src/records.zig`](src/records.zig).
 - `batch(32)` then `queue(4)` is the boundary: reading and checking run on one
   task, writing on another. When the archive is slow the queue fills and the
   reader waits, having handed over `(4 + 2) * 32` records: the queued
@@ -59,8 +60,9 @@ archiving.run(.{
   exists is not replaced.
 - The program is one constant. `run` gives it the two files as bindings; a
   test gives it a reader and a writer of its own in their place.
-- A run returns nothing. What fails it goes to `rescue(fatal)`, which
-  writes the `fatal:` line and stores the exit status `main` returns. It
+- A run returns nothing. What fails it goes to `rescue(fatal)`, a
+  `process.fail`, which writes the `fatal:` line and stores the exit status
+  `main` returns. It
   is called once the run is over and both files are closed, with a stderr
   of its own.
 - `main.zig` checks the argument count and returns the status. A wrong
@@ -83,7 +85,8 @@ An unknown, duplicate or missing field fails the run, as does anything after
 the object. The archive holds `id`, `ts_ms`, `action` and `resource` in that
 order, one object per line, in input order.
 
-Parsing is `std.json` into a plain struct, which is looser than the table: it
+Parsing is `std.json`'s, through `json.decode` into a plain struct, which is
+looser than the table: it
 also takes a number written as a string (`"7"`) or with a zero fraction
 (`2.0`), an action by its position (`3` is `delete`), and text as an array of
 byte values (`[120,45,49]`). An empty `actor` is accepted. A unit test pins
@@ -96,9 +99,10 @@ these.
 archive published. The name is the Zig error: `InvalidArguments` (the
 arguments are not exactly `INPUT OUTPUT`), `FileNotFound`,
 `PathAlreadyExists`, `ReadFailed`, `WriteFailed`, `UnsafeResource`,
-`StreamTooLong` (a line over 1024 bytes or a resource over 96), or what
-`std.json` reports (`SyntaxError`, `UnknownField`, `DuplicateField`,
-`MissingField`, `InvalidEnumTag`, `Overflow`, `UnexpectedToken`). A
+`StreamTooLong` (a line over 1024 bytes), or what `std.json` reports
+(`SyntaxError`, `UnknownField`, `DuplicateField`, `MissingField`,
+`InvalidEnumTag`, `Overflow`, `UnexpectedToken`, and `LengthMismatch` for
+a resource over 96 bytes). A
 diagnostic never contains record content, and does not say which line failed.
 
 ## Checks
@@ -126,12 +130,26 @@ nothing was written, releases the writer and compares the whole archive.
 
 ## What this app needed from zrx
 
-One thing is worked around, with a handler:
+Nothing is worked around. An earlier version had one workaround, and it is
+gone: JSON could be written but not read, so `decode` called `std.json`
+itself with a scratch buffer of its own, into a struct of slices that could
+not leave the handler. `decode` is now `json.decode` into `Entry`, a value
+whose text is `Line(n)` fields, and then `allowed`, which keeps the part
+that is archived: two handlers composed, where there was one that did both.
 
-1. **JSON can be written but not read.** `zrx.ext.json` encodes only, and
-   `Line(n)` is written by `std.json` as a string but cannot be parsed from
-   one. `decode` therefore calls `std.json` itself, into a struct of slices
-   that borrow from the line, and copies `resource` with `Line(96).from`.
-   That struct cannot leave the handler, so parsing and building the record
-   are one handler instead of two stages, and it holds a scratch buffer for
-   unescaped text.
+One thing changed with it. A resource over 96 bytes is found by `std.json`
+while it fills the field, so it is reported as `LengthMismatch` and no
+longer as `StreamTooLong`. It is also found before a missing field:
+`std.json` checks a value where it reads it and looks for missing fields
+only once the object is closed, so a line with an oversized resource and
+no `actor` is `LengthMismatch`, where it was `MissingField`. A fault in a
+value is reported before a missing required field; this says nothing of
+other faults, such as an unknown field earlier in the object, which
+`std.json` reports where it reads it.
+
+One thing is heavier than it has to be. `actor` and `detail` must be there
+and are not kept, and a decoded type holds no slice, so `Entry` reads each
+into a `Line(1024)` that `allowed` then drops: up to a kibibyte copied per
+field for a check that it is a string. A type that reads a string and keeps
+nothing would do; zrx does not have one, as
+[its design record](../../../docs/spec-json.md) says.

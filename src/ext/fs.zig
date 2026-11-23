@@ -1,10 +1,20 @@
-//! Directories as sources, on top of `std.Io.Dir`.
+//! Files and directories, on top of `std.Io.Dir` and `std.Io.File`.
 //!
 //!     const sources = program(fs.walk("src", 512, 16), .{
 //!         filter(isZigFile),
 //!         map(field(.path)),
 //!         print(Stdout, "{f}\n"),
 //!     });
+//!
+//! A file is a binding or a source. `fileReader` and `fileWriter` bind a
+//! file as a role for the duration of a program, for `lines(Role, n)` to
+//! read and `print` or `write` to write, where a test binds a reader or a
+//! writer of its own. `fileLines` and `fileBytes` are sources that open the
+//! file at a path when they run. They borrow the path: its bytes must stay
+//! alive through the run. A `source_of` may pass on a slice its item holds,
+//! whose bytes live elsewhere, but not a slice of text the item holds
+//! inline, such as an entry's path: that handler is given a copy of the
+//! item, which is gone before the source runs.
 //!
 //! `entries` gives the entries of one directory and `walk` those under it,
 //! as deep as it was given room for. A directory is named by its path, as a
@@ -15,17 +25,228 @@
 //! directory's path too, so one may be made from an entry: `each(listing,
 //! ...)` lists the directories a walk found, each as an item of its own.
 //!
-//! Nothing here allocates: the longest path and the depth of a walk are
-//! written where the source is made, and what does not fit fails the run
-//! with an error of its own name.
+//! Nothing here allocates: a buffer, the longest path and the depth of a
+//! walk are written where the binding or the source is made, and what does
+//! not fit fails the run with an error of its own name.
 //!
-//! Nothing here is known to the core: both are sources like any other.
+//! Nothing here is known to the core: these are bindings and sources like
+//! any other.
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 const di = @import("../di.zig");
-const Line = @import("../io.zig").Line;
+const text_io = @import("../io.zig");
+const Line = text_io.Line;
 const Stop = @import("../completion.zig").Stop;
+
+// ---------------------------------------------------------------------------
+// Files as bindings
+// ---------------------------------------------------------------------------
+
+pub const FileMode = enum {
+    /// Create the file, or empty it if it exists.
+    replace,
+    /// Create the file; `error.PathAlreadyExists` if something is there.
+    create_new,
+    /// Write to a temporary file in the same directory, and give it its name
+    /// once everything this binding wraps has returned without an error and
+    /// the writer is flushed. A failure before publication leaves the
+    /// destination untouched. If the path already exists at publication,
+    /// the run fails with `error.PathAlreadyExists`. With several published
+    /// files, the last one acquired is named first. Any files already published
+    /// stay in place if a later publication fails.
+    publish,
+};
+
+pub const FileWriterOptions = struct {
+    mode: FileMode = .replace,
+};
+
+/// Creates a file and binds its writer as `Role` for the duration of a
+/// program.
+pub fn fileWriter(
+    comptime Role: type,
+    path: []const u8,
+    comptime buffer_size: usize,
+    options: FileWriterOptions,
+) FileWriter(Role, buffer_size) {
+    return .{ .path = path, .options = options };
+}
+
+fn FileWriter(comptime Role: type, comptime buffer_size: usize) type {
+    expectRole("fileWriter", Role, "writer", Io.Writer);
+    return struct {
+        path: []const u8,
+        options: FileWriterOptions,
+
+        pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
+
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            const io = di.get(env, Io);
+            var buffer: [buffer_size]u8 = undefined;
+            if (self.options.mode == .publish) {
+                var pending = try Dir.cwd().createFileAtomic(io, self.path, .{});
+                defer pending.deinit(io);
+                var writer = pending.file.writer(io, &buffer);
+                try next.call(roleOf(&writer.interface));
+                try writer.interface.flush();
+                return pending.link(io);
+            }
+            const file = try Dir.cwd().createFile(io, self.path, .{ .exclusive = self.options.mode == .create_new });
+            defer file.close(io);
+            var writer = file.writer(io, &buffer);
+            return next.call(roleOf(&writer.interface));
+        }
+
+        fn roleOf(writer: *Io.Writer) Role {
+            return if (Role == *Io.Writer) writer else .{ .writer = writer };
+        }
+    };
+}
+
+/// Opens the file at `path` and binds its reader as `Role` for the duration
+/// of a program, for `lines(Role, n)` to read. With `lines`, `buffer_size`
+/// must be at least the line limit plus one, for the newline.
+///
+/// A program over `lines(Role, n)` is the same value whether its reader is a
+/// file (this binding), standard input (`process.stdin`) or one a test
+/// supplies in its place. A failed read fails the run with
+/// `error.ReadFailed`, as with any reader given to `lines`.
+pub fn fileReader(comptime Role: type, path: []const u8, comptime buffer_size: usize) FileReader(Role, buffer_size) {
+    return .{ .path = path };
+}
+
+fn FileReader(comptime Role: type, comptime buffer_size: usize) type {
+    expectRole("fileReader", Role, "reader", Io.Reader);
+    return struct {
+        path: []const u8,
+
+        pub const zrx_resource = {};
+        pub const Provides = Role;
+        pub const needs: []const type = &.{Io};
+
+        pub fn bind(self: @This(), env: anytype, next: anytype) !void {
+            const io = di.get(env, Io);
+            const file = try Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [buffer_size]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            return next.call(if (Role == *Io.Reader) &reader.interface else Role{ .reader = &reader.interface });
+        }
+    };
+}
+
+/// A role is the type a file is keyed by: the interface itself, or a struct
+/// of the caller's with that one field.
+fn expectRole(comptime who: []const u8, comptime Role: type, comptime field: []const u8, comptime Interface: type) void {
+    const interface = "*std." ++ @typeName(Interface);
+    const one_field = "`" ++ field ++ ": " ++ interface ++ "` field";
+    if (Role == *Interface) return;
+    if (@typeInfo(Role) != .@"struct" or !@hasField(Role, field) or @FieldType(Role, field) != *Interface) @compileError(
+        who ++ ": `" ++ @typeName(Role) ++ "` is not a " ++ field ++ " role; use `" ++ interface ++ "` or a struct with a " ++ one_field,
+    );
+    if (@typeInfo(Role).@"struct".field_names.len != 1) @compileError(
+        who ++ ": use `" ++ interface ++ "` or a role with a single " ++ one_field,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Files as sources
+// ---------------------------------------------------------------------------
+
+/// The lines of the file at `path`, opened when the program runs and closed
+/// when it ends. A line may be at most `max_line_bytes` long, not counting
+/// its `\n`; a longer one fails the run with `error.StreamTooLong`. A failed
+/// read fails the run with the error the system reported. `path` is
+/// borrowed: its bytes must stay alive through the run, so it is not text
+/// held inline in the item of a `source_of`. Needs `std.Io`.
+pub fn fileLines(path: []const u8, comptime max_line_bytes: usize) FileLines(max_line_bytes) {
+    return .{ .path = path };
+}
+
+fn FileLines(comptime max_line_bytes: usize) type {
+    return struct {
+        path: []const u8,
+
+        pub const zrx_source = {};
+        pub const Item = Line(max_line_bytes);
+
+        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
+            comptime expectFileIo("fileLines", @TypeOf(env));
+            const io = di.get(env, Io);
+            const file = try Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            // Room for the longest line and the newline that ends it.
+            var buffer: [max_line_bytes + 1]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            // The lines of a reader are the core's: this source is `lines`
+            // over the reader it opened.
+            const of_reader = text_io.lines(*Io.Reader, max_line_bytes);
+            return of_reader.run(.{&reader.interface}, down) catch |err| readCause(&reader, err);
+        }
+    };
+}
+
+/// `std.Io.File.Reader` reports a failed read as `error.ReadFailed` and keeps
+/// what the system said. This gives a read that just failed on `reader` that
+/// cause. Use it where the read happens: further from it, a `ReadFailed` may
+/// be another reader's, which is why `fileReader` does not translate.
+fn readCause(reader: *const Io.File.Reader, err: anytype) (@TypeOf(err) || Io.File.Reader.Error) {
+    if (@as(anyerror, err) == error.ReadFailed) if (reader.err) |cause| return cause;
+    return err;
+}
+
+/// The bytes of the file at `path`, at most `max_bytes` at a time, opened
+/// when the source runs and closed when it ends. An item is a slice into
+/// the source's own buffer: it is valid until the push that carries it
+/// returns, so a stage that keeps bytes copies them. A failed read fails
+/// the run with the error the system reported. `path` is borrowed: its
+/// bytes must stay alive through the run, so it is not text held inline in
+/// the item of a `source_of`. Needs `std.Io`.
+pub fn fileBytes(path: []const u8, comptime max_bytes: usize) FileBytes(max_bytes) {
+    return .{ .path = path };
+}
+
+/// The type of `fileBytes(path, max_bytes)`, for a handler that returns one.
+pub fn FileBytes(comptime max_bytes: usize) type {
+    if (max_bytes == 0) @compileError("fileBytes: needs room for at least one byte at a time; pass a positive comptime size such as `fileBytes(path, 4096)`");
+    return struct {
+        path: []const u8,
+
+        pub const zrx_source = {};
+        pub const Item = []const u8;
+
+        pub fn run(self: *const @This(), env: anytype, down: anytype) !void {
+            comptime expectFileIo("fileBytes", @TypeOf(env));
+            const io = di.get(env, Io);
+            const file = try Dir.cwd().openFile(io, self.path, .{});
+            defer file.close(io);
+            var buffer: [max_bytes]u8 = undefined;
+            var reader = file.reader(io, &buffer);
+            while (true) {
+                const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
+                    error.EndOfStream => return,
+                    // The reader keeps what went wrong to itself.
+                    error.ReadFailed => return reader.err orelse err,
+                };
+                if (try down.push(bytes) == .done) return;
+                reader.interface.toss(bytes.len);
+            }
+        }
+    };
+}
+
+fn expectFileIo(comptime who: []const u8, comptime Env: type) void {
+    if (!di.has(Env, Io)) @compileError(
+        who ++ ": needs dependency `" ++ @typeName(Io) ++ "`, which is not provided here; provided: " ++ di.listTypes(di.types(Env)),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Directories as sources
+// ---------------------------------------------------------------------------
 
 /// What a directory holds under one name: the path to it, of at most
 /// `max_path_bytes`, and what kind of thing it is. A symbolic link is of

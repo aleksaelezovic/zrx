@@ -73,11 +73,11 @@ pub const analyzer = program(logs, .{
 analyzer.run(.{
     io,
     exit,
-    rescue(fatal).provide(.{stderr(256)}),
+    rescue(fatal).provide(.{stderr(Diagnostics, 256)}),
     fileReader(Left, args[0], max_line + 1),
     fileReader(Right, args[1], max_line + 1),
     fileWriter(Alerts, args[2], 4096, .{ .mode = .publish }),
-    stdout(512),
+    stdout(Report, 512),
 });
 ```
 
@@ -102,7 +102,7 @@ analyzer.run(.{
 
 [`src/events.zig`](src/events.zig) holds the record format and the counters;
 [`src/main.zig`](src/main.zig) returns the exit status. A run returns
-nothing: what fails it goes to `rescue(fatal)`, which writes the `fatal:`
+nothing: what fails it goes to `rescue(fatal)`, a `process.fail`, which writes the `fatal:`
 line and stores the status, once the files are closed.
 
 ## Format

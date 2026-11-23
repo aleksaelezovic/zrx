@@ -139,7 +139,7 @@ to this file; edit `AGENTS.md`, not copies.
   `resources.run` takes it out of the bindings, runs everything else, and
   hands it what that failed with after the last release. Its handler is
   given the plain values of the run and the bindings the rescue was given
-  for itself (`rescue(fatal).provide(.{ stderr(256) })`), which are
+  for itself (`rescue(fatal).provide(.{ stderr(Stderr, 256) })`), which are
   resolved by the same `run`, with the values as a resolved environment,
   only when it is called. So the planner knows nothing of it, where it
   is written decides nothing, and nothing of it is in the environment.
@@ -587,11 +587,23 @@ to this file; edit `AGENTS.md`, not copies.
   - Not there, and back only by decision: `groupBy` with a sub-pipe per
     key, room that grows, room on the heap.
 - **A directory is a source, named by its path.** `src/ext/fs.zig`
-  (`zrx.ext.fs`) holds two sources, `entries` and `walk`, written against
-  the source contract alone.
+  (`zrx.ext.fs`) holds two sources of a directory, `entries` and `walk`,
+  and what opens a file: the bindings `fileReader` and `fileWriter` and
+  the sources `fileLines` and `fileBytes`. It is written against the
+  source and resource contracts alone.
   [docs/spec-fs.md](docs/spec-fs.md) is its design record: the reasons and
   what was rejected. Read it before changing the extension. The rules it
   gives:
+  - The core opens nothing: `src/io.zig` is `print`, `write`, `lines` and
+    `Line`, over a reader or a writer somebody else made. What opens a
+    file is here and what opens a standard stream is in
+    `zrx.ext.process`. Do not put a file or a stream back into the core.
+  - `fileLines` is the core's `lines` over the reader it opens. Do not
+    give it a line reader of its own.
+  - `fileLines` and `fileBytes` borrow their path, so neither may be made
+    from text an item holds inline (an entry's path) in the `source_of` of
+    an `each`; a slice whose bytes live elsewhere is fine. That is open, and
+    recorded in the spec: do not fix it in passing.
   - The directory is given by path, as for `fileLines`, not by a role. A
     source holds a copy of its path, so one may be made from an entry
     inside the `source_of` of an `each`.
@@ -660,10 +672,10 @@ to this file; edit `AGENTS.md`, not copies.
   - A stream names its role first, as `fileReader` and `fileWriter` do:
     `stdin(Role, n)`, `stdout(Role, n)`, `stderr(Role, n)`. There is no
     form without a role beside it.
-  - `process.Stdout` and `process.Stderr` are the core's types, not a
-    second pair of roles. The core's `stdout(n)`, `stderr(n)` and
-    `stdinLines(n)` leave it in the change that moves the examples; until
-    then do not add to them and do not remove them in passing.
+  - The core has no standard streams: `Stdout`, `Stderr` and `Stdin` are
+    declared here, and the lines of standard input are `lines(Stdin, n)`
+    with a `stdin` binding. Do not put `stdout(n)` or `stdinLines(n)` back
+    as a shorter spelling.
   - Nothing allocates and the binding flushes nothing. A read that fails
     through `stdin` is `error.ReadFailed`, as through `fileReader`: do not
     put the system's error in its place there.
@@ -770,6 +782,11 @@ to this file; edit `AGENTS.md`, not copies.
   (and the guide's example) honest.
 - Examples are small, use function aliases at the top (`const map = zrx.map;`),
   and have their exact output asserted in `build.zig`.
+- Examples and apps are written with the extensions. A handler written
+  by hand for what an extension has (`add` beside `math.sum`, an `Exit`
+  and a `fatal` beside `process.Exit` and `process.fail`) is a second
+  spelling in the place a reader copies from. An extension is aliased at
+  the top like the core: `const sum = zrx.ext.math.sum;`.
 - In examples, apps and documentation, write a pipe with one operator per line
   (end the tuple with a trailing comma so `zig fmt` keeps it that way), and do
   the same for the sub-pipes of `branch` and the cases of `route`. A pipe with

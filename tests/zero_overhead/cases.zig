@@ -516,7 +516,7 @@ pub fn refused(comptime with_zrx: bool, err: anyerror, exit: *Exit, writer: *std
     if (with_zrx) {
         program(zrx.fromValue(err), .{forEach(process.fail(.{ .status = 2, .prefix = "fatal" }))}).run(.{
             exit,
-            zrx.Stderr{ .writer = writer },
+            zrx.ext.process.Stderr{ .writer = writer },
         });
     } else {
         exit.code = 2;

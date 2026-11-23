@@ -1,4 +1,4 @@
-//! Exclusive cases with `route`, fan-out with `branch`, and predicates built
+//! Exclusive cases with `route`, fan-out with `branch`, and handlers built
 //! from library combinators instead of hand-written functions.
 const std = @import("std");
 const zrx = @import("zrx");
@@ -16,8 +16,14 @@ const compose = zrx.compose;
 const field = zrx.field;
 const eq = zrx.eq;
 const ge = zrx.ge;
-const stdout = zrx.stdout;
 const print = zrx.print;
+const math = zrx.ext.math;
+const neg = math.neg;
+const sub = math.sub;
+const sum = math.sum;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const Stdout = process.Stdout;
 
 const Kind = enum { sale, refund };
 const Order = struct { id: u32, kind: Kind, cents: i64 };
@@ -25,15 +31,10 @@ const Order = struct { id: u32, kind: Kind, cents: i64 };
 const isRefund = compose(.{ field(.kind), eq(Kind.refund) });
 const isLarge = compose(.{ field(.cents), ge(10_000) });
 
-fn negated(order: Order) i64 {
-    return -order.cents;
-}
-fn withFee(order: Order) i64 {
-    return order.cents - 250;
-}
-fn add(sum: i64, cents: i64) i64 {
-    return sum + cents;
-}
+const cents = field(.cents);
+const negated = compose(.{ cents, neg });
+const withFee = compose(.{ cents, sub(250) });
+
 fn idAndCents(order: Order) struct { u32, i64 } {
     return .{ order.id, order.cents };
 }
@@ -44,28 +45,20 @@ const revenue = pipe(.{
     route(.{
         when(isRefund, .{map(negated)}),
         when(isLarge, .{map(withFee)}),
-        otherwise(.{map(field(.cents))}),
+        otherwise(.{map(cents)}),
     }),
-    fold(0, add),
-    print(zrx.Stdout, "revenue: {d}\n"),
+    fold(0, sum),
+    print(Stdout, "revenue: {d}\n"),
 });
 
 /// Every order as it arrives.
 const journal = pipe(.{
     map(idAndCents),
-    print(zrx.Stdout, "order {d}: {d}\n"),
+    print(Stdout, "order {d}: {d}\n"),
 });
 
-const Exit = struct { code: u8 = 0 };
-
-/// A run returns nothing: what ends it goes to a rescue, and here becomes
-/// the exit status.
-fn fail(exit: *Exit, _: anyerror) void {
-    exit.code = 1;
-}
-
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const orders = [_]Order{
         .{ .id = 1, .kind = .sale, .cents = 4_000 },
         .{ .id = 2, .kind = .sale, .cents = 25_000 },
@@ -76,7 +69,9 @@ pub fn main(init: std.process.Init) u8 {
             journal,
             revenue,
         }),
-    }).provide(.{stdout(256)});
-    app.run(.{ init.io, &exit, rescue(fail) });
+    }).provide(.{stdout(Stdout, 256)});
+    // A run returns nothing: what ends it goes to a rescue, and here becomes
+    // the exit status.
+    app.run(.{ init.io, &exit, rescue(process.fail(.{ .prefix = null })) });
     return exit.code;
 }

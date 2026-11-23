@@ -16,8 +16,10 @@ const forEach = zrx.forEach;
 const compose = zrx.compose;
 const field = zrx.field;
 const gt = zrx.gt;
-const stdout = zrx.stdout;
 const print = zrx.print;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const Stdout = process.Stdout;
 
 const Reading = struct { sensor: u8, celsius: i32 };
 const Alert = struct { sensor: u8, celsius: i32 };
@@ -60,16 +62,8 @@ fn describe(alert: Alert) struct { u8, i32 } {
 
 const isHot = compose(.{ field(.celsius), gt(80) });
 
-const Exit = struct { code: u8 = 0 };
-
-/// A run returns nothing: what ends it goes to a rescue, and here becomes
-/// the exit status.
-fn fail(exit: *Exit, _: anyerror) void {
-    exit.code = 1;
-}
-
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const readings = [_]Reading{
         .{ .sensor = 1, .celsius = 40 },
         .{ .sensor = 2, .celsius = 95 },
@@ -86,8 +80,10 @@ pub fn main(init: std.process.Init) u8 {
     })).provide(.{resource(dial, hangUp)});
     const notifier = program(fromProducer(Alert, receive), pipe(.{
         map(describe),
-        print(zrx.Stdout, "sensor {d} is at {d} C\n"),
-    })).provide(.{stdout(128)});
-    system(.{ monitor, notifier }).run(.{ init.io, &mailbox, &exit, rescue(fail) });
+        print(Stdout, "sensor {d} is at {d} C\n"),
+    })).provide(.{stdout(Stdout, 128)});
+    // A run returns nothing: what ends it goes to a rescue, and here becomes
+    // the exit status.
+    system(.{ monitor, notifier }).run(.{ init.io, &mailbox, &exit, rescue(process.fail(.{ .prefix = null })) });
     return exit.code;
 }

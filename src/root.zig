@@ -89,22 +89,10 @@ pub const ge = handlers.ge;
 
 // I/O
 const io = @import("io.zig");
-pub const Stdout = io.Stdout;
-pub const Stderr = io.Stderr;
-pub const stdout = io.stdout;
-pub const stderr = io.stderr;
-pub const fileWriter = io.fileWriter;
-pub const fileReader = io.fileReader;
-pub const FileMode = io.FileMode;
-pub const FileWriterOptions = io.FileWriterOptions;
 pub const print = io.print;
 pub const write = io.write;
 pub const Line = io.Line;
 pub const lines = io.lines;
-pub const stdinLines = io.stdinLines;
-pub const fileLines = io.fileLines;
-pub const fileBytes = io.fileBytes;
-pub const FileBytes = io.FileBytes;
 
 /// Modules built on the contracts below. Each is compiled only when used.
 pub const ext = struct {

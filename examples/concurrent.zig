@@ -9,39 +9,33 @@ const concurrent = zrx.concurrent;
 const map = zrx.map;
 const filter = zrx.filter;
 const fold = zrx.fold;
+const compose = zrx.compose;
+const eq = zrx.eq;
 const print = zrx.print;
-const stdout = zrx.stdout;
+const math = zrx.ext.math;
+const pow = math.pow;
+const mod = math.mod;
+const sum = math.sum;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const Stdout = process.Stdout;
 
-fn square(value: u32) u32 {
-    return value * value;
-}
-fn isEven(value: u32) bool {
-    return value % 2 == 0;
-}
-fn add(sum: u64, value: u32) u64 {
-    return sum + value;
-}
+const isEven = compose(.{ mod(2), eq(0) });
 
 const calculations = pipe(.{
-    map(square),
+    map(pow(2)),
     filter(isEven),
 });
 
-const Exit = struct { code: u8 = 0 };
-
-/// A run returns nothing: what ends it goes to a rescue, and here becomes
-/// the exit status.
-fn fail(exit: *Exit, _: anyerror) void {
-    exit.code = 1;
-}
-
 pub fn main(init: std.process.Init) u8 {
-    var exit: Exit = .{};
+    var exit: process.Exit = .{};
     const app = program(range(u32, 1, 11), .{
         concurrent(4, calculations),
-        fold(0, add),
-        print(zrx.Stdout, "sum of even squares: {d}\n"),
-    }).provide(.{stdout(128)});
-    app.run(.{ init.io, &exit, rescue(fail) });
+        fold(@as(u64, 0), sum),
+        print(Stdout, "sum of even squares: {d}\n"),
+    }).provide(.{stdout(Stdout, 128)});
+    // A run returns nothing: what ends it goes to a rescue, and here becomes
+    // the exit status.
+    app.run(.{ init.io, &exit, rescue(process.fail(.{ .prefix = null })) });
     return exit.code;
 }

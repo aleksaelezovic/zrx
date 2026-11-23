@@ -13,10 +13,11 @@ const program = zrx.program;
 const mergeTagged = zrx.mergeTagged;
 const fromValue = zrx.fromValue;
 const lines = zrx.lines;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
 const rescue = zrx.rescue;
 const forEach = zrx.forEach;
 const map = zrx.map;
@@ -40,9 +41,9 @@ pub const Right = struct { reader: *std.Io.Reader };
 /// Where the failures go.
 pub const Alerts = struct { writer: *std.Io.Writer };
 /// Where the summary goes.
-pub const Report = zrx.Stdout;
+pub const Report = process.Stdout;
 /// Where a failed run says why.
-pub const Diagnostics = zrx.Stderr;
+pub const Diagnostics = process.Stderr;
 
 const isFailure = compose(.{
     field(.level),
@@ -78,19 +79,15 @@ pub const analyzer = program(logs, .{
 });
 
 /// How the app ended, for `main` to return.
-pub const Exit = struct { code: u8 = 0 };
+pub const Exit = process.Exit;
 
 /// Whatever ends a run: one best-effort line on stderr, exit status 2.
-fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 2;
-    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
-    diagnostics.writer.flush() catch {};
-}
+const fatal = process.fail(.{ .status = 2, .prefix = "fatal" });
 
 /// The same line and status for what fails before there is a run, such as
 /// a wrong argument count: a program of one item, the failure.
 pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
-    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(Diagnostics, 256) });
 }
 
 /// Runs what `args` (without argv[0]) asks for: `LEFT RIGHT ALERTS`. The
@@ -101,11 +98,11 @@ pub fn execute(io: std.Io, args: []const []const u8, exit: *Exit) void {
     analyzer.run(.{
         io,
         exit,
-        rescue(fatal).provide(.{stderr(256)}),
+        rescue(fatal).provide(.{stderr(Diagnostics, 256)}),
         fileReader(Left, args[0], max_line + 1),
         fileReader(Right, args[1], max_line + 1),
         fileWriter(Alerts, args[2], 4096, .{ .mode = .publish }),
-        stdout(512),
+        stdout(Report, 512),
     });
 }
 

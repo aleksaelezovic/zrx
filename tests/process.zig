@@ -17,8 +17,8 @@ const forEach = zrx.forEach;
 const print = zrx.print;
 const recover = zrx.recover;
 const rescue = zrx.rescue;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
 const process = zrx.ext.process;
 
 const Stdin = process.Stdin;
@@ -307,13 +307,6 @@ test "the arguments of a process are a source as they are" {
 // The standard streams
 // ---------------------------------------------------------------------------
 
-test "the roles of the streams are the ones the core names" {
-    // Until `zrx.Stdout` and `zrx.Stderr` leave the core there are two
-    // names, and one type behind them.
-    try std.testing.expect(process.Stdout == zrx.Stdout);
-    try std.testing.expect(process.Stderr == zrx.Stderr);
-}
-
 /// An `Io` whose standard streams are memory: what is read from standard
 /// input is served from `input`, a few bytes at a time, and what is written
 /// to standard output and standard error is kept. Everything else is the
@@ -534,6 +527,29 @@ test "the line of a failed run reaches the standard error the rescue is given" {
     try std.testing.expectEqual(2, exit.code);
     try std.testing.expectEqualStrings("AB,", Streams.out.text());
     try std.testing.expectEqualStrings("fatal: StreamTooLong\n", Streams.err.text());
+}
+
+test "fail takes by name the many errors of a run that opens files" {
+    // A file brings dozens of errors, and `fail` takes each by its name:
+    // what is left for the run was once computed within the default branch
+    // quota, which this run is past.
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = Streams.over(std.testing.io, "");
+    try tmp.dir.writeFile(io, .{ .sub_path = "taken", .data = "" });
+    var path_bytes: [128]u8 = undefined;
+    const path = try tmpPath(&path_bytes, &tmp, "taken");
+
+    var exit: process.Exit = .{};
+    const copy = program(zrx.ext.fs.fileLines(path, 8), .{zrx.print(Output, "{f}\n")});
+    copy.run(.{
+        io,
+        &exit,
+        fileWriter(Output, path, 16, .{ .mode = .create_new }),
+        rescue(process.fail(.{})).provide(.{stderr(Stderr, 64)}),
+    });
+    try std.testing.expectEqual(1, exit.code);
+    try std.testing.expectEqualStrings("error: PathAlreadyExists\n", Streams.err.text());
 }
 
 // ---------------------------------------------------------------------------

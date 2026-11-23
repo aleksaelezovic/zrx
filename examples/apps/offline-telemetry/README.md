@@ -68,7 +68,7 @@ const north = feed.provide(.{
     Sensor.north,
     fileReader(Input, args[0], max_line + 1),
     fileWriter(Archive, args[2], 4096, .{ .mode = .publish }),
-    stdout(256),
+    stdout(Alerts, 256),
 });
 ```
 
@@ -92,7 +92,7 @@ const north = feed.provide(.{
   own archive file and its own writer to standard output, so there is no
   lock.
 - A run returns nothing. What ends the system goes to the `rescue(fatal)`
-  it is run with, `rescue(fatal).provide(.{stderr(256)})`: the `fatal:`
+  it is run with, `rescue(fatal).provide(.{stderr(Stderr, 256)})`: the `fatal:`
   line and the status `main` returns.
 
 ## Format and output

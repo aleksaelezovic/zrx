@@ -593,13 +593,13 @@ test "a published file holds the whole stream, and a failure of what the binding
     try support.run(three, .{
         io,
         compress.gzipWriter(Output, Archive, .{}),
-        zrx.fileWriter(Archive, path, 64, .{ .mode = .publish }),
+        zrx.ext.fs.fileWriter(Archive, path, 64, .{ .mode = .publish }),
     });
 
     var buffer: [64]u8 = undefined;
     try std.testing.expectEqualStrings("0,1,2,", try listing(&buffer, .{
         io,
-        zrx.fileReader(File, path, 16),
+        zrx.ext.fs.fileReader(File, path, 16),
         compress.gzipReader(Input, File, 9),
     }));
 
@@ -610,7 +610,7 @@ test "a published file holds the whole stream, and a failure of what the binding
     const result = support.run(failing, .{
         io,
         compress.gzipWriter(Output, Archive, .{}),
-        zrx.fileWriter(Archive, path, 64, .{ .mode = .publish }),
+        zrx.ext.fs.fileWriter(Archive, path, 64, .{ .mode = .publish }),
     });
     try std.testing.expectError(error.Two, result);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, path, .{}));

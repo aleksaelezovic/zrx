@@ -1,5 +1,6 @@
 //! The production composition with injected I/O, then the real executable.
 const std = @import("std");
+const builtin = @import("builtin");
 const app = @import("app");
 const zrx = @import("zrx");
 const options = @import("options");
@@ -7,7 +8,6 @@ const allocator = std.testing.allocator;
 const io = std.testing.io;
 
 const composition = app.composition;
-const Summary = app.summaries.Summary;
 
 // --- the composition, with readers and writers supplied by the test ---------
 
@@ -15,7 +15,7 @@ const Run = struct {
     accepted: []const u8,
     diagnostics: []const u8,
     console: []const u8,
-    summary: Summary,
+    exit: app.Exit,
 };
 
 /// Runs the production program over `input`; the returned slices live in `storage`.
@@ -24,20 +24,20 @@ fn process(storage: *[3][512]u8, input: []const u8, rules: app.records.Rules) !R
     var accepted: std.Io.Writer = .fixed(&storage[0]);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     try tryRun(composition.processing, .{
         rules,
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     return .{
         .accepted = accepted.buffered(),
         .diagnostics = diagnostics.buffered(),
         .console = console.buffered(),
-        .summary = summary,
+        .exit = exit,
     };
 }
 
@@ -47,7 +47,8 @@ test "accepted records, diagnostics and the summary each go to their own writer"
     try std.testing.expectEqualStrings("AB-1,Ada Lovelace,42\nC,Cat,0\n", run.accepted);
     try std.testing.expectEqualStrings("record 2: InvalidIdentifier\n", run.diagnostics);
     try std.testing.expectEqualStrings("summary: accepted=2 rejected=1 amount_cents=42\n", run.console);
-    try std.testing.expectEqual(Summary{ .accepted = 2, .rejected = 1, .amount_cents = 42 }, run.summary);
+    // The rejected record left its status; the run went on.
+    try std.testing.expectEqual(composition.rejected_status, run.exit.code);
 }
 
 test "rules are injected policy" {
@@ -72,19 +73,19 @@ test "exceeding the record limit is fatal and reports no summary" {
     var accepted: std.Io.Writer = .fixed(&storage[0]);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{ .max_records = 2 },
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.TooManyRecords, result);
     try std.testing.expectEqualStrings("A,Ada,1\nB,Bob,2\n", accepted.buffered());
     try std.testing.expectEqualStrings("", console.buffered());
-    try std.testing.expectEqual(Summary{}, summary);
+    try std.testing.expectEqual(0, exit.code);
 }
 
 test "a failed record write fails the run before any summary" {
@@ -94,14 +95,14 @@ test "a failed record write fails the run before any summary" {
     var accepted: std.Io.Writer = .fixed(&small);
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var console: std.Io.Writer = .fixed(&storage[2]);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.WriteFailed, result);
     try std.testing.expectEqualStrings("", console.buffered());
@@ -114,14 +115,14 @@ test "a failed summary write is an error even when every record was accepted" {
     var diagnostics: std.Io.Writer = .fixed(&storage[1]);
     var small: [4]u8 = undefined;
     var console: std.Io.Writer = .fixed(&small);
-    var summary: Summary = .{};
+    var exit: app.Exit = .{};
     const result = tryRun(composition.processing, .{
         app.records.Rules{},
         composition.Input{ .reader = &reader },
         composition.Accepted{ .writer = &accepted },
         composition.Diagnostics{ .writer = &diagnostics },
         composition.Console{ .writer = &console },
-        &summary,
+        &exit,
     });
     try std.testing.expectError(error.WriteFailed, result);
     // Earlier record effects are not undone.
@@ -145,8 +146,16 @@ fn waitAndSignal(child: *std.process.Child, done: *std.Io.Event) std.process.Chi
 /// stderr redirected to files, so nothing can block on a pipe. The whole wait
 /// is bounded; the child is killed and reaped on every failure path.
 fn simulate(dir: std.Io.Dir, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
+    return simulateFrom(dir, 0, args, expected_exit, stdout, stderr);
+}
+
+/// `simulate`, with stdin already moved to `start` bytes into the input, as
+/// a process that read the part before it would leave it.
+fn simulateFrom(dir: std.Io.Dir, start: u64, args: []const []const u8, expected_exit: u8, stdout: []const u8, stderr: []const u8) !void {
     const input = try dir.openFile(io, "input", .{});
     defer input.close(io);
+    var positioned = input.readerStreaming(io, &.{});
+    try positioned.seekTo(start);
     const out = try dir.createFile(io, "stdout", .{});
     defer out.close(io);
     const err = try dir.createFile(io, "stderr", .{});
@@ -239,6 +248,19 @@ test "executable reports every rejection in order and keeps going" {
         "record 8: MalformedFields\n" ++
         "record 9: InvalidAmount\n");
     try expectFile(temp.dir, "output", "A,Ada,7\nC,Cat,0\n");
+}
+
+test "an input named by its descriptor is read on from where it stands" {
+    // On macOS `/dev/fd/N` duplicates the descriptor and shares its
+    // position. Elsewhere it may open the file anew, at its start, whatever
+    // reads it (Linux), or depend on how `/dev/fd` is mounted (FreeBSD).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const first = "a,Ada,1\n";
+    try temp.dir.writeFile(io, .{ .sub_path = "input", .data = first ++ "b,Bob,2\n" });
+    try simulateFrom(temp.dir, first.len, &.{ "--input", "/dev/fd/0", "--output", "output" }, 0, "summary: accepted=1 rejected=0 amount_cents=2\n", "");
+    try expectFile(temp.dir, "output", "B,Bob,2\n");
 }
 
 test "executable rejects malformed-only input rather than failing" {

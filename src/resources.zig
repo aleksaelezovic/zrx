@@ -60,7 +60,7 @@ fn Resource(comptime acquire: anytype, comptime release: anytype) type {
 /// every resource the run acquired has been released, whichever of them
 /// failed and wherever the rescue is written among the bindings. Its
 /// handler is given the plain values of the run, and what the rescue is
-/// given for itself: `rescue(fatal).provide(.{ stderr(256) })`. Those are
+/// given for itself: `rescue(fatal).provide(.{ stderr(Stderr, 256) })`. Those are
 /// acquired for the call and released after it. A resource of the run is
 /// gone by then, and asking for one is a compile error.
 ///
@@ -179,7 +179,7 @@ fn expectNothing(comptime Returned: type) void {
 
 /// The bindings a rescue is given for itself.
 fn OwnBindings(comptime A: type, comptime B: type) type {
-    if (!di.isTuple(B)) @compileError("rescue.provide: expected a tuple of bindings such as `.{ stderr(256) }`");
+    if (!di.isTuple(B)) @compileError("rescue.provide: expected a tuple of bindings such as `.{ stderr(Stderr, 256) }`");
     for (di.types(B)) |Binding| if (isRescue(Binding)) @compileError(
         "rescue.provide: a rescue has no rescue of its own; what fails while it is called is left over, which `run` refuses",
     );

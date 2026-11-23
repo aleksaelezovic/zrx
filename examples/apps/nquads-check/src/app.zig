@@ -13,10 +13,11 @@ const pipe = zrx.pipe;
 const program = zrx.program;
 const fromValue = zrx.fromValue;
 const lines = zrx.lines;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
 const rescue = zrx.rescue;
 const scan = zrx.scan;
 const route = zrx.route;
@@ -39,9 +40,9 @@ pub const Input = struct { reader: *std.Io.Reader };
 /// Where the statements go.
 pub const Output = struct { writer: *std.Io.Writer };
 /// Where a line that is no statement is reported.
-pub const Diagnostics = zrx.Stderr;
+pub const Diagnostics = process.Stderr;
 /// Where the summary goes.
-pub const Console = zrx.Stdout;
+pub const Console = process.Stdout;
 
 /// A line with its place in the file, counted from 1.
 const Numbered = struct {
@@ -90,6 +91,7 @@ const too_long = pipe(.{
     map(field(.item)),
     map(field(.number)),
     tap(Summary.rejection),
+    tap(rejected),
     print(Diagnostics, std.fmt.comptimePrint("line {{d}}: longer than {d} bytes once tidied\n", .{max_line})),
 });
 
@@ -114,12 +116,14 @@ const too_deep = pipe(.{
     map(field(.item)),
     map(field(.number)),
     tap(Summary.rejection),
+    tap(rejected),
     print(Diagnostics, std.fmt.comptimePrint("line {{d}}: nested deeper than {d}\n", .{nquads.max_nesting})),
 });
 
 const rejections = pipe(.{
     map(field(.number)),
     tap(Summary.rejection),
+    tap(rejected),
     print(Diagnostics, "line {d}: not a statement\n"),
 });
 
@@ -135,31 +139,32 @@ pub const check = program(lines(Input, max_line), .{
 });
 
 /// How the app ended, for `main` to return.
-pub const Exit = struct { code: u8 = 0 };
+pub const Exit = process.Exit;
 
-/// A file with a line that is no statement: exit status 1.
-fn judge(exit: *Exit, summary: Summary) void {
-    if (summary.rejected != 0) exit.code = 1;
-}
+/// What the process exits with: 0 when every line was a statement or empty.
+pub const status = struct {
+    /// The file has a line that is no statement.
+    pub const rejected = 1;
+    /// Wrong usage, or the run failed: nothing was written.
+    pub const failed = 2;
+};
 
-/// What is said of a file once it has been read. Needs `Console` and an `*Exit`.
+/// A line that is reported leaves its status. Needs an `*Exit`.
+const rejected = process.status(status.rejected);
+
+/// What is said of a file once it has been read. Needs `Console`.
 pub const report = pipe(.{
-    tap(judge),
     map(json.encode(.{})),
     print(Console, "{f}\n"),
 });
 
 /// Whatever ends a run: one best-effort line on stderr, exit status 2.
-fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 2;
-    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
-    diagnostics.writer.flush() catch {};
-}
+const fatal = process.fail(.{ .status = status.failed, .prefix = "fatal" });
 
 /// The same line and status for what fails before there is a run, such as
 /// a wrong argument count: a program of one item, the failure.
 pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
-    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(Diagnostics, 256) });
 }
 
 /// Runs what `args` (without argv[0]) asks for: `INPUT OUTPUT`. The output
@@ -172,13 +177,13 @@ pub fn execute(io: std.Io, args: []const []const u8, exit: *Exit) void {
         io,
         exit,
         &summary,
-        rescue(fatal).provide(.{stderr(256)}),
+        rescue(fatal).provide(.{stderr(Diagnostics, 256)}),
         fileReader(Input, args[0], max_line + 1),
         fileWriter(Output, args[1], 4096, .{ .mode = .publish }),
-        stderr(256),
+        stderr(Diagnostics, 256),
     });
-    if (exit.code != 0) return;
-    program(fromValue(summary), report).run(.{ io, exit, rescue(fatal).provide(.{stderr(256)}), stdout(256) });
+    if (exit.code == status.failed) return;
+    program(fromValue(summary), report).run(.{ io, exit, rescue(fatal).provide(.{stderr(Diagnostics, 256)}), stdout(Console, 256) });
 }
 
 test {

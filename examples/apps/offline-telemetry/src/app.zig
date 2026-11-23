@@ -30,10 +30,12 @@ const le = zrx.le;
 const gt = zrx.gt;
 const ge = zrx.ge;
 const lines = zrx.lines;
-const fileReader = zrx.fileReader;
-const fileWriter = zrx.fileWriter;
-const stdout = zrx.stdout;
-const stderr = zrx.stderr;
+const fileReader = zrx.ext.fs.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
+const process = zrx.ext.process;
+const stdout = process.stdout;
+const stderr = process.stderr;
+const Stderr = process.Stderr;
 const rescue = zrx.rescue;
 const forEach = zrx.forEach;
 const fromValue = zrx.fromValue;
@@ -54,7 +56,7 @@ pub const Input = struct { reader: *Io.Reader };
 /// Where a feed's windows go.
 pub const Archive = struct { writer: *Io.Writer };
 /// Where a feed's alerts go.
-pub const Alerts = zrx.Stdout;
+pub const Alerts = process.Stdout;
 
 /// A line of a feed: when it was read, and thousandths of a degree Celsius.
 const reading_line = seq(.{
@@ -137,19 +139,15 @@ pub const readings = pipe(.{
 pub const feed = program(lines(Input, max_line), readings);
 
 /// How the app ended, for `main` to return.
-pub const Exit = struct { code: u8 = 0 };
+pub const Exit = process.Exit;
 
 /// Whatever ends a run: one best-effort line on stderr, exit status 2.
-fn fatal(diagnostics: zrx.Stderr, exit: *Exit, err: anyerror) void {
-    exit.code = 2;
-    diagnostics.writer.print("fatal: {s}\n", .{@errorName(err)}) catch return;
-    diagnostics.writer.flush() catch {};
-}
+const fatal = process.fail(.{ .status = 2, .prefix = "fatal" });
 
 /// The same line and status for what fails before there is a run, such as
 /// a wrong argument count: a program of one item, the failure.
 pub fn refuse(io: std.Io, exit: *Exit, err: anyerror) void {
-    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(256) });
+    program(fromValue(err), .{forEach(fatal)}).run(.{ io, exit, stderr(Stderr, 256) });
 }
 
 /// Replays `NORTH SOUTH NORTH_OUT SOUTH_OUT` (the arguments without argv[0]).
@@ -161,15 +159,15 @@ pub fn execute(io: Io, args: []const []const u8, exit: *Exit) void {
         Sensor.north,
         fileReader(Input, args[0], max_line + 1),
         fileWriter(Archive, args[2], 4096, .{ .mode = .publish }),
-        stdout(256),
+        stdout(Alerts, 256),
     });
     const south = feed.provide(.{
         Sensor.south,
         fileReader(Input, args[1], max_line + 1),
         fileWriter(Archive, args[3], 4096, .{ .mode = .publish }),
-        stdout(256),
+        stdout(Alerts, 256),
     });
-    system(.{ north, south }).run(.{ io, exit, rescue(fatal).provide(.{stderr(256)}) });
+    system(.{ north, south }).run(.{ io, exit, rescue(fatal).provide(.{stderr(Stderr, 256)}) });
 }
 
 test "a window keeps the first and last timestamps and the extremes of its readings" {

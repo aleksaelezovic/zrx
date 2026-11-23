@@ -15,15 +15,15 @@ const branch = zrx.branch;
 const print = zrx.print;
 const write = zrx.write;
 const lines = zrx.lines;
-const fileLines = zrx.fileLines;
-const fileBytes = zrx.fileBytes;
+const fileLines = zrx.ext.fs.fileLines;
+const fileBytes = zrx.ext.fs.fileBytes;
 const fold = zrx.fold;
 const each = zrx.each;
 const attempt = zrx.attempt;
 const concurrent = zrx.concurrent;
 const forEach = zrx.forEach;
-const fileWriter = zrx.fileWriter;
-const fileReader = zrx.fileReader;
+const fileWriter = zrx.ext.fs.fileWriter;
+const fileReader = zrx.ext.fs.fileReader;
 const fromProducer = zrx.fromProducer;
 const queue = zrx.queue;
 const recover = zrx.recover;
@@ -597,7 +597,7 @@ const Row = struct {
     failure: ?anyerror = null,
 };
 
-fn bytesOf(path: []const u8) zrx.FileBytes(read_bytes) {
+fn bytesOf(path: []const u8) zrx.ext.fs.FileBytes(read_bytes) {
     return fileBytes(path, read_bytes);
 }
 fn described(file: zrx.Tagged([]const u8, Hash)) Row {
