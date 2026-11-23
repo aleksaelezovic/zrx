@@ -8,10 +8,8 @@ name: Validation
 # A pull request that GitHub retargets to `main` (its base was merged and
 # deleted) runs nothing then; it is behind `main` by that merge, and `main`
 # takes it only once it is updated, which is a push and runs the checks.
-# A release tag runs this through `release.yml`.
 on:
   pull_request:
-  workflow_call:
   workflow_dispatch:
 
 permissions:

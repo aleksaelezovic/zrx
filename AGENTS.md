@@ -865,6 +865,8 @@ to this file; edit `AGENTS.md`, not copies.
   with no one to bypass it): a wrong release is followed by a new version,
   not mended under the same tag.
   `.github/workflows/release.yml` checks that the tag names the version,
-  validates the tagged commit, installs the published archive with the
-  smoke test and makes a draft release. The owner publishes it. Agents do
-  not push tags or publish releases.
+  installs the published archive with the smoke test and makes a draft
+  release. It does not validate again: `main` takes a commit only from a
+  pull request whose checks passed, with no one to bypass it. The owner
+  publishes the release. Agents push a tag only when the owner asks, and
+  do not publish releases.
