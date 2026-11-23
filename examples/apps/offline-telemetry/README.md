@@ -147,11 +147,11 @@ reader in a test.
 
 What is still worked around here:
 
-1. **A test cannot see an item reach `write` before the stream ends.**
-   `write` flushes once, at the end, so the test that watches a window being
-   archived while its feed is open brings its own unbuffered
-   `std.Io.Writer` that sets an event per row (`Rows` in
-   `tests/integration.zig`).
+1. **A test cannot wait for one row to reach `write`'s writer.** `write`
+   flushes when its buffer fills and at the end, so when a row gets there
+   depends on the buffer. The test that watches a window being archived
+   while its feed is open brings its own unbuffered `std.Io.Writer` that
+   sets an event per row (`Rows` in `tests/integration.zig`).
 
 What needed nothing: two programs that share no state (a `system` and a
 `provide` per program), alerts that leave as they are seen next to windows

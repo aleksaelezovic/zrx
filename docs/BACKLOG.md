@@ -67,18 +67,21 @@ item starts when the owner picks it up.
   `*Summary`. [N-Quads check](../examples/apps/nquads-check/README.md#what-this-app-needed-from-zrx)
 - **gap** `reduce` over an iterator. It folds an array, a slice or a batch;
   a query's pairs are an iterator, so `http-bench` loops in a handler.
-- **gap** A test cannot see an item reach `write` before the stream ends,
-  since `write` flushes once at the end; `offline-telemetry` brings a writer
-  of its own. [Offline telemetry](../examples/apps/offline-telemetry/README.md#what-this-app-needed-from-zrx)
+- **gap** A test cannot wait for one item to reach the writer of `write`:
+  it flushes when its buffer fills and at the end, so when an item gets
+  there depends on the buffer. `offline-telemetry` brings an unbuffered
+  writer that signals each row. [Offline telemetry](../examples/apps/offline-telemetry/README.md#what-this-app-needed-from-zrx)
 - **gap** A handler that names its failure, `Failed(E, Item)`, serves only
   one item type: a `Failed(anyerror, [:0]const u8)` does not coerce to one
   of `[]const u8`, so `file-integrity-manifest` takes it as `anytype`.
 - **out** A meaning for a predicate that finds a value in `filter`,
   `takeWhile`, `not` and `any`. Each rejects one with a compile error that
   says where the value could go. [Guide: route](guide.md#route)
-- **out** A source that pushes references (`*const T`), which would be good
-  only up to the next task boundary. A pipe over references the caller
-  holds needs nothing new (`same_line_reference`).
+- **out** A source of references into storage of its own, such as lines
+  pushed as `*const Line` from the source's buffer: the storage is reused
+  for the next item, so such a reference cannot cross a `queue`. A pointer
+  into storage that outlives the run needs nothing new, and crosses a
+  `queue` as any value does (`same_line_reference`).
 - **gap** Nothing checks the binding contract: that `bind` calls
   `rest.call` once. [Guide: writing your own](guide.md#writing-your-own)
 - **proposed** A channel between the programs of a system.
@@ -104,18 +107,21 @@ item starts when the owner picks it up.
 
 ## Concurrency
 
-- **wanted** Document how to hand chunks over a queue with the operators
-  there are: `batch(n)`, padded into a `[n]?T`, then `queue`, `flatten` and
-  a filter of what is there. It handles a short last chunk, and measured
-  about 5 ns an item where `queue(256)` alone takes about 40. A chunking
-  operator was the alternative, not chosen. A draft (a guide section, two
-  flow tests, a benchmark) was written and not merged.
+- **wanted** Document how to hand chunks over a queue:
+  `batch(n), queue(k), flatten()`, which keeps a short last batch, since a
+  `Batch` is a value. Measure it again first: the figure in the design
+  record (about 5 ns an item, where `queue(256)` alone takes about 35) is
+  from the slice-based `batch` that came before. A chunking operator was
+  the alternative, not chosen.
   [Segments: costs](spec-segments.md#costs)
-- **proposed** `concurrent` that keeps the order of its input. It emits in
-  the order the workers finish.
+- **proposed** `concurrent` that keeps the order of its input. A worker's
+  output is pushed on as the worker produces it, one push at a time, so
+  items from different workers come out in no particular order.
 - **proposed** Interrupting a segment that works for nothing: a source
-  behind a queue whose far side is done waits for its next item before it
-  ends. Taken out of the first version, to return as its own change.
+  that does not ask for `zrx.Stop`, behind a queue whose far side is done,
+  waits for its next item before it ends. A source that asks for `Stop`
+  and waits on it, as `ticks` does, returns already. Taken out of the first
+  version, to return as its own change.
   [Segments: taken out](spec-segments.md#taken-out-interrupting-a-segment-that-works-for-nothing)
 - **proposed** Demand for `zrx.Stop` is counted in the chain, where an
   extension's `tasks` are collected (`src/pipe.zig`). If that draws another
@@ -142,9 +148,10 @@ Small on purpose for now. [Guide: HTTP](guide.md#http) ·
 
 - **out** Timeouts for idle or slow peers.
 - **out** Graceful shutdown.
-- **out** More open connections than workers: no queue of ready
-  connections and no event loop. A worker holds a connection while it is
-  open, idle or not.
+- **out** More live conversations than workers. Connections beyond the
+  workers are accepted and wait, but a worker holds one connection for as
+  long as it is open, idle or not; serving several on one worker needs an
+  event loop.
 - **out** Response headers of the caller's own, and streamed bodies.
 - **out** Chunked request bodies, answered 411 until `std` decodes them
   with checks.
@@ -158,8 +165,8 @@ Small on purpose for now. [Guide: HTTP](guide.md#http) ·
   waiting for an accept and for `zrx.Stop` together. It would add tasks to
   every server; for now a limit goes before the boundary.
   [Guide: limits](guide.md#limits)
-- **proposed** A queue of ready connections, for backpressure, in place of
-  a worker per open connection. Not for now.
+- **proposed** Backpressure on connections that wait for a worker. Not for
+  now.
 - **proposed** `http.json` taking `std.json`'s options, or being made of
   `json.encode`.
 - **proposed** Measuring under `std.Io.Evented`, not only `Threaded`.
@@ -193,9 +200,10 @@ Small on purpose for now. [Guide: HTTP](guide.md#http) ·
   that spans several items (the pieces of `fileBytes`, one object over
   several lines). A text is whole before it is decoded.
 - **out** A `from` contract, or a type that is checked and dropped.
-- **gap** A field that is read and not kept. `audit-archive` reads two
-  required strings into `Line(1024)` fields it then drops: up to a
-  kibibyte copied per field to check that it is a string.
+- **gap** A field that is read and not kept. `audit-archive` reads
+  `actor`, which is required, and `detail`, which is optional, into
+  `Line(1024)` fields it then drops: up to a kibibyte copied per field to
+  check that it is text (a string, or an array of byte values).
   [Audit archive](../examples/apps/audit-archive/README.md#what-this-app-needed-from-zrx)
 - **out** A default for `.scratch`: what a text needs differs by target.
 - **proposed** One place for the rule "a `[]const u8`, or a value with
