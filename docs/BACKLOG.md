@@ -60,9 +60,11 @@ item starts when the owner picks it up.
 - **gap** A worker count for `concurrent` known only when the program
   starts. It is a compile-time count, so `http-bench` takes it as a build
   option. [HTTP benchmark](../examples/apps/http-bench/README.md#what-this-app-needed-from-zrx)
-- **gap** One total over the cases of a `route`. The cases end separately,
-  so one `fold` cannot count both; `nquads-check` counts through `tap` into
-  a `*Summary`. [N-Quads check](../examples/apps/nquads-check/README.md#what-this-app-needed-from-zrx)
+- **gap** One total over the cases of a `route` that terminate. Cases that
+  emit one item type rejoin the pipe, and one `fold` after the route counts
+  them all; cases that each end in a sink of their own cannot share one.
+  `nquads-check` has such cases and counts through `tap` into a
+  `*Summary`. [N-Quads check](../examples/apps/nquads-check/README.md#what-this-app-needed-from-zrx)
 - **gap** `reduce` over an iterator. It folds an array, a slice or a batch;
   a query's pairs are an iterator, so `http-bench` loops in a handler.
 - **gap** A test cannot see an item reach `write` before the stream ends,
