@@ -848,8 +848,9 @@ to this file; edit `AGENTS.md`, not copies.
 - `.paths` in `build.zig.zon` is what a dependent fetches: the library and
   what `build.zig` needs to be loaded. A file that `build.zig` imports or
   embeds goes in that list; the smoke test fails without it.
-- CI checks a pull request into `main`, natively on Linux, macOS and
-  Windows; formatting and the cross-target catalog run on Linux. A pull
+- CI checks a pull request into `main`: the library natively on Linux,
+  macOS and Windows, each app on Linux and Windows (GitHub's macOS runners
+  are few); formatting and the cross-target catalog on Linux. A pull
   request into any other branch runs no job, so a stack is merged into
   the branch of its bottom pull request and checked once, where it
   reaches `main`. `main` takes a branch only up to date, so nothing runs
