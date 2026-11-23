@@ -325,25 +325,5 @@ re-review: the name printed as it is.
 
 ## Not there
 
-Back only by decision:
-
-- an arguments source. `fromSlice(args[1..])` for the slice
-  `init.minimal.args.toSlice(arena)` returns, and `fromIterator(&iterator)`
-  for `init.minimal.args.iterate()`, are that already. `tests/process.zig`
-  pins the item type of both;
-- a typed parser of options, and a usage text. It is a design of its own
-  and can grow into a framework for command lines; one app writes a usage
-  text (`record-processor`) and one parses a port (`http-bench`);
-- choosing a program for the arguments. It is decided once, before any
-  run, and is a `switch` in `main`;
-- a binding chosen when it is acquired, so that "this file, or standard
-  input" is one `run`;
-- environment variables. `init.environ_map` is a value `main` has;
-- child processes;
-- signals. Ending a run on Ctrl-C waits for the source that can be stopped
-  from outside, proposed in
-  [the segments spec](spec-segments.md#stopping-from-outside);
-- a status that is an enum. `file-integrity-manifest` has
-  `Exit = enum(u8)` and a `fold` over it; with `process.Exit` that is
-  `forEach(status(1))` behind a `filter`, which is a decision for that
-  app.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#the-process).

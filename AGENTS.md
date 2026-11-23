@@ -23,6 +23,11 @@ to this file; edit `AGENTS.md`, not copies.
   operator, source and handler contracts, not special-cased in the core.
   `src/pipe.zig` (chain), `src/di.zig` (injection) and `src/program.zig` stay
   small and know nothing about individual operators.
+- [docs/BACKLOG.md](docs/BACKLOG.md) is the one list of what is not there,
+  what was left out on purpose and what awaits the owner's decision. Keep no
+  other list: a design record keeps the reasons and links to its lines. A
+  pull request that finds an item adds its line; the one that does it
+  removes it. Nothing on it is built in passing.
 - The feature set of the previous implementation is an upper bound, not a
   backlog. Signals, retry and the standalone apps were dropped in the
   rewrite and return only by explicit decision. HTTP has returned by such a
@@ -209,9 +214,9 @@ to this file; edit `AGENTS.md`, not copies.
     two times, and it says when the sum does not fit. `throttle` keeps
     when an item passed, not when its window ends. A time past the limit
     never comes: it is not an error and not a panic.
-  - Not there, and back only with stopping from outside or by decision:
-    `timeout`, `delay`, `sample`, a throttle that emits the last item.
-    The stage contract does not grow for them.
+  - What is not there is in [the backlog](docs/BACKLOG.md#time), back
+    only with stopping from outside or by decision. The stage contract
+    does not grow for it.
 - **Concurrent worker pipes are synchronous.** `concurrent(n, sub)` gives
   each worker its own pipe state and serializes pushes into the continuation.
   The boundary registers workers through `Tasks` and `tasks` in the existing
@@ -339,8 +344,7 @@ to this file; edit `AGENTS.md`, not copies.
     compile.
   - `decode` has no fixture and no claim of zero overhead: the parser is
     called, not inlined. Do not widen `tools/same_code.zig` for it.
-  - Not there, and back only by decision: a decoder that reads as the
-    text arrives, and a document that spans items.
+  - What is not there is in [the backlog](docs/BACKLOG.md#json).
 - **A text pattern is a handler, and it does not go back.**
   `src/ext/pattern.zig` (`zrx.ext.pattern`) is written against the handler
   contract alone and has no operator.
@@ -368,9 +372,7 @@ to this file; edit `AGENTS.md`, not copies.
   - A rule has no fixture and no claim of zero overhead. A second way to
     match is worth having only if it improves every `lean_pattern_*`
     fixture.
-  - Not there, and back only by decision: a format string read
-    backwards, going back, finding the places a pattern matches inside a
-    text, a node that only groups extracts.
+  - What is not there is in [the backlog](docs/BACKLOG.md#text-patterns).
 - **Math is handlers over `std.math`, and has no operator.**
   `src/ext/math.zig` (`zrx.ext.math`) is written against the handler
   contract alone. [docs/spec-math.md](docs/spec-math.md) is its design
@@ -396,9 +398,7 @@ to this file; edit `AGENTS.md`, not copies.
     items comes to. `min` and `max` have no value before the first item
     only in a state that is an optional, which is then a value: a reducer
     drops nothing and skips nothing.
-  - Not there, and back only by decision: forms that wrap or saturate, a
-    power that is not a whole number, conversion between integers and
-    floats, vectors, `fold(null, min)`.
+  - What is not there is in [the backlog](docs/BACKLOG.md#math).
 
 - **A text handler answers what the bytes allow.** `src/ext/text.zig`
   (`zrx.ext.text`) is handlers and one source over `std.mem` and
@@ -425,9 +425,9 @@ to this file; edit `AGENTS.md`, not copies.
   - Bytes only: ASCII classes and case, no Unicode.
   - Give the copies of a line as measurements of the fixtures, not as a
     rule (see "Zero overhead").
-  - Not there, and back only by decision: predicates. A text that is, or
-    starts with, some text is a pattern. `endsWith` is not one and is
-    left out with `contains`; do not add either in passing.
+  - No predicates here. A text that is, or starts with, some text is a
+    pattern. `endsWith` is not one and is left out with `contains`; do
+    not add either in passing. The rest is in [the backlog](docs/BACKLOG.md#text).
 - **Text sinks differ only in when they flush.** `print` flushes every
   item, `write` once at the end. `fileWriter`'s `.publish` mode names the
   file after the run has succeeded; it can fail, which a resource `release`
@@ -464,9 +464,7 @@ to this file; edit `AGENTS.md`, not copies.
     value. A text of another length is `error.InvalidLength`.
   - A fixture here brings no error names of its own into `cases.zig`:
     one did, and five fixtures of other operators stopped matching.
-  - Not there, and back only by decision: decoding to a length the text
-    chooses, Base64 of a stream of pieces, an operator that feeds a
-    hasher in place.
+  - What is not there is in [the backlog](docs/BACKLOG.md#bytes).
 - **HTTP is an extension, not core.** `src/ext/http.zig` (`zrx.ext.http`)
   is written against the public source, operator and handler contracts,
   and the core knows nothing of it (it still compiles freestanding).
@@ -584,8 +582,7 @@ to this file; edit `AGENTS.md`, not copies.
   - `tests/zero_overhead/cases.zig` names the errors of its fixtures in a
     `comptime` block so that both variants number them alike. A fixture
     that brings a new error adds it there.
-  - Not there, and back only by decision: `groupBy` with a sub-pipe per
-    key, room that grows, room on the heap.
+  - What is not there is in [the backlog](docs/BACKLOG.md#collections).
 - **A directory is a source, named by its path.** `src/ext/fs.zig`
   (`zrx.ext.fs`) holds two sources of a directory, `entries` and `walk`,
   and what opens a file: the bindings `fileReader` and `fileWriter` and
@@ -603,7 +600,7 @@ to this file; edit `AGENTS.md`, not copies.
   - `fileLines` and `fileBytes` borrow their path, so neither may be made
     from text an item holds inline (an entry's path) in the `source_of` of
     an `each`; a slice whose bytes live elsewhere is fine. That is open, and
-    recorded in the spec: do not fix it in passing.
+    on the backlog: do not fix it in passing.
   - The directory is given by path, as for `fileLines`, not by a role. A
     source holds a copy of its path, so one may be made from an entry
     inside the `source_of` of an `each`.
@@ -635,9 +632,7 @@ to this file; edit `AGENTS.md`, not copies.
   - Tests depend neither on the order of a listing nor on permissions:
     the test `Io` in `tests/fs.zig` stands in for what is not at hand.
   - No zero-overhead fixture and no claim of zero overhead.
-  - Not there, and back only by decision: watching, globbing, following
-    links, sorting, metadata beyond the kind, going on past an
-    unreadable directory within one walk.
+  - What is not there is in [the backlog](docs/BACKLOG.md#directories).
 - **Lifecycle.** Stages are constructed in place, process items with `push`,
   and handle normal input end with optional `finish`. `print` handles its
   writer's flush in those hooks. Program resource `release` cannot fail.
@@ -694,10 +689,7 @@ to this file; edit `AGENTS.md`, not copies.
     `std.process.exit` or `io.recancel()`.
   - A fixture in which an error's name is written takes the error as a
     parameter: errors are numbered per compilation.
-  - Not there, and back only by decision: an arguments source, a typed
-    parser of options, a usage text, choosing a program, a `refuse`, a
-    binding chosen at run time, environment variables, child processes,
-    signals.
+  - What is not there is in [the backlog](docs/BACKLOG.md#the-process).
 
 ## Zero overhead
 
@@ -794,7 +786,9 @@ to this file; edit `AGENTS.md`, not copies.
   multi-line pipes deeply. Tests may keep short pipes on one line.
 - `examples/apps/` holds independent projects that depend on zrx by path and
   have their own CI job; see `examples/apps/README.md`. A gap found while
-  writing an app is recorded in that app's README, not fixed in passing.
+  writing an app is not fixed in passing: it gets a line in
+  [docs/BACKLOG.md](docs/BACKLOG.md), and the app's README says how the app
+  works around it.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
   formatting and the cross-target catalog (the core must compile freestanding).
 - Tests that need concurrency use `std.testing.io` and must not depend on
@@ -838,3 +832,38 @@ to this file; edit `AGENTS.md`, not copies.
 - Concurrency is tested as invariants over shapes (`tests/flow.zig`): every
   shape of pipe is run with its ended side running out, being done and
   failing. A new shape goes there, not into a one-off test.
+
+## README, CI and releases
+
+- The README is for a reader deciding whether to try zrx: what it is,
+  install, the quickstart, the model, zero overhead in a paragraph,
+  platforms, the build commands. Keep each a few lines. Numbers that
+  change with the code (how many fixtures, what is `lean`) are in the
+  guide, and the README links there. The README's quickstart is
+  `examples/quickstart.zig` without its comments; change both together.
+- The install lines of the README are what
+  `.github/scripts/consumer-smoke.sh` runs: a new project, an empty package
+  cache, `zig fetch --save=zrx` and the two `build.zig` lines. Change the
+  two together.
+- `.paths` in `build.zig.zon` is what a dependent fetches: the library and
+  what `build.zig` needs to be loaded. A file that `build.zig` imports or
+  embeds goes in that list; the smoke test fails without it.
+- CI checks a pull request into `main`, natively on Linux, macOS and
+  Windows; formatting and the cross-target catalog run on Linux. A pull
+  request into any other branch runs no job, so a stack is merged into
+  the branch of its bottom pull request and checked once, where it
+  reaches `main`. `main` takes a branch only up to date, so nothing runs
+  again on a push to it. Branches are deleted when they are merged.
+- A release is a version tag on a commit of `main`. Its work goes into a
+  branch `release/vX.Y.Z`, whose pull request into `main` is where it is
+  checked; that branch also changes `.version` in `build.zig.zon` and the
+  tag in the README's install line. After it is merged the owner tags the
+  merge commit GitHub reports for that pull request, not a local `main`,
+  which can be stale and already declare the version, and pushes `vX.Y.Z`.
+  A version tag cannot be moved or deleted (a ruleset of the repository,
+  with no one to bypass it): a wrong release is followed by a new version,
+  not mended under the same tag.
+  `.github/workflows/release.yml` checks that the tag names the version,
+  validates the tagged commit, installs the published archive with the
+  smoke test and makes a draft release. The owner publishes it. Agents do
+  not push tags or publish releases.

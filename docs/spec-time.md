@@ -244,17 +244,5 @@ through the source's own `Io`, so the two are the same.
 
 ## Not there
 
-Back with stopping from outside, or by decision. The stage contract does
-not grow for them.
-
-- `timeout`. It has to end a run whose source is waiting for input, which
-  is stopping it from outside. That is
-  [proposed in the segments spec](spec-segments.md#stopping-from-outside)
-  and not there yet.
-- `delay`. It holds items until their time, so it needs a buffer and a
-  task: a boundary of its own.
-- `sample`. It emits while its input is silent, so it needs a task, as
-  `debounce` does.
-- A throttle that emits the last item of a window, for the same reason.
-- The time between two items. `map(time.stamp(.awake))` and a `scan` over
-  the pairs can say it; no test holds that sentence.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#time).

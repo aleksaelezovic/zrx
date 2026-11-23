@@ -335,9 +335,5 @@ above.
 
 ## Not there
 
-- xz, raw deflate, lzma, Zstandard compression, archives: see above.
-- The cause of a failed read.
-- Comparing the checksum of a Zstandard frame.
-- A dictionary for Zstandard: `std` refuses such a frame. A preset
-  dictionary for zlib: such a stream fails the read.
-- Reading on past zero padding after a gzip member.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#compression).

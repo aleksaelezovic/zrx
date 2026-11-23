@@ -222,17 +222,5 @@ fixture would still disturb the others. A handler that wraps a call into
 
 ## Not there
 
-Back only by decision:
-
-- a decoder that reads a document as it arrives;
-- a document that spans several items: the pieces of `fileBytes`, or one
-  object written over several lines;
-- a `from` contract, or a type that is checked and dropped (see above);
-- a default for `.scratch`;
-- a place for `isText` and `holdsText` that the pattern extension and this
-  one share. Each has a private copy of the rule "a `[]const u8`, or a
-  value with `text()`". Review found two items that passed the copy here
-  and failed inside the handler, a `volatile` byte slice and a `text`
-  that takes its receiver at compile time; it now refuses both, and an
-  `allowzero` slice, with the message for an item that is not text. The
-  copy in the pattern extension was not changed.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#json).
