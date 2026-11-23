@@ -866,6 +866,9 @@ to this file; edit `AGENTS.md`, not copies.
   tag in the README's install line. After it is merged the owner tags the
   merge commit GitHub reports for that pull request, not a local `main`,
   which can be stale and already declare the version, and pushes `vX.Y.Z`.
+  A version tag cannot be moved or deleted (a ruleset of the repository,
+  with no one to bypass it): a wrong release is followed by a new version,
+  not mended under the same tag.
   `.github/workflows/release.yml` checks that the tag names the version,
   validates the tagged commit, installs the published archive with the
   smoke test and makes a draft release. The owner publishes it. Agents do
