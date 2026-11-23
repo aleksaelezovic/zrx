@@ -863,8 +863,9 @@ to this file; edit `AGENTS.md`, not copies.
 - A release is a version tag on a commit of `main`. Its work goes into a
   branch `release/vX.Y.Z`, whose pull request into `main` is where it is
   checked; that branch also changes `.version` in `build.zig.zon` and the
-  tag in the README's install line. After it is merged the owner pushes
-  `vX.Y.Z`.
+  tag in the README's install line. After it is merged the owner tags the
+  merge commit GitHub reports for that pull request, not a local `main`,
+  which can be stale and already declare the version, and pushes `vX.Y.Z`.
   `.github/workflows/release.yml` checks that the tag names the version,
   validates the tagged commit, installs the published archive with the
   smoke test and makes a draft release. The owner publishes it. Agents do
