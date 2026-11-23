@@ -3,9 +3,10 @@ name: Release
 # A version tag on a commit of `main`: the tag must name the manifest's
 # version, the published source archive is installed in a new project as the
 # README says, and a draft release is made. The owner reviews the draft and
-# publishes it. The commit is not validated again: `main` takes a commit only
-# from a pull request whose checks passed on exactly that code, and nobody
-# can bypass that.
+# publishes it. The checks are not run again: the tagged commit must be the
+# merge of a pull request into `main` whose head passed every check `main`
+# requires, as GitHub recorded it. A commit `main` took before its rules
+# did has nothing to show, and is refused.
 on:
   push:
     tags: ['v*']
@@ -22,9 +23,13 @@ concurrency:
 
 jobs:
   version:
-    name: Tag names the manifest version
+    name: Tag names a checked commit and the manifest version
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -42,6 +47,11 @@ jobs:
 
       - name: Check that the tagged commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - name: Check that the tagged commit passed main's checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/checked-on-main.sh "$GITHUB_REPOSITORY" "$GITHUB_SHA"
 
   package:
     name: Install from the published archive
