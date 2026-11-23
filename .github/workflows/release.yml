@@ -130,9 +130,8 @@ jobs:
               echo "::error::release $GITHUB_REF_NAME is already published, and is left as it is"
               exit 1 ;;
           esac
-          # A tag moved while the draft was written leaves this hash stale:
-          # the draft is deleted, so that nothing stale can be published.
-          if ! .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"; then
-            gh release delete "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --yes
-            exit 1
-          fi
+          # The ruleset keeps the tag where it is; should it fail to, the
+          # run fails here and the draft is for the owner to look at. Nothing
+          # is deleted: a lookup can fail for want of a network, and the
+          # draft may have been published by then.
+          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
