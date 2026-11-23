@@ -5,8 +5,8 @@ name: Release
 # README says, and a draft release is made. The owner reviews the draft and
 # publishes it. The checks are not run again: the tagged commit must be the
 # merge of a pull request into `main`, with the files of its head, and when
-# it merged, the head's latest result of every check `main` requires must
-# have been a success: what GitHub asked to let it merge. A commit `main`
+# it merged, the head's latest result of every check `main` requires, from
+# a run a pull request started, must have been a success. A commit `main`
 # took before its rules did has nothing to show, and is refused.
 on:
   push:
@@ -31,6 +31,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: read
+      actions: read
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

@@ -869,7 +869,7 @@ to this file; edit `AGENTS.md`, not copies.
   release. It does not run the checks again: it requires the tagged commit
   to be the merge of a pull request into `main`, with the files of its
   head, and when it merged, the head's latest result of every check
-  `main` requires to have been a success (`checked-on-main.sh`), which is
-  what GitHub asked before it let it merge. The owner
+  `main` requires, from a run a pull request started and not skipped, to
+  have been a success (`checked-on-main.sh`). The owner
   publishes the release. Agents push a tag only when the owner asks, and
   do not publish releases.

@@ -4,16 +4,17 @@
 # the checks again; a commit `main` took before its rules did has nothing
 # to show.
 #
-# It asks what GitHub itself asked when it let the pull request merge: for
-# each check `main` requires, the latest result on the head commit, of those
-# finished by the time of the merge, is a success. A check run again after
-# the merge does not count. Which pull request started a run does not
-# matter, as it does not to GitHub: every such run checks the head merged
-# with a `main` that the head already contains, which is the head's files.
+# For each check `main` requires, the latest result on the head commit is a
+# success, of the results that checked a pull request and finished before
+# the merge. Not counted: a result after the merge; a job skipped, which a
+# pull request into another branch reports and which checked nothing; and a
+# run started by hand. Which pull request started a run does not matter:
+# every run that checks one into `main` checks the head merged with a `main`
+# the head already contains, which is the head's files.
 #
 #   checked-on-main.sh <owner/repo> <commit>
 #
-# Needs GH_TOKEN with read access to pull requests and checks.
+# Needs GH_TOKEN with read access to pull requests, checks and actions.
 set -euo pipefail
 
 repo=$1
@@ -43,9 +44,18 @@ if [ -z "$required" ]; then
     exit 1
 fi
 # Every attempt of every check GitHub Actions finished on the head before the
-# merge; for each name, the latest decides.
-passed=$(gh api --paginate "repos/$repo/commits/$head/check-runs?filter=all&per_page=100" \
-    -q ".check_runs[] | select(.app.slug == \"github-actions\" and .completed_at != null and .completed_at <= \"$merged\") | [.name, .completed_at, .conclusion] | @tsv" \
+# merge, but for skipped ones, with the check suite it belongs to.
+results=$(gh api --paginate "repos/$repo/commits/$head/check-runs?filter=all&per_page=100" \
+    -q ".check_runs[] | select(.app.slug == \"github-actions\" and .completed_at != null and .completed_at <= \"$merged\" and .conclusion != \"skipped\") | [.check_suite.id, .name, .completed_at, .conclusion] | @tsv")
+# The suites whose run a pull request started.
+from_pull_requests=$(cut -f 1 <<<"$results" | sort -u | while read -r suite; do
+    [ -n "$suite" ] || continue
+    event=$(gh api "repos/$repo/actions/runs?check_suite_id=$suite" -q '.workflow_runs[0].event // empty')
+    [ "$event" = pull_request ] && echo "$suite"
+done || true)
+# For each name, the latest of those decides.
+passed=$(awk -F '\t' 'NR == FNR { keep[$1] = 1; next } keep[$1] { print $2 "\t" $3 "\t" $4 }' \
+        <(printf '%s\n' "$from_pull_requests") <(printf '%s\n' "$results") \
     | sort -t $'\t' -k1,1 -k2,2 | awk -F '\t' '{ last[$1] = $3 } END { for (name in last) if (last[name] == "success") print name }')
 
 missing=$(comm -23 <(sort -u <<<"$required") <(sort -u <<<"$passed"))
