@@ -6,6 +6,23 @@ down to the loop you would have written by hand.
 **Experimental.** This is a ground-up rewrite; the API is small on purpose and
 may still change.
 
+## Install
+
+Requires exactly [Zig 0.17.0](https://ziglang.org/download/).
+
+```sh
+zig fetch --save=zrx https://github.com/aleksaelezovic/zrx/archive/refs/tags/v0.2.0.tar.gz
+```
+
+Then import it in `build.zig`:
+
+```zig
+const zrx = b.dependency("zrx", .{ .target = target, .optimize = optimize }).module("zrx");
+exe.root_module.addImport("zrx", zrx);
+```
+
+## Quickstart
+
 ```zig
 const std = @import("std");
 const zrx = @import("zrx");
@@ -52,11 +69,13 @@ pub fn main(init: std.process.Init) u8 {
 }
 ```
 
+It prints `total: 14`: each value doubled, those of at least 6 added up.
+
 ## The model
 
 | Concept | What it is |
 |---|---|
-| **handler** | A plain function. Its leading parameters are dependencies, found by type; its last parameter is the data. |
+| **handler** | A plain function. Its leading parameters are dependencies, found by type; the operator decides the data after them (an item for `map`, a state and an item for `fold`). |
 | **operator** | A stage built from a handler or a setting: `map(f)`, `filter(p)`, `take(3)`, `queue(16)`. |
 | **pipe** | Operators composed left to right. A pipe is itself an operator, so pipes nest. |
 | **program** | One source feeding one pipe that ends in a terminal operator. Nothing runs until `run(.{ deps })`. |
@@ -76,21 +95,26 @@ concurrency model, and how to write operators of your own. The
 Everything is resolved at compile time: every stage is a local variable of
 the run, dependencies are copied into the handlers that asked for them once,
 and a push is a chain of direct calls the optimizer flattens. `zig build
-zero-overhead` compiles each fixture in
-[`tests/zero_overhead`](tests/zero_overhead/cases.zig) twice, as a pipeline and
-as a hand-written loop, and compares the optimized LLVM IR function by
-function. The fixtures cover every synchronous operator. Twenty of the
-twenty-six consist of the same instructions (the same multiset, once value and
-block names are erased); the other six differ only in loop shape and are
-required to be free of calls and extra memory traffic. A separate test runs
-both variants of every fixture and requires equal results.
+zero-overhead` compiles each [fixture](tests/zero_overhead/cases.zig) twice, as
+a pipeline and as a hand-written loop, and compares the optimized LLVM IR.
+Every synchronous operator has one. Most compile to the same instructions; the
+rest may be shaped differently but have no calls and no extra memory traffic.
+The [guide](docs/guide.md#how-zero-overhead-is-checked) says exactly what is
+compared and what that does not show.
 
 `queue`, timed operators, and `concurrent` create task boundaries and carry
 real storage and synchronization costs.
 
-## Use
+## Platforms
 
-Requires exactly Zig **0.17.0** (see [`.zigversion`](.zigversion)).
+CI runs the tests natively on Linux, macOS and Windows; a few that need
+POSIX file system behavior are skipped on Windows. The core also
+compiles for targets without an operating system (`wasm32-freestanding`,
+`thumb-freestanding-eabi`).
+
+## Develop
+
+The repository pins Zig in [`.zigversion`](.zigversion).
 
 ```sh
 zig build test            # suites, compile-error contracts, examples, zero-overhead

@@ -147,9 +147,9 @@ value is reported before a missing required field; this says nothing of
 other faults, such as an unknown field earlier in the object, which
 `std.json` reports where it reads it.
 
-One thing is heavier than it has to be. `actor` and `detail` must be there
-and are not kept, and a decoded type holds no slice, so `Entry` reads each
-into a `Line(1024)` that `allowed` then drops: up to a kibibyte copied per
-field for a check that it is a string. A type that reads a string and keeps
+One thing is heavier than it has to be. `actor` must be there and
+`detail` may be, neither is kept, and a decoded type holds no slice, so
+`Entry` reads each into a `Line(1024)` that `allowed` then drops: up to a
+kibibyte copied per field for a check that it is text. A type that reads a string and keeps
 nothing would do; zrx does not have one, as
 [its design record](../../../docs/spec-json.md) says.

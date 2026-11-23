@@ -1,0 +1,3 @@
+# Text is checked out with LF on every system: `zig fmt --check` refuses
+# CRLF, which Git for Windows writes by default.
+* text=auto eol=lf

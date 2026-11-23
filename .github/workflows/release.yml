@@ -1,0 +1,137 @@
+name: Release
+
+# A version tag on a commit of `main`: the tag must name the manifest's
+# version, the tagged commit is validated, the published source archive is
+# installed in a new project as the README says, and a draft release is made.
+# The owner reviews the draft and publishes it.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# Version tags cannot be moved or deleted: a ruleset of the repository
+# refuses it. The checks of the tag below hold if that ruleset is ever
+# changed. A run for a tag replaces one still going for it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Tag names the manifest version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Compare the tag with build.zig.zon
+        run: |
+          version=$(sed -n 's/^    \.version = "\(.*\)",$/\1/p' build.zig.zon)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name the version in build.zig.zon ($version)"
+            exit 1
+          fi
+
+      - name: Check that the tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+  validation:
+    name: Validation
+    needs: version
+    uses: ./.github/workflows/validation.yml
+
+  package:
+    name: Install from the published archive
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      hash: ${{ steps.smoke.outputs.hash }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Zig
+        uses: ./.github/actions/setup-zig
+
+      # The archive is fetched by the commit that was validated, so that a
+      # tag moved meanwhile cannot put other source in its place. The URL a
+      # reader uses names the tag: it must give the same package, and the
+      # tag must still point at that commit.
+      - name: Build and run the quickstart against the tagged commit
+        id: smoke
+        run: |
+          archive="https://github.com/$GITHUB_REPOSITORY/archive"
+          hash=$(.github/scripts/consumer-smoke.sh "$archive/$GITHUB_SHA.tar.gz")
+          tag_hash=$(ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/tag-cache" zig fetch "$archive/refs/tags/$GITHUB_REF_NAME.tar.gz")
+          if [ "$tag_hash" != "$hash" ]; then
+            echo "::error::the tag's archive is $tag_hash, the commit's $hash"
+            exit 1
+          fi
+          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+  draft:
+    name: Draft the release
+    needs: [validation, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag still points at the commit that was checked
+        run: .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HASH: ${{ needs.package.outputs.hash }}
+        run: |
+          url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          cat > notes.md <<EOF
+          **Experimental.** The API is small on purpose and may still change between 0.x releases.
+
+          Requires exactly [Zig 0.17.0](https://ziglang.org/download/).
+
+          \`\`\`sh
+          zig fetch --save=zrx $url
+          \`\`\`
+
+          The package hash is \`$HASH\`. Wire it into \`build.zig\` as the
+          [README](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/README.md#install)
+          shows; the [guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/guide.md)
+          is the reference.
+          EOF
+          # A draft for the tag from an earlier run, of a tag since moved, is
+          # brought up to date. A published release is not touched.
+          state=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft -q 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)
+          case "$state" in
+            none)
+              gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --draft --verify-tag --title "zrx $GITHUB_REF_NAME" --notes-file notes.md ;;
+            draft)
+              gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --draft --title "zrx $GITHUB_REF_NAME" --notes-file notes.md ;;
+            *)
+              echo "::error::release $GITHUB_REF_NAME is already published, and is left as it is"
+              exit 1 ;;
+          esac
+          # The ruleset keeps the tag where it is; should it fail to, the
+          # run fails here and the draft is for the owner to look at. Nothing
+          # is deleted: a lookup can fail for want of a network, and the
+          # draft may have been published by then.
+          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"

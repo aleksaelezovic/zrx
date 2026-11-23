@@ -263,13 +263,5 @@ brings no error names of its own into that file.
 
 ## Not there
 
-Back only by decision:
-
-- decoding to as many bytes as the text stands for, as a bounded value;
-- Base64 of a stream of pieces as one text. Three bytes make four
-  characters, and a group may begin in one piece and end in the next, so
-  it needs a state that carries up to two bytes. Hexadecimal has no such
-  groups: `write(Role, "{x}")` over the pieces is the text of the whole;
-- an operator that feeds a hasher in place;
-- a `jsonStringify` on the value that holds an item;
-- ciphers, signatures, keys and constant-time comparison.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#bytes).

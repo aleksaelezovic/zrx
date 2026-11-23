@@ -1,18 +1,40 @@
 name: Validation
 
+# A pull request into `main` is checked here, merged with `main` as it is;
+# `main` requires the branch to be up to date before merging, so what lands
+# is what was checked and a push to `main` runs nothing again. A pull request
+# into another branch, such as one of a stack or one into a release branch,
+# runs no job: it is checked with the pull request that brings it to `main`.
+# A pull request that GitHub retargets to `main` (its base was merged and
+# deleted) runs nothing then; it is behind `main` by that merge, and `main`
+# takes it only once it is updated, which is a push and runs the checks.
+# A release tag runs this through `release.yml`.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  # A new push to a pull request replaces its run; any other run stands alone.
+  group: validation-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   validation:
-    name: Linux validation
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    name: "Library: ${{ matrix.os }}"
+    # See the top: only a pull request into `main` is checked. A branch
+    # filter on the event did not stop pull requests into other branches
+    # from running (seen on the stack for v0.2.0), so the jobs ask.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
     defaults:
       run:
         shell: bash
@@ -26,33 +48,39 @@ jobs:
         uses: ./.github/actions/setup-zig
         with:
           use-cache: 'true'
-          cache-key: library-validation-v2-baseline
+          cache-key: library-validation-v3
 
-      - name: Record library validation environment
+      - name: Record environment
         run: |
           uname -sm
-          nproc
-          grep MemTotal /proc/meminfo
-          lscpu
           zig env
 
-      # The build owns the suites, compile-error contracts, examples, the
-      # zero-overhead comparison and the cross-target catalog. Only native
-      # tests execute; cross builds do not run foreign binaries.
-      # Fix CPU selection across heterogeneous hosts; user build defaults stay native.
-      - name: Run full validation
-        run: zig build check -Dcpu=baseline --summary all
+      # The build owns the suites, compile-error contracts, examples and the
+      # zero-overhead comparison. CPU selection is fixed across hosts; user
+      # build defaults stay native.
+      - name: Run native tests
+        run: zig build test -Dcpu=baseline --summary all
 
       - name: Run ReleaseFast native tests
         run: zig build test -Doptimize=ReleaseFast -Dcpu=baseline --summary all
 
+      # Formatting and the cross-target catalog do not depend on the host.
+      # Cross builds do not run foreign binaries.
+      - name: Check formatting and cross compilation
+        if: runner.os == 'Linux'
+        run: zig build fmt cross -Dcpu=baseline --summary all
+
   apps:
-    name: "App: ${{ matrix.app }}"
-    runs-on: ubuntu-24.04
+    name: "App: ${{ matrix.app }} (${{ matrix.os }})"
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        # Not macOS: GitHub's hosted macOS runners are few, and jobs were dropped
+        # for want of one. The library's suites run there.
+        os: [ubuntu-24.04, windows-2025]
         app: [record-processor, audit-archive, file-integrity-manifest, multi-file-log-analyzer, offline-telemetry, nquads-check, http-bench]
     defaults:
       run:

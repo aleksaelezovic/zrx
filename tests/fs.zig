@@ -583,21 +583,27 @@ const long_levels = (room - 2) / (long_name + 1);
 /// The name of the file whose path is the longest the system opens.
 const last_name = room - long_levels * (long_name + 1) - 1;
 
+/// The shortest path the system does not open. Windows counts a path in
+/// units of UTF-16, of which it opens `PATH_MAX_WIDE`: a path of
+/// `max_path_bytes` there is three times as long, and the program that holds
+/// it overran the stack of a test.
+const too_long = if (builtin.os.tag == .windows) std.os.windows.PATH_MAX_WIDE + 1 else longest;
+
 test "a directory the system would not open by its path fails the run before it is asked to open" {
     // On Windows `std` converts the path to UTF-16 in a buffer it does not
     // check first; elsewhere it refuses the path itself, so what shows the
     // source asks first is that nothing was asked to open.
-    const path: [longest]u8 = @splat('a');
-    var seen: Seen(fs.Entry(longest)) = .{};
-    const noteLongest = Seen(fs.Entry(longest)).note;
+    const path: [too_long]u8 = @splat('a');
+    var seen: Seen(fs.Entry(too_long)) = .{};
+    const noteTooLong = Seen(fs.Entry(too_long)).note;
     const counting = Dirs.init(.{});
     try std.testing.expectError(
         error.NameTooLong,
-        support.run(program(fs.entries(&path, longest), .{forEach(noteLongest)}), .{ counting, &seen }),
+        support.run(program(fs.entries(&path, too_long), .{forEach(noteTooLong)}), .{ counting, &seen }),
     );
     try std.testing.expectError(
         error.NameTooLong,
-        support.run(program(fs.walk(&path, longest, max_depth), .{forEach(noteLongest)}), .{ counting, &seen }),
+        support.run(program(fs.walk(&path, too_long, max_depth), .{forEach(noteTooLong)}), .{ counting, &seen }),
     );
     try std.testing.expectEqual(0, Dirs.asked.load(.monotonic));
 }

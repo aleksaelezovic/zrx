@@ -376,7 +376,5 @@ These are proposals of the session that wrote the extension.
 
 ## Not there
 
-`countBy` and `groupBy`, for the reasons above. An order by several keys
-other than as a function of the caller's. `distinct` for adjacent items
-only, which needs no room and would belong in the core. Room that grows,
-room on the heap, sorting on disk. A text key that is not a value.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#collections).

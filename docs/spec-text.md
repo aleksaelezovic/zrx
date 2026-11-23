@@ -224,10 +224,5 @@ in `AGENTS.md`.
 
 ## Not there
 
-Back only by decision:
-
-- `endsWith` and `contains`, as above;
-- Unicode, in the classes or the case;
-- a delimiter chosen while the program runs;
-- `std.mem`'s other ways to split;
-- pieces of a line as values.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#text).
