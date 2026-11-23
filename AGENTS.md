@@ -867,7 +867,8 @@ to this file; edit `AGENTS.md`, not copies.
   `.github/workflows/release.yml` checks that the tag names the version,
   installs the published archive with the smoke test and makes a draft
   release. It does not run the checks again: it requires the tagged commit
-  to be the merge of a pull request into `main` whose head passed every
-  check `main` requires (`checked-on-main.sh`). The owner
+  to be the merge of a pull request into `main`, with the files of its
+  head, whose own last run of Validation passed every check `main`
+  requires (`checked-on-main.sh`). The owner
   publishes the release. Agents push a tag only when the owner asks, and
   do not publish releases.

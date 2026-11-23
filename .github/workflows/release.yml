@@ -4,9 +4,10 @@ name: Release
 # version, the published source archive is installed in a new project as the
 # README says, and a draft release is made. The owner reviews the draft and
 # publishes it. The checks are not run again: the tagged commit must be the
-# merge of a pull request into `main` whose head passed every check `main`
-# requires, as GitHub recorded it. A commit `main` took before its rules
-# did has nothing to show, and is refused.
+# merge of a pull request into `main`, with the files of its head, and that
+# pull request's last run of Validation must have passed every check `main`
+# requires. A commit `main` took before its rules did has nothing to show,
+# and is refused.
 on:
   push:
     tags: ['v*']
@@ -29,7 +30,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      checks: read
+      actions: read
     steps:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
