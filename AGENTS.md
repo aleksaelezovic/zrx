@@ -855,12 +855,16 @@ to this file; edit `AGENTS.md`, not copies.
   what `build.zig` needs to be loaded. A file that `build.zig` imports or
   embeds goes in that list; the smoke test fails without it.
 - CI checks a pull request into `main`, natively on Linux, macOS and
-  Windows; formatting and the cross-target catalog run on Linux. `main`
-  takes a branch only up to date, so nothing runs again on a push to it.
-  Branches are deleted when they are merged.
-- A release is a version tag on a commit of `main`. One pull request
-  changes `.version` in `build.zig.zon` and the tag in the README's
-  install line; after it is merged the owner pushes `vX.Y.Z`.
+  Windows; formatting and the cross-target catalog run on Linux. A pull
+  request into any other branch runs no job, so a stack is merged into
+  the branch of its bottom pull request and checked once, where it
+  reaches `main`. `main` takes a branch only up to date, so nothing runs
+  again on a push to it. Branches are deleted when they are merged.
+- A release is a version tag on a commit of `main`. Its work goes into a
+  branch `release/vX.Y.Z`, whose pull request into `main` is where it is
+  checked; that branch also changes `.version` in `build.zig.zon` and the
+  tag in the README's install line. After it is merged the owner pushes
+  `vX.Y.Z`.
   `.github/workflows/release.yml` checks that the tag names the version,
   validates the tagged commit, installs the published archive with the
   smoke test and makes a draft release. The owner publishes it. Agents do
