@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zrx = @import("zrx");
 const app = @import("app");
 const options = @import("options");
@@ -145,6 +146,9 @@ test "the executable exits 1 with a complete manifest when files failed" {
 }
 
 test "a named pipe gets a failure row instead of holding up the manifest" {
+    // Windows has no named pipe in a directory, and the `mkfifo` of Git for
+    // Windows makes one that only its own programs see.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
     var temp = std.testing.tmpDir(.{});
     defer temp.cleanup();
     try temp.dir.writeFile(io, .{ .sub_path = "abc", .data = "abc" });
