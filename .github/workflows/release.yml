@@ -55,11 +55,21 @@ jobs:
       - name: Set up pinned Zig
         uses: ./.github/actions/setup-zig
 
-      - name: Build and run the quickstart against the tag
+      # The archive is fetched by the commit that was validated, so that a
+      # tag moved meanwhile cannot put other source in its place. The URL a
+      # reader uses names the tag: it must give the same package, and the
+      # tag must still point at that commit.
+      - name: Build and run the quickstart against the tagged commit
         id: smoke
         run: |
-          url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
-          hash=$(.github/scripts/consumer-smoke.sh "$url")
+          archive="https://github.com/$GITHUB_REPOSITORY/archive"
+          hash=$(.github/scripts/consumer-smoke.sh "$archive/$GITHUB_SHA.tar.gz")
+          tag_hash=$(ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/tag-cache" zig fetch "$archive/refs/tags/$GITHUB_REF_NAME.tar.gz")
+          if [ "$tag_hash" != "$hash" ]; then
+            echo "::error::the tag's archive is $tag_hash, the commit's $hash"
+            exit 1
+          fi
+          .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
           echo "hash=$hash" >> "$GITHUB_OUTPUT"
 
   draft:
@@ -70,6 +80,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the tag still points at the commit that was checked
+        run: .github/scripts/tag-points-at.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" "$GITHUB_SHA"
+
       - name: Create a draft release
         env:
           GH_TOKEN: ${{ github.token }}
