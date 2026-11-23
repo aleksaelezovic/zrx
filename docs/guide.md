@@ -1015,15 +1015,9 @@ are in [the time spec](spec-time.md).
 
 ### Not here
 
-`timeout`, `delay` and `sample` are not here. A timeout has to end a run
-whose source is waiting, which is stopping it from outside: that is proposed
-in [the segments spec](spec-segments.md#stopping-from-outside) and not
-there yet. `delay` holds items until their time and `sample` emits while
-its input is silent, so each is a task boundary of its own, and the stage
-contract is not to grow for them. A throttle that emits the last item of a
-window instead of the first is `debounce`'s kind of operator for the same
-reason. The time between two items needs nothing new: `map(time.stamp(.awake))`
-and a `scan` over the pairs.
+`timeout`, `delay` and `sample` are not here; [the backlog](BACKLOG.md#time)
+says why. The time between two items needs nothing new:
+`map(time.stamp(.awake))` and a `scan` over the pairs.
 
 ## Input and output
 
@@ -1230,10 +1224,8 @@ longest text.
 item and is not inlined, so `decode` is not among the handlers the
 [zero-overhead check](#how-zero-overhead-is-checked) compares.
 
-Not there: a decoder that reads a document piece by piece as it arrives, a
-document that spans several items (the pieces of `fileBytes`, or one
-object written over several lines), and any format but JSON. A text is
-whole before it is decoded.
+A text is whole before it is decoded. What is not there is in
+[the backlog](BACKLOG.md#json).
 
 ## Compressed input and output
 
@@ -1523,10 +1515,8 @@ sources copy it. Do not make one of them from `entry.path.text()` in a
 `source_of`: that handler is given a copy of the entry, which is gone when
 it returns. Open the file in a handler instead.
 
-Not there: watching a directory for changes, matching names against a glob
-(a `filter` whose handler looks at `entry.name()` does it), following
-links, sorting, and anything about an entry beyond its kind, such as its
-size or its times.
+Matching names against a glob is a `filter` whose handler looks at
+`entry.name()`. What is not there is in [the backlog](BACKLOG.md#directories).
 
 ## Text patterns
 
@@ -2058,10 +2048,8 @@ hand; see [How zero overhead is checked](#how-zero-overhead-is-checked).
 `abs` is `lean`: the same instructions, with a note about the range of its
 result that the loop does not carry.
 
-Not there: forms that wrap or saturate, a power that is not a whole
-number, conversion between integers and floats, and vectors. A handler of
-your own over `std.math` is a few lines; these return when something needs
-them.
+What is not there is in [the backlog](BACKLOG.md#math); a handler of your
+own over `std.math` is a few lines.
 
 ## Text
 
@@ -2215,10 +2203,8 @@ not compile, and finding the places a pattern matches inside a text is not
 there. Until one of the two is decided, that test is a handler of your own
 over `std.mem.endsWith`. [The design record](spec-text.md) has the reasons.
 
-Also not here: Unicode, in the classes or the case; a delimiter chosen while
-the program runs (write a `source_of` of your own for it); and the other
-forms `std.mem` has, such as splitting at any of several bytes while keeping
-the empty pieces, or from the end.
+A delimiter chosen while the program runs is a `source_of` of your own.
+What else is not here is in [the backlog](BACKLOG.md#text).
 
 ## Bytes
 
@@ -2381,13 +2367,8 @@ const expected = pipe(.{
 
 An array item whose length can never be `n` bytes does not compile.
 
-Not there: decoding a text into as many bytes as it happens to stand for.
-That result has no length known when the program is compiled, so it would
-be a slice into a buffer somebody has to own. Encoding the pieces of a
-stream as one Base64 text is not there either: three bytes make four
-characters, and a group may begin in one piece and end in the next.
-(Hexadecimal has no such groups: `write(Role, "{x}")` over the pieces of a
-file is the hexadecimal text of the file.)
+`write(Role, "{x}")` over the pieces of a file is the hexadecimal text of
+the file. What is not there is in [the backlog](BACKLOG.md#bytes).
 
 ## HTTP
 
@@ -2857,14 +2838,11 @@ among the [fixtures](#how-zero-overhead-is-checked)).
   the slice `init.minimal.args.toSlice(arena)` returns, or
   `fromIterator(&iterator)` for `init.minimal.args.iterate()`. Which
   program to run for them is decided once, before any run, and is a
-  `switch` in `main`. A typed parser of options and a usage text are a
-  design of their own, and are not here.
+  `switch` in `main`.
 - Environment variables. `init.environ_map` is a value `main` has: pass
   what a handler needs of it to `run`.
-- Child processes.
-- Signals. Ending a run on Ctrl-C needs a source that can be stopped from
-  outside, which is [proposed](spec-segments.md#stopping-from-outside) and
-  not there.
+
+The rest is in [the backlog](BACKLOG.md#the-process).
 
 ## Collections
 
@@ -3216,25 +3194,5 @@ Two things make it work, and are worth knowing when writing an operator:
 
 ## Not here yet
 
-Stopping a source from outside, so that a signal or a timeout ends a run
-gracefully, is proposed in [the segments spec](spec-segments.md).
-
-A resource acquired for one item (opened before the item's sub-pipe and
-released after it) is not here. `each` covers the case where the item
-becomes a stream.
-
-Finding every place a text pattern matches within a text is not there; a
-pattern describes the whole of it.
-
-HTTP is deliberately small for now. Not there: timeouts for idle or slow
-peers, graceful shutdown, more connections than workers (no queue of ready
-connections, no event loop), response headers of your own, streamed bodies,
-chunked request bodies (answered 411 until `std` decodes them with checks;
-see [Answers](#answers)), configurable buffer sizes, TLS and HTTP/2. Parsing is `std.http.Server`'s; zrx has no parser of its own.
-
-Present in the previous implementation and not ported: signals
-(`hold`, `withLatestFrom`), `retryPipe`, `maxItems`, and one of
-the three standalone example applications. The
-[record processor](../examples/apps/record-processor/README.md) and the
-[HTTP benchmark](../examples/apps/http-bench/README.md) are ported, and
-their READMEs list what the ports needed that the library does not have yet.
+What zrx does not do yet, what was left out on purpose, and what is still
+to be decided are in [the backlog](BACKLOG.md).

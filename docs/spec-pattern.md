@@ -207,10 +207,5 @@ the same memory. It is now compared as a byte.
 
 ## Not there
 
-Back only by decision:
-
-- a format string read backwards. `"/items/{id}"` would be a string
-  language of our own;
-- going back;
-- finding the places a pattern matches inside a text;
-- a node that only groups the extracts of a part into a struct.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#text-patterns).

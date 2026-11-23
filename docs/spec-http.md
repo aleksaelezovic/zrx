@@ -2,8 +2,8 @@
 
 Status: implemented as `zrx.ext.http` (`src/ext/http.zig`), in a first
 version that is one worker per open connection, with no timeouts and no
-graceful shutdown. The guide's "Not here yet" lists what was left out on
-purpose.
+graceful shutdown. [The backlog](BACKLOG.md#http) lists what was left out
+on purpose.
 
 This file is the design record of the extension: why it is the way it is,
 and what review found on the way. The [guide](guide.md#http) says what it

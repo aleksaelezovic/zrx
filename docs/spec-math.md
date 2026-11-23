@@ -354,12 +354,5 @@ extension:
 
 ## Not there
 
-Back only by decision:
-
-- forms that wrap or saturate (`+%`, `+|`);
-- a power that is not a whole number, and roots;
-- conversion between integers and floats, such as a `Stats(f64)` over
-  integer items without a `map` before it;
-- vectors as items;
-- `fold(null, min)`, see [The seed](#the-seed);
-- a compile error for `fold(0, min)`.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#math).

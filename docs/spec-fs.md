@@ -310,11 +310,5 @@ given a copy of it.
 
 ## Not there
 
-Back only by decision:
-
-- watching a directory for changes;
-- matching names against a glob;
-- following links;
-- sorting;
-- metadata beyond the kind, such as size and times;
-- going on past an unreadable directory within one walk.
+What is not there, and comes back only by decision, is in
+[the backlog](BACKLOG.md#directories).
