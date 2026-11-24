@@ -71,13 +71,13 @@ pub fn main(init: std.process.Init) u8 {
     program(fromSlice(&values), total)
         .provide(.{stdout(Stdout, 64)}) // a default; it could as well be given to `run`
         .run(.{
-        init.io,
-        Scale{ .by = 2 },
-        &exit,
-        // A run returns nothing: what ends it goes to a rescue, and here
-        // becomes the exit status.
-        rescue(process.fail(.{ .prefix = null })),
-    });
+            init.io,
+            Scale{ .by = 2 },
+            &exit,
+            // A run returns nothing: what ends it goes to a rescue, and here
+            // becomes the exit status.
+            rescue(process.fail(.{ .prefix = null })),
+        });
     return exit.code;
 }
 ```
