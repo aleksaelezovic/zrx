@@ -6,7 +6,7 @@ that may be disclosed as an ordered JSONL archive. Built with zrx and Zig
 backpressure: a slow archive holds the reader back through `batch` and `queue`.
 
 ```sh
-cd examples/apps/audit-archive
+cd examples/audit-archive
 zig build
 printf '%s\n' '{"id":1,"ts_ms":2,"action":"read","resource":"node-7","actor":"alice","detail":"private"}' > export.jsonl
 ./zig-out/bin/audit-archive export.jsonl archive.jsonl
@@ -152,4 +152,4 @@ One thing is heavier than it has to be. `actor` must be there and
 `Entry` reads each into a `Line(1024)` that `allowed` then drops: up to a
 kibibyte copied per field for a check that it is text. A type that reads a string and keeps
 nothing would do; zrx does not have one, as
-[its design record](../../../docs/spec-json.md) says.
+[its design record](../../docs/spec-json.md) says.

@@ -6,7 +6,7 @@ with zrx and Zig **0.17.0**; it is the example for merging sources. No
 third-party dependencies.
 
 ```sh
-cd examples/apps/multi-file-log-analyzer
+cd examples/multi-file-log-analyzer
 zig build
 printf '1\terror\tapi\t7\n3\twarn\tapi\t11\n' > left.tsv
 printf '2\tinfo\tdb\t17\n4\terror\tdb\t19\n' > right.tsv
@@ -83,7 +83,7 @@ analyzer.run(.{
 
 - `mergeTagged` runs each log as a task and marks every line with the log it
   came from.
-- A line is taken apart by a [text pattern](../../../docs/guide.md#text-patterns).
+- A line is taken apart by a [text pattern](../../docs/guide.md#text-patterns).
   `record` says what a line looks like and what is kept of it: two numbers,
   the level as a `Level` (its `from` knows the words of the format, and
   that `error` is `.failure`) and the service as a `Line(32)`. A service
