@@ -54,7 +54,7 @@ This is a check of syntax written as patterns, not a conforming parser.
 ## The grammar is the pattern
 
 `src/nquads.zig` is the grammar of N-Quads written as
-[text patterns](../../../docs/guide.md#text-patterns), rule by rule:
+[text patterns](../../docs/guide.md#text-patterns), rule by rule:
 
 ```zig
 /// `<http://example.org/s>`: a scheme, a colon, and the rest.
@@ -137,7 +137,7 @@ pub const check = program(lines(Input, max_line), .{
 
 RDF 1.2 lets the object of a statement be a triple term, `<<( s p o )>>`,
 whose own object may be another one. A
-[rule that holds itself](../../../docs/guide.md#a-rule-that-holds-itself)
+[rule that holds itself](../../docs/guide.md#a-rule-that-holds-itself)
 is a function of `self`, the rule one level further in:
 
 ```zig
@@ -168,7 +168,7 @@ fn tripleTerm(comptime self: type) type {
 - **It has a size.** A `Quad` with four levels is 3216 bytes. An item goes
   from stage to stage as a value, so a pipe may copy it. How often this
   one does was not measured; the
-  [guide](../../../docs/guide.md#lines-and-values) has the pipes that
+  [guide](../../docs/guide.md#lines-and-values) has the pipes that
   were. The
   ReleaseFast binary is 434 KiB, the second pattern included.
 

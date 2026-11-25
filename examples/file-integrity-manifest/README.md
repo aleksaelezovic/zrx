@@ -6,7 +6,7 @@ row of its own, so the rest are still checked. Built with zrx and Zig
 **0.17.0**, no third-party dependencies.
 
 ```sh
-cd examples/apps/file-integrity-manifest
+cd examples/file-integrity-manifest
 zig build
 printf abc > example.txt
 ./zig-out/bin/file-integrity-manifest manifest.jsonl example.txt missing.txt

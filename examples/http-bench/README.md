@@ -2,12 +2,12 @@
 
 Two HTTP/1.1 servers with the same endpoints, built with Zig **0.17.0** to
 be measured against each other. `http-bench` is a zrx system on
-[`zrx.ext.http`](../../../docs/guide.md#http). `http-bench-zig` is the same
+[`zrx.ext.http`](../../docs/guide.md#http). `http-bench-zig` is the same
 server written against `std` alone: the baseline. No third-party
 dependencies.
 
 ```sh
-cd examples/apps/http-bench
+cd examples/http-bench
 zig build -Doptimize=ReleaseFast
 ./zig-out/bin/http-bench serve 8080
 # In a separate terminal:
@@ -102,7 +102,7 @@ keeps a connection:
   zrx keeps it.
 - zrx refuses a head a proxy could read differently (no `Host`, a field
   name that is not a token, and the rest of
-  [the guide's list](../../../docs/guide.md#failures)) with 400 before the
+  [the guide's list](../../docs/guide.md#failures)) with 400 before the
   pipe sees it. The baseline serves what `std` parsed.
 - Neither reads a chunked body. zrx answers every `Transfer-Encoding` with
   411, and the baseline was made to do the same so that both serve the same

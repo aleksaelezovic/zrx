@@ -16,7 +16,7 @@ export ZIG_GLOBAL_CACHE_DIR="$work/cache"
 mkdir -p "$work/consumer/src"
 cd "$work/consumer"
 cp "$repo/.zigversion" .
-cp "$repo/examples/quickstart.zig" src/main.zig
+cp "$repo/examples/quickstart/main.zig" src/main.zig
 
 cat > build.zig.zon <<'EOF'
 .{

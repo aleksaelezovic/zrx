@@ -1817,7 +1817,7 @@ const nested_term = recursive(term, .{ .depth = 3 });
   time has been measured on one kind of text only, where eight levels took
   what three did. That is a measurement, not a promise for every rule.
 
-The [N-Quads check](../examples/apps/nquads-check/README.md) reads the
+The [N-Quads check](../examples/nquads-check/README.md) reads the
 triple terms of RDF 1.2 this way.
 
 ### How a pattern matches
@@ -2675,7 +2675,7 @@ program(fromValue(connection), .{http.serve(api)}).run(.{rescue(note)});
   `error.Canceled`, also from a read that was waiting for a request. Open
   conversations are cut off, not completed.
 
-The [HTTP benchmark app](../examples/apps/http-bench/README.md) compares this
+The [HTTP benchmark app](../examples/http-bench/README.md) compares this
 with a server written against `std` alone and records what was measured.
 
 ## The process

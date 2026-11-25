@@ -7,7 +7,7 @@ archived as one JSON row. It is the example for `system`, `route` and
 `batchWithin`.
 
 ```sh
-cd examples/apps/offline-telemetry
+cd examples/offline-telemetry
 zig build
 printf '1,3500\n2,8200\n3,4000\n' > north.csv
 printf '3,4900\n4,-5\n' > south.csv
@@ -75,7 +75,7 @@ const north = feed.provide(.{
 - The predicates are combinators. `needsAlert` is
   `compose(.{ field(.temp_mc), any(.{ lt(0), gt(8000) }) })`, and
   `isPlausible` is the same with `all(.{ ge(-100_000), le(150_000) })`.
-- A line is taken apart by a [text pattern](../../../docs/guide.md#text-patterns),
+- A line is taken apart by a [text pattern](../../docs/guide.md#text-patterns),
   not by a function: `reading_line` says what a line looks like, and
   `Reading` is the struct read off it. A line it does not describe, or a
   number that does not fit its type, is `error.InvalidReading`.
