@@ -5,7 +5,7 @@ A finite import CLI built with zrx and Zig **0.17.0**: validate and normalize
 report the rejected ones, and print a summary. No third-party dependencies.
 
 ```sh
-cd examples/apps/record-processor
+cd examples/record-processor
 zig build
 printf ' ab-1 , Ada  Lovelace , 00042\nbad!,Bob,9\n' > input.txt
 ./zig-out/bin/record-processor --input input.txt --output normalized.txt
@@ -151,7 +151,7 @@ What is still plain Zig here:
    `branch` with a `filter` per destination.
 3. **Taking a line apart.** `validation.parseFields` splits a line into its
    columns by hand, where the other line-based apps use a
-   [text pattern](../../../docs/guide.md#text-patterns). A pattern answers
+   [text pattern](../../docs/guide.md#text-patterns). A pattern answers
    yes or no for a line. This app reports *which* rule a line broke first
    (`MalformedFields`, `InvalidIdentifier`, `InvalidName`, `InvalidAmount`),
    and a column that is too long is one of those reasons, not "no record".

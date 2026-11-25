@@ -1,8 +1,23 @@
-# Standalone example applications
+# Examples
 
-Small, realistic applications live here as independent Zig projects. The
-[examples one level up](..) stay focused API demonstrations built by the
-library's root build.
+## Root-built examples
+
+Run all examples in this section from the repository root with
+`zig build example`. To run one, use its named step, such as
+`zig build example-quickstart`.
+
+[Quickstart](quickstart/main.zig) ·
+[Concurrent](concurrent/main.zig) ·
+[Dependencies](dependencies/main.zig) ·
+[Errors](errors/main.zig) ·
+[Routing](routing/main.zig) ·
+[Backpressure](backpressure/main.zig) ·
+[System](system/main.zig) ·
+[Copy lines](copy_lines/main.zig)
+
+## Standalone applications
+
+Each application builds as an independent Zig project.
 
 | App | Purpose |
 |---|---|
@@ -14,13 +29,13 @@ library's root build.
 | [N-Quads check](nquads-check/README.md) | The grammar of N-Quads as text patterns: statements written the one way, the other lines reported by number (`zrx.ext.pattern`, `route`, `scan`) |
 | [HTTP benchmark](http-bench/README.md) | A zrx HTTP server and the same server on `std` alone, measured against each other (`zrx.ext.http`) |
 
-## Project boundary
+### Project boundary
 
 Each app owns its `build.zig`, `build.zig.zon`, `.zigversion`, `README.md`,
 source and tests, and builds from its own directory:
 
-- Pin the same exact Zig version as [zrx](../../.zigversion).
-- Depend on zrx by the local path `../../..` through `b.dependency("zrx", ...)`
+- Pin the same exact Zig version as [zrx](../.zigversion).
+- Depend on zrx by the local path `../..` through `b.dependency("zrx", ...)`
   and import its `zrx` module. Do not import library source files by path.
 - App dependencies stay in the app's manifest; depending on zrx must not pull
   them in.
@@ -29,7 +44,7 @@ source and tests, and builds from its own directory:
   record it in the app's README rather than changing the library in passing.
 - Keep `main` lean. Tests import the app's own composition and domain modules.
 
-## Checks
+### Checks
 
 Every app supports, from its own directory:
 
@@ -46,4 +61,4 @@ Executable runs use temporary directories, bounded waits and no network, and
 clean up their child on failure. `check` adds formatting.
 
 The root build does not build these apps. Each has its own job in
-[CI](../../.github/workflows/validation.yml).
+[CI](../.github/workflows/validation.yml).

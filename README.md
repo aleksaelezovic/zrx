@@ -100,8 +100,8 @@ one, a pipe that never ends, a failure nobody takes.
 
 Read the **[guide](docs/guide.md)** for every operator, the error and
 concurrency model, and how to write operators of your own. The
-[examples](examples) are small and each is run and checked by the build;
-[examples/apps](examples/apps/README.md) holds complete applications.
+[examples](examples/README.md) include small API demonstrations checked by
+the root build and complete applications with independent builds.
 
 ## Zero overhead, checked
 

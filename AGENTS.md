@@ -784,9 +784,10 @@ to this file; edit `AGENTS.md`, not copies.
   the same for the sub-pipes of `branch` and the cases of `route`. A pipe with
   a single operator stays on one line. Name sub-pipes rather than nesting
   multi-line pipes deeply. Tests may keep short pipes on one line.
-- `examples/apps/` holds independent projects that depend on zrx by path and
-  have their own CI job; see `examples/apps/README.md`. A gap found while
-  writing an app is not fixed in passing: it gets a line in
+- Each runnable example lives in `examples/<name>/`. Small examples use
+  `main.zig` and are built by the root build. Standalone projects depend on
+  zrx by path and have their own CI job. See [the examples index](examples/README.md).
+  A gap found while writing an app is not fixed in passing: it gets a line in
   [docs/BACKLOG.md](docs/BACKLOG.md), and the app's README says how the app
   works around it.
 - `zig build test` must pass in Debug and ReleaseFast; `zig build check` adds
@@ -840,7 +841,7 @@ to this file; edit `AGENTS.md`, not copies.
   platforms, the build commands. Keep each a few lines. Numbers that
   change with the code (how many fixtures, what is `lean`) are in the
   guide, and the README links there. The README's quickstart is
-  `examples/quickstart.zig` without its comments; change both together.
+  `examples/quickstart/main.zig` without its comments; change both together.
 - The install lines of the README are what
   `.github/scripts/consumer-smoke.sh` runs: a new project, an empty package
   cache, `zig fetch --save=zrx` and the two `build.zig` lines. Change the

@@ -219,7 +219,7 @@ fn exampleExecutable(
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Step.Compile {
     return b.addExecutable(.{ .name = name, .root_module = b.createModule(.{
-        .root_source_file = b.path("examples/" ++ name ++ ".zig"),
+        .root_source_file = b.path("examples/" ++ name ++ "/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{.{ .name = "zrx", .module = zrx }},

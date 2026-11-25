@@ -38,7 +38,7 @@ item starts when the owner picks it up.
 - **decide** Whether `fileReader` reads on from where its descriptor
   stands. It reads from the start of the file, so a descriptor already
   partly read (`/dev/fd/0`) is read again from its start.
-  [Record processor](../examples/apps/record-processor/README.md#what-this-port-needed-from-zrx)
+  [Record processor](../examples/record-processor/README.md#what-this-port-needed-from-zrx)
 - **decide** Whether `fileLines` and `fileBytes` hold a copy of their path,
   as `entries` and `walk` do. They borrow it, so neither may be made from a
   path held inside an item in the `source_of` of an `each`. A copy needs a
@@ -59,18 +59,18 @@ item starts when the owner picks it up.
   item and was closed; it is not the design.
 - **gap** A worker count for `concurrent` known only when the program
   starts. It is a compile-time count, so `http-bench` takes it as a build
-  option. [HTTP benchmark](../examples/apps/http-bench/README.md#what-this-app-needed-from-zrx)
+  option. [HTTP benchmark](../examples/http-bench/README.md#what-this-app-needed-from-zrx)
 - **gap** One total over the cases of a `route` that terminate. Cases that
   emit one item type rejoin the pipe, and one `fold` after the route counts
   them all; cases that each end in a sink of their own cannot share one.
   `nquads-check` has such cases and counts through `tap` into a
-  `*Summary`. [N-Quads check](../examples/apps/nquads-check/README.md#what-this-app-needed-from-zrx)
+  `*Summary`. [N-Quads check](../examples/nquads-check/README.md#what-this-app-needed-from-zrx)
 - **gap** `reduce` over an iterator. It folds an array, a slice or a batch;
   a query's pairs are an iterator, so `http-bench` loops in a handler.
 - **gap** A test cannot wait for one item to reach the writer of `write`:
   it flushes when its buffer fills and at the end, so when an item gets
   there depends on the buffer. `offline-telemetry` brings an unbuffered
-  writer that signals each row. [Offline telemetry](../examples/apps/offline-telemetry/README.md#what-this-app-needed-from-zrx)
+  writer that signals each row. [Offline telemetry](../examples/offline-telemetry/README.md#what-this-app-needed-from-zrx)
 - **gap** A handler that names its failure, `Failed(E, Item)`, serves only
   one item type: a `Failed(anyerror, [:0]const u8)` does not coerce to one
   of `[]const u8`, so `file-integrity-manifest` takes it as `anytype`.
@@ -85,7 +85,7 @@ item starts when the owner picks it up.
 - **gap** Nothing checks the binding contract: that `bind` calls
   `rest.call` once. [Guide: writing your own](guide.md#writing-your-own)
 - **proposed** A channel between the programs of a system.
-  `examples/system.zig` writes a bounded `Mailbox` by hand.
+  `examples/system/main.zig` writes a bounded `Mailbox` by hand.
 - **proposed** `pairwise`, and `concat` of sources.
 - **proposed** `.publish` finding an existing destination before the run
   does its work, not only when it publishes.
@@ -97,7 +97,7 @@ item starts when the owner picks it up.
   - A visualizer could label route cases and error paths, then highlight
     the path through a selected case. In `nquads-check`, selecting the
     statement case would show its nested route to cleaned output or a
-    length diagnostic. [N-Quads check](../examples/apps/nquads-check/README.md#the-pipe)
+    length diagnostic. [N-Quads check](../examples/nquads-check/README.md#the-pipe)
   - A compile-time check could carry facts between stages. A
     `filter(ge(10))` establishes that every emitted integer is at least
     10. If a later handler needs that bound after a route rejoins, every
@@ -212,7 +212,7 @@ Small on purpose for now. [Guide: HTTP](guide.md#http) ·
   `actor`, which is required, and `detail`, which is optional, into
   `Line(1024)` fields it then drops: up to a kibibyte copied per field to
   check that it is text (a string, or an array of byte values).
-  [Audit archive](../examples/apps/audit-archive/README.md#what-this-app-needed-from-zrx)
+  [Audit archive](../examples/audit-archive/README.md#what-this-app-needed-from-zrx)
 - **out** A default for `.scratch`: what a text needs differs by target.
 - **proposed** One place for the rule "a `[]const u8`, or a value with
   `text()`". The JSON, pattern, text and collections extensions each have a
@@ -292,7 +292,7 @@ A handler of your own over `std.math` is a few lines.
   standard input" is one `run`.
 - **out** A `refuse`: failing with a given error without a handler of your
   own. `multi-file-log-analyzer` has a one-line handler for it.
-  [Log analyzer](../examples/apps/multi-file-log-analyzer/README.md#what-this-app-needed-from-zrx)
+  [Log analyzer](../examples/multi-file-log-analyzer/README.md#what-this-app-needed-from-zrx)
 - **out** Environment variables, child processes, and a status that is an
   enum.
 - **out** Signals: ending a run on Ctrl-C waits for stopping from outside.
